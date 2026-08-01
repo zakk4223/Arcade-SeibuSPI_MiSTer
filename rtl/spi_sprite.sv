@@ -111,10 +111,20 @@ module spi_sprite
 	wire signed [10:0] spr_y = (sy_raw >= 9'h180) ? {2'b11, sy_raw} : {2'b00, sy_raw};
 
 	// Which vertical vcell of this sprite covers the line being rendered?
+	// During S_START the Y position is still on spr_data; the registered copy
+	// only becomes valid the cycle after, which is fine for the drawing phase.
+	wire  [8:0] sy_now  = spr_data[24:16];
+	wire signed [10:0] spr_y_now = (sy_now >= 9'h180) ? {2'b11, sy_now} : {2'b00, sy_now};
+	wire signed [10:0] dy_now = $signed({2'b00, render_line}) - spr_y_now;
+	wire        y_hit_now = (dy_now >= 0) && (dy_now[10:4] <= {4'd0, attr[14:12]});
+
+	// Only the low 7 bits matter: a sprite is at most 8 tiles tall, and the
+	// hit test above has already established the line falls inside it.
+	/* verilator lint_off UNUSEDSIGNAL */
 	wire signed [10:0] dy    = $signed({2'b00, render_line}) - spr_y;
-	wire         [2:0] vcell  = dy[6:4];
+	/* verilator lint_on UNUSEDSIGNAL */
+	wire         [2:0] vcell = dy[6:4];
 	wire         [3:0] yrow  = dy[3:0];
-	wire               y_hit = (dy >= 0) && (dy[10:4] <= {4'd0, sizey});
 
 	wire [2:0] ay  = flipy ? (sizey - vcell) : vcell;
 	wire [3:0] ry  = flipy ? (4'd15 - yrow)  : yrow;
@@ -178,8 +188,6 @@ module spi_sprite
 	                 S_CLR   = 4'd1,
 	                 S_ATTR  = 4'd2,   // read dword 2n
 	                 S_ATTR2 = 4'd3,
-	                 S_POS   = 4'd4,   // read dword 2n+1
-	                 S_POS2  = 4'd5,
 	                 S_TEST  = 4'd6,
 	                 S_REQ   = 4'd7,   // fetch chunk `chunk`
 	                 S_WAIT  = 4'd8,
@@ -194,7 +202,9 @@ module spi_sprite
 	reg        restart_req;
 	reg [63:0] fetched;
 
-	localparam [11:0] BUDGET = 12'd2600;
+	// A line is 448 * 8 = 3584 cycles. The clear takes 320 and a full scan
+	// 4 * 512 = 2048, so this leaves around 1100 for actual pixel fetches.
+	localparam [11:0] BUDGET = 12'd3200;
 
 	always @(posedge clk) begin
 		lb_we <= 1'b0;
@@ -239,34 +249,29 @@ module spi_sprite
 				else clr <= clr + 9'd1;
 			end
 
+			// Four cycles per sprite, not seven: the two dword reads are
+			// overlapped, and the Y test uses spr_data directly rather than
+			// waiting for sy_raw to settle. At seven cycles a 512-entry scan
+			// consumed the entire 3584-cycle line and never reached a fetch.
 			S_ATTR: begin
 				spr_addr <= {index, 1'b0};
 				state    <= S_ATTR2;
 			end
-			S_ATTR2: begin                    // sprite RAM has 1 cycle latency
-				state <= S_POS;
+			S_ATTR2: begin
+				spr_addr <= {index, 1'b1};    // issue the second read back to back
+				state    <= S_TEST;
 			end
-			S_POS: begin
-				attr     <= spr_data[15:0];
-				code     <= spr_data[31:16];
-				spr_addr <= {index, 1'b1};
-				state    <= S_POS2;
-			end
-			S_POS2: begin                     // dword 2n+1 lands next cycle
-				state <= S_TEST;
+			S_TEST: begin                     // dword 2n is on spr_data now
+				attr  <= spr_data[15:0];
+				code  <= spr_data[31:16];
+				state <= S_START;
 			end
 
-			// Position registers settle here, so the Y test is taken one state
-			// later, in S_START.
-			S_TEST: begin
+			S_START: begin                    // dword 2n+1 is on spr_data now
 				sx_raw <= spr_data[8:0];
 				sy_raw <= spr_data[24:16];
-				state  <= S_START;
-			end
-
-			S_START: begin
 				// MAME skips code 0 (`code % elements == 0`, elements = 0x10000).
-				if (y_hit && code != 16'd0) begin
+				if (y_hit_now && code != 16'd0) begin
 					axc   <= 3'd0;
 					chunk <= 2'd0;
 					state <= S_REQ;
