@@ -331,7 +331,9 @@ module spi_top
 		.dbg_tcode        (),
 		.dbg_gfx_addr     (),
 		.dbg_emit         (),
-		.dbg_busy         ()
+		.dbg_busy         (),
+		.dbg_rowscroll    (),
+		.dbg_xstart       ()
 	);
 
 	// ------------------------------------------------------------------
