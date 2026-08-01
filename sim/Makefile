@@ -47,6 +47,7 @@ obj_dir/Vtb_video_top: tb_video_top.sv tb_video.cpp lint.vlt \
 	$(VERILATOR) $(VFLAGS) -LDFLAGS "-lz" --top-module tb_video_top tb_video_top.sv \
 	    $(RTL)/spi_layers.sv $(RTL)/spi_mixer.sv $(RTL)/spi_dpram.sv \
 	    $(RTL)/spi_video_timing.sv $(RTL)/spi_tile_decrypt.sv \
+	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
 	    $(RTL)/seibu_partial_add.sv tb_video.cpp
 
 obj_dir/Vrom_loader: $(RTL)/rom_loader.sv $(RTL)/spi_defs.vh tb_rom_loader.cpp lint.vlt

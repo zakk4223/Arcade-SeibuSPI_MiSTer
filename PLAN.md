@@ -804,13 +804,28 @@ Of those, only the first would ever have produced an obvious symptom.
             refers to the pixel being displayed, but the pixel being
             composited is two ahead, so it blacked out column 0 of every line.
             The video path already blanks with HBlank/VBlank.
-      - [~] **Frame 18.2% wrong, and that residual is the missing sprites.**
-            Every tile-path component is now verified against MAME
-            individually, error columns are uniform at ~25/240 across the
-            whole width, and 64% of the mismatching pixels land exactly on a
-            sprite palette pen (the rest are consistent with MAME's
-            alpha-blended sprite pixels, which produce colours that are in no
-            palette entry at all).
+      - [x] `spi_sprite.sv` written and wired. It also turned up a real
+            address bug: **the sprite DMA trigger is at 0x50E, not 0x562**.
+            `sxx2e_map` calls `sei252_map` (0x50E); 0x562 is `rise_map`, used
+            by rdft2/rfjet. Both are now decoded. MAME went from reporting 1
+            sprite DMA per 900 frames to 894.
+      - [~] **Frame 18.2% wrong, and it is the FORE layer, not sprites.**
+            An earlier guess that the residual was unrendered sprites was
+            wrong: at the captured frame the sprite list is entirely zero, so
+            MAME draws no sprites either. The "64% of mismatches match a
+            sprite pen" figure was coincidence -- palette colours repeat.
+
+            Measured per row: back, midl and text are **300/300** on every row
+            probed (60, 104, 112, 200) and the mixer is **0/298**. The fore
+            layer is **233-262/300**, and its offset profile peaks cleanly at
+            **-1** (299/300 at row 112). So fore is shifted by exactly one
+            pixel relative to the other layers, which share its scroll values
+            (0,0) and match at offset 0. Ruled out: tilemap base, the d13 and
+            0x4000 code bits, midl scroll contamination, rowscroll (0 on the
+            rows probed), and a vertical shift. The tile codes and gfx
+            addresses the RTL fetches match the reference exactly, so this is
+            a horizontal phase error in the fore path specifically -- most
+            likely in `emit_x` / `fine_x` when that layer is set up.
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's

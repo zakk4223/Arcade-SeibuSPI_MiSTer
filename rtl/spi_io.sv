@@ -121,8 +121,13 @@ module spi_io
 				11'h498: ;                                   // dma address high, always 0
 
 				// ---- sprite chip ---------------------------------------
+				// The trigger address depends on which sprite chip is fitted:
+				// SEI252 (sei252_map) uses 0x50E, RISE10/11 (rise_map) 0x562.
+				// rdfts is SEI252 -- sxx2e_map calls sei252_map -- but both are
+				// decoded so the RISE sets can share this file later.
+				11'h50C: if (be_hi) dma_sprite <= 1'b1;      // 0x50E, SEI252
 				11'h54C: ;                                   // RISE10/11 decrypt key, ignored
-				11'h560: if (be_hi) dma_sprite <= 1'b1;      // 0x562, 16-bit write
+				11'h560: if (be_hi) dma_sprite <= 1'b1;      // 0x562, RISE10/11
 
 				// ---- sound / misc --------------------------------------
 				11'h680: if (be[0]) begin

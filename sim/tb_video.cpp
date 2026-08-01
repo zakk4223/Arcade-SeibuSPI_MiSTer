@@ -140,7 +140,20 @@ int main(int argc, char **argv)
     uint64_t sdr_data  = 0;
 
     long long sdr_count = 0;
+    int      spr_delay = -1;
+    uint8_t  spr_req_d  = 0;
+    uint64_t spr_data64 = 0;
+
     auto tick = [&]() {
+        if (dut->spr_sdr_req != spr_req_d) { spr_req_d = dut->spr_sdr_req; spr_delay = 4; }
+        if (spr_delay > 0 && --spr_delay == 0) {
+            uint64_t a = (uint64_t)dut->spr_sdr_addr & ~7ull;
+            spr_data64 = 0;
+            for (int i = 0; i < 8; i++)
+                if (a + i < sdram.size()) spr_data64 |= (uint64_t)sdram[a + i] << (8 * i);
+            dut->spr_sdr_ack = spr_req_d;
+        }
+        dut->spr_sdr_dout = spr_data64;
         if (dut->sdr_req != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_delay = 4; sdr_count++; }
         if (sdr_delay > 0 && --sdr_delay == 0) {
             uint64_t a = (uint64_t)dut->sdr_addr & ~7ull;
@@ -156,7 +169,7 @@ int main(int argc, char **argv)
 
     // ---- reset and preload -------------------------------------------------
     dut->reset = 1;
-    dut->pre_tm_we = dut->pre_pal_we = 0;
+    dut->pre_tm_we = dut->pre_pal_we = dut->pre_spr_we = 0;
     for (int i = 0; i < 16; i++) tick();
 
     for (int i = 0; i < 4096; i++) {
@@ -175,6 +188,17 @@ int main(int argc, char **argv)
         tick();
     }
     dut->pre_pal_we = 0;
+
+    {
+        auto spr = load(cap + "/sprite_ram.bin", 0x1000);
+        for (int i = 0; i < 1024; i++) {
+            dut->pre_spr_addr = i;
+            dut->pre_spr_data = spr[i*4] | (spr[i*4+1] << 8) | (spr[i*4+2] << 16) | ((uint32_t)spr[i*4+3] << 24);
+            dut->pre_spr_we   = 1;
+            tick();
+        }
+        dut->pre_spr_we = 0;
+    }
 
     dut->reset = 0;
     for (int i = 0; i < 16; i++) tick();
@@ -267,7 +291,7 @@ int main(int argc, char **argv)
     long long guard = 0;
     int prev_v = -1;
 
-    const int PROBE_Y = 60;
+    const int PROBE_Y = 112;
     std::vector<uint16_t> lb_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_text_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_fore_seen(512, 0xFFFF);
@@ -275,6 +299,7 @@ int main(int argc, char **argv)
     std::vector<std::pair<uint32_t,uint32_t>> fore_codes;
     std::vector<uint32_t> rtl_rgb(512, 0);
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
+    long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
 
     while (frame < 3) {
@@ -282,6 +307,12 @@ int main(int argc, char **argv)
         if (++guard > 40000000LL) { printf("FAIL: timeout\n"); return 1; }
 
         // Record the back-layer line buffer across one scanline of frame 2.
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1) {
+            if (dut->dbg_spr_we) spr_writes++;
+            spr_state_hist[dut->dbg_spr_state]++;
+            if (dut->dbg_spr_index < spr_min_index) spr_min_index = dut->dbg_spr_index;
+        }
+
         // How long does the renderer take per line, and does it finish?
         if (frame == 2 && dut->vcnt == PROBE_Y - 1) {
             line_cycles++;
@@ -405,6 +436,10 @@ int main(int argc, char **argv)
                 for (int x = 0; x < 300; x++) if (lb_fore_seen[x] == w2[x]) m++;
                 printf("fore (no rowscroll) at offset 0: %zu/300\n", m);
             }
+            printf("  sprite: %ld pixel writes, min index %d, state hist:",
+                   spr_writes, spr_min_index);
+            for (int i = 0; i < 13; i++) if (spr_state_hist[i]) printf(" s%d:%ld", i, spr_state_hist[i]);
+            printf("\n");
             printf("  line budget: %ld cycles available, renderer busy %ld, "
                    "max layer reached %d, finished=%s\n",
                    line_cycles, busy_cycles, max_layer, finished ? "yes" : "NO");

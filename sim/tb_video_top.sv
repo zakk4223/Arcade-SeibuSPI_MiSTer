@@ -24,6 +24,9 @@ module tb_video_top
 	input      [11:0] pre_tm_addr,
 	input      [31:0] pre_tm_data,
 	input             pre_tm_we,
+	input       [9:0] pre_spr_addr,
+	input      [31:0] pre_spr_data,
+	input             pre_spr_we,
 	input      [11:0] pre_pal_addr,
 	input      [29:0] pre_pal_data,
 	input             pre_pal_we,
@@ -33,6 +36,12 @@ module tb_video_top
 	input      [63:0] sdr_dout,
 	output            sdr_req,
 	input             sdr_ack,
+
+	// SDRAM sprite channel
+	output     [24:0] spr_sdr_addr,
+	input      [63:0] spr_sdr_dout,
+	output            spr_sdr_req,
+	input             spr_sdr_ack,
 
 	// Video out
 	output            ce_pix,
@@ -54,7 +63,10 @@ module tb_video_top
 	output     [14:0] dbg_tcode,
 	output     [24:0] dbg_gfx_addr,
 	output            dbg_emit,
-	output            dbg_busy
+	output            dbg_busy,
+	output            dbg_spr_we,
+	output      [3:0] dbg_spr_state,
+	output      [8:0] dbg_spr_index
 );
 
 	wire hsync, vsync, line_start, vbl_rise;
@@ -114,13 +126,36 @@ module tb_video_top
 		.dbg_gfx_addr(dbg_gfx_addr), .dbg_emit(dbg_emit), .dbg_busy(dbg_busy)
 	);
 
+	wire  [9:0] spr_ra;
+	wire [31:0] spr_rd;
+	wire [14:0] lb_spr;
+	wire        spr_busy;
+
+	spi_dpram #(.DW(32), .AW(10)) sprite_ram
+		(.wr_clk(clk), .rd_clk(clk),
+		 .wr_addr(pre_spr_addr), .wr_data(pre_spr_data), .wr_en(pre_spr_we),
+		 .rd_addr(spr_ra), .rd_data(spr_rd));
+
+	spi_sprite sprites
+	(
+		.clk(clk), .reset(reset),
+		.vcnt(vcnt), .line_start(line_start),
+		.enable(~layer_enable[4]),
+		.spr_addr(spr_ra), .spr_data(spr_rd),
+		.sdr_addr(spr_sdr_addr), .sdr_dout(spr_sdr_dout),
+		.sdr_req(spr_sdr_req), .sdr_ack(spr_sdr_ack),
+		.lb_x(lb_x), .lb_wrap(lb_wrap), .lb_out(lb_spr),
+		.busy(spr_busy),
+		.dbg_we(dbg_spr_we), .dbg_state(dbg_spr_state), .dbg_index(dbg_spr_index)
+	);
+
 	spi_mixer mixer
 	(
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
 		.layer_enable(layer_enable),
 		.lb_back(lb_back), .lb_midl(lb_midl),
 		.lb_fore(lb_fore), .lb_text(lb_text),
-		.lb_spr(15'd0),
+		.lb_spr(lb_spr),
 		.pal_addr(pal_ra), .pal_data(pal_rd),
 		.red(red), .green(green), .blue(blue)
 	);
@@ -130,6 +165,6 @@ module tb_video_top
 	assign dbg_fore = lb_fore;
 	assign dbg_text = lb_text;
 
-	wire _unused = &{1'b0, hsync, vsync, vbl_rise, lb_bank, layers_busy};
+	wire _unused = &{1'b0, hsync, vsync, vbl_rise, lb_bank, layers_busy, spr_busy};
 
 endmodule

@@ -101,7 +101,8 @@ slop_tap = space:install_write_tap(0x400, 0x7ff, "spi_video_io", function(offset
         if shadow then
             cap.palette = shadow_grab(reg.dma_src, (reg.dma_len + 1) * 2)
         end
-    elseif dw == 0x560 and (mask & 0xFFFF0000) ~= 0 then
+    elseif (dw == 0x50C or dw == 0x560) and (mask & 0xFFFF0000) ~= 0 then
+        -- SEI252 boards trigger the sprite DMA at 0x50E, RISE10/11 at 0x562.
         counts.sprite = counts.sprite + 1
         reg.spr_src = reg.dma_src
         if shadow then cap.sprite = shadow_grab(reg.dma_src, 0x1000) end
