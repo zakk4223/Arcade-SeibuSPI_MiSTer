@@ -97,7 +97,9 @@ module spi_layers
 	output            dbg_latch,
 	output      [3:0] dbg_finex,
 	output      [5:0] dbg_col,
-	output signed [10:0] dbg_emitx
+	output signed [10:0] dbg_emitx,
+	output      [5:0] dbg_pix,
+	output      [3:0] dbg_emiti
 );
 
 `include "spi_defs.vh"
@@ -372,6 +374,8 @@ module spi_layers
 	assign dbg_finex     = fine_x;
 	assign dbg_col       = col;
 	assign dbg_emitx     = emit_x;
+	assign dbg_pix       = emit_pix;
+	assign dbg_emiti     = emit_i;
 
 	// ------------------------------------------------------------------
 	// Sequencer

@@ -809,52 +809,27 @@ Of those, only the first would ever have produced an obvious symptom.
             `sxx2e_map` calls `sei252_map` (0x50E); 0x562 is `rise_map`, used
             by rdft2/rfjet. Both are now decoded. MAME went from reporting 1
             sprite DMA per 900 frames to 894.
-      - [~] **Frame 18.2% wrong, and it is the FORE layer, not sprites.**
-            An earlier guess that the residual was unrendered sprites was
-            wrong: at the captured frame the sprite list is entirely zero, so
-            MAME draws no sprites either. The "64% of mismatches match a
-            sprite pen" figure was coincidence -- palette colours repeat.
+      - [x] **The fore layer is correct.** Dumping the per-emit record
+            (screen x, emit_i, tile code, pixel) shows the RTL matching the
+            reference at every position. The apparent one-pixel offset was in
+            the *probe*: line buffer readback is one ahead, and that only
+            showed on fore because back/midl/text are uniform on the rows
+            probed, so any shift matched them.
+      - [~] **Frame 18.2% wrong, and it IS the sprites.** Proven properly this
+            time: for a mismatching pixel, every palette entry producing
+            MAME's colour is below pen 4096, and pens below 4096 are sprite
+            pens -- no tile-layer pen in the palette yields it. The earlier
+            "64% match a sprite pen" was a weak coincidence argument and the
+            subsequent claim that sprites were NOT involved was wrong; both
+            are superseded by this.
 
-            Measured per row: back, midl and text are **300/300** on every row
-            probed (60, 104, 112, 200) and the mixer is **0/298**. The fore
-            layer is **233-262/300**, and its offset profile peaks cleanly at
-            **-1** (299/300 at row 112). So fore is shifted by exactly one
-            pixel relative to the other layers, which share its scroll values
-            (0,0) and match at offset 0. Ruled out: tilemap base, the d13 and
-            0x4000 code bits, midl scroll contamination, rowscroll (0 on the
-            rows probed), and a vertical shift. The tile codes and gfx
-            addresses the RTL fetches match the reference exactly, so this is
-            a horizontal phase error in the fore path specifically.
-
-            **Narrowed to an exact signature:** the reference reproduces the
-            RTL's fore output **300/300** if `scroll_fx` is increased by 1.
-            So the RTL renders fore as though its X scroll were one larger.
-            MAME's frame agrees with the reference at `sx = 0`, so the RTL is
-            the one that is wrong, not the capture.
-
-            What that rules out: the tile codes and gfx addresses match
-            exactly (a fine_x of 1 shifts pixels without changing which tile
-            is fetched, since `x_start >> 4` is still 0), and taps on the
-            RTL's own `rowscroll` and `x_start` read 0 for the fore layer,
-            the same as back.
-
-            **The "stale `layer` at the emit_x latch" theory is disproved.**
-            Tapping the emitted X range per layer shows back and fore writing
-            to *identical* positions: `emit_x` 0..335 over 336 cycles for
-            both (midl, which really is scrolled, gives -8..327 as expected).
-            So `emit_x`, `fine_x` and `col` are all correct for fore.
-
-            That relocates the fault. The pixels land in the right places but
-            carry data one pixel index off within the tile: at screen
-            `c*16 + i` the fore layer shows tile `c` pixel `i+1`. Since the
-            tile codes, gfx addresses and write positions all match, the
-            remaining suspects are the per-tile data path -- `row_bytes`
-            selection, `group()`, `emit_grp`/`emit_sub`, or `dec_out` -- and
-            specifically why any of those would behave differently for fore
-            when back and midl share the code. One concrete thing to check:
-            whether the two SDRAM reads (S_GA / S_GB) can be serviced out of
-            order or one stale for this layer, since a shifted `win` would
-            move pixels without touching addresses.
+            **The blocker is the capture, not the engine.** Both MAME's
+            `:sprite_ram` share and the trigger-time DMA source read as all
+            zeros, yet MAME plainly draws sprites from that data, so the
+            capture is faulty. Until it is fixed `spi_sprite` has nothing to
+            draw and cannot be validated. Suspects: the sprite DMA may use a
+            source register other than 0x494, or writes to 0x50E may not be
+            the only trigger.
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's

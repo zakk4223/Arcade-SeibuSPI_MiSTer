@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <array>
 #include "spi_ref.h"
 
 static const int W = 320, H = 240;
@@ -302,6 +303,7 @@ int main(int argc, char **argv)
     int latch_fx[4][3] = {}, latch_col[4][3] = {}, latch_n[4] = {};
     int emit_lo[4] = {9999,9999,9999,9999}, emit_hi[4] = {-9999,-9999,-9999,-9999};
     long emit_cnt[4] = {};
+    std::vector<std::array<int,4>> fore_emits;
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
@@ -323,6 +325,15 @@ int main(int argc, char **argv)
             if (dut->dbg_busy) busy_cycles++;
             if (!dut->dbg_busy && busy_cycles) finished = true;
             if (dut->dbg_layer > max_layer) max_layer = dut->dbg_layer;
+        }
+
+        // Exact per-emit record for the fore layer: which tile, which pixel
+        // index within it, and which screen x it lands on.
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1 && dut->dbg_emit
+            && dut->dbg_layer == 2 && fore_emits.size() < 34) {
+            int ex = (int)dut->dbg_emitx; if (ex > 1023) ex -= 2048;
+            fore_emits.push_back({ex, (int)dut->dbg_emiti,
+                                  (int)dut->dbg_tcode, (int)dut->dbg_pix});
         }
 
         // Range of screen x each layer actually emits to.
@@ -478,6 +489,25 @@ int main(int argc, char **argv)
                    "max layer reached %d, finished=%s\n",
                    line_cycles, busy_cycles, max_layer, finished ? "yes" : "NO");
 
+            {   // Per-tile mapping: RTL emit vs reference pixel at that screen x
+                std::vector<uint16_t> wf0;
+                uint32_t cor = 0x4000 | (regs["fore_d13"].at(0) ? 0x2000u : 0u);
+                tile_line(PROBE_Y, dut->rowscroll_enable ? 0x400 : 0x200, 0xA00,
+                          dut->rowscroll_enable != 0,
+                          regs["scroll_fore"].at(0) & 511,
+                          regs["scroll_fore"].at(1) & 511, cor, wf0);
+                printf("  fore per-emit (x, emit_i, code, rtl_pix | ref_pix@x ref_pix@x+1):\n   ");
+                for (size_t i = 0; i < fore_emits.size() && i < 20; i++) {
+                    auto &e = fore_emits[i];
+                    int rx = e[0];
+                    int r0 = (rx >= 0 && rx < 320) ? (wf0[rx] & 63) : -1;
+                    int r1 = (rx+1 >= 0 && rx+1 < 320) ? (wf0[rx+1] & 63) : -1;
+                    printf("(%d,i%d,%04X,%02X|%02X,%02X) ", e[0], e[1], e[2], e[3], r0, r1);
+                    if ((i % 5) == 4) printf("\n   ");
+                }
+                printf("\n");
+            }
+
             {   // What codes does the RTL fetch, versus what the reference expects?
                 printf("  rtl fore codes :");
                 for (size_t i = 0; i < fore_codes.size() && i < 8; i++)
@@ -625,6 +655,21 @@ int main(int argc, char **argv)
         printf("MIXER-ONLY check line %d: %zu/298 pixels differ", PROBE_Y, bad);
         if (bad) printf(", first at x=%d (rtl %06X want %06X)", firstx, rtl_rgb[firstx], 0u);
         printf("\n");
+    }
+
+    {   // First mismatches on the probe row, with the layer data behind them.
+        printf("  first mismatches on row %d (layer values use the +1 readback offset):\n", PROBE_Y);
+        int shown = 0;
+        for (int x = 2; x < W && shown < 6; x++) {
+            size_t i = (size_t)PROBE_Y*W + x;
+            if (got[i] == want[i]) continue;
+            int j = x - 1;                        // readback offset
+            printf("    x=%3d got=%06X want=%06X  b=%03X m=%03X f=%03X t=%03X\n",
+                   x, got[i], want[i],
+                   j >= 0 ? lb_seen[j] : 0, j >= 0 ? lb_midl_seen[j] : 0,
+                   j >= 0 ? lb_fore_seen[j] : 0, j >= 0 ? lb_text_seen[j] : 0);
+            shown++;
+        }
     }
 
     {   // Are the mismatches simply the sprites we do not draw yet? Sprite pens

@@ -337,7 +337,9 @@ module spi_top
 		.dbg_latch        (),
 		.dbg_finex        (),
 		.dbg_col          (),
-		.dbg_emitx        ()
+		.dbg_emitx        (),
+		.dbg_pix          (),
+		.dbg_emiti        ()
 	);
 
 	// ------------------------------------------------------------------
