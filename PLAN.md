@@ -599,8 +599,17 @@ sim/                      Verilator testbenches for the decrypt units
 2. **Sprite bandwidth.** 3 SDRAM reads per 16-pixel sprite row; worst case 512
    sprites. Needs a per-line sprite list pre-pass in hblank and a hard per-line
    fetch budget. Measure in sim before trusting it.
-3. **SDRAM at 114.5 MHz** with CAS3 — above the usual 100 MHz for this controller.
-   Fallback: drop to 95.45 MHz (28.63636 × 10/3) and re-check bandwidth.
+3. **SDRAM at 114.5 MHz** with CAS3 — above the usual 100 MHz for this
+   controller, and now the tightest domain in the design. Setup slack on
+   `clk_ram` fell to **+0.106 ns** when the tile layers landed, from +1.415 ns
+   before. The sprite engine shares that channel arbitration and will very
+   likely push it negative.
+
+   Levers, in order: retime the `spi_layers` SDRAM request path (it drives
+   `sdr_addr` straight out of a wide combinational address calculation —
+   `gfx_base` is four adds deep), then drop `clk_ram` to 95.45 MHz
+   (28.63636 × 10/3) and re-check bandwidth. **Re-run STA after adding the
+   sprite engine; do not assume it still fits.**
 4. **z386 accuracy/speed** vs a real 386DX-25 (see §6). Currently the core runs
    at the full 57.27 MHz `clk_sys`, which is 2.3x a 386DX-25 before counting
    z386x's caches and fast paths. Gameplay speed is locked to the 54 Hz vblank
@@ -731,10 +740,21 @@ Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
       - [ ] **`spi_sprite.sv` — not started.** The mixer's sprite input is tied
             invalid, so it currently composites the four tile layers alone.
             The decrypt unit it needs is already done and verified (T2).
-      - [ ] Not yet verified against MAME frame output; only lint + synthesis
-            so far. The most likely first bugs are the mixer's one-pixel
-            pipeline offset (`lb_x` vs the mixer's 8-cycle palette sequence)
-            and the line-buffer bank phasing.
+      - [ ] **Never rendered a frame.** Lint + synthesis only; nothing is
+            verified against MAME output. Most likely first bugs: the mixer's
+            one-pixel offset (`lb_x` vs its 8-cycle palette sequence) and
+            line-buffer bank phasing. Both would show as a shifted or torn
+            image rather than a blank one.
+
+      Build state with the tile layers in: 0 errors, 0 negative slack,
+      67% ALMs, 77% RAM blocks, 3,265,253 block memory bits.
+
+      **Next step should be a frame-level testbench, not the sprite engine.**
+      Both bugs found while writing T4 (the RAM read off-by-one and the RGB
+      multi-driver) produced silently wrong data rather than a build failure,
+      and the same class of bug in the render path is invisible without
+      comparing actual pixels. Drive the Verilator model with a captured
+      tilemap/palette RAM dump from MAME and diff the line buffers.
 - [ ] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
 - [ ] **T6** MRA, docs, build verification.
 
