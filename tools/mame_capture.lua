@@ -38,6 +38,7 @@ local reg = {
 }
 local counts = { tilemap = 0, palette = 0, sprite = 0 }
 local frames = 0
+local captured_ok = false
 
 -- Main RAM shadow.
 --
@@ -155,6 +156,21 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
     end
 
     if frames ~= TARGET then return end
+
+    -- KNOWN DEFECT: this capture is racy.
+    --
+    -- The frame notifier fires after MAME has drawn the frame AND after the
+    -- game's vblank handler has already updated the video RAMs for the next
+    -- one. So the bitmap and the RAM snapshot can come from either side of
+    -- that update. Frame 900 happens to align (tile path reproduces it
+    -- exactly); frame 901 does not (99.96% of pixels differ), and its sprite
+    -- list is non-empty while 900's is momentarily clear -- which is why
+    -- sprites cannot be validated from a frame-900 capture.
+    --
+    -- The fix is to sample both at the same point in the emulated frame,
+    -- immediately after screen_update and before the vblank handler runs,
+    -- rather than at the frame boundary. Until then TARGET must stay on a
+    -- frame known to align.
 
     if counts.tilemap == 0 then
         print("SLOP: no tilemap DMA seen by frame " .. TARGET)
