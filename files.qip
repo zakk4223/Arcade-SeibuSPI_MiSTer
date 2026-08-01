@@ -1,0 +1,10 @@
+set_global_assignment -name SDC_FILE SeibuSPI.sdc
+
+set_global_assignment -name SYSTEMVERILOG_FILE SeibuSPI.sv
+
+set_global_assignment -name QIP_FILE rtl/pll.qip
+
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_top.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_video_timing.sv

@@ -557,9 +557,12 @@ sim/                      Verilator testbenches for the decrypt units
    (MAME's own TODO). Ours will be equally approximate.
 7. **DS2404** — the game reads it; a stub returning 0 may or may not satisfy the
    boot checks. `spi_ds2404_unknown_r` returning 0x00 is what MAME does.
-8. **No Quartus installed** in this environment — synthesis/timing cannot be
-   verified here. Verilator (5.050) is available and will be used for lint and
-   unit tests. Build verification must happen on the user's machine.
+8. **Toolchain.** Quartus Prime 17.0.0 Lite at `~/intelFPGA_lite/17.0/quartus`
+   (`bin/quartus_sh`), target part `5CSEBA6U23I7` confirmed present. Note this is
+   *Lite*, whereas MiSTer officially builds with 17.0.x **Standard** — watch for IP
+   or fitter differences, and treat resource/timing numbers as indicative until
+   confirmed on a Standard install. Verilator 5.050 is also available for lint and
+   decrypt-unit unit tests.
 
 ---
 

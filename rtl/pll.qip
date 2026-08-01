@@ -1,0 +1,5 @@
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) "pll.v"]
+
+set_instance_assignment -name PLL_COMPENSATION_MODE DIRECT   -to "*altera_pll:altera_pll_i*|*"
+set_instance_assignment -name PLL_AUTO_RESET        ON       -to "*altera_pll:altera_pll_i*|*"
+set_instance_assignment -name PLL_BANDWIDTH_PRESET  AUTO     -to "*altera_pll:altera_pll_i*|*"
