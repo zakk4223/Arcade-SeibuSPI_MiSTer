@@ -7,6 +7,8 @@ VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 
 
 .PHONY: all clean lint run-rom_loader run-tile_decrypt run-spr_decrypt
 
+CAP ?= /tmp/claude-1000/-home-zakk-proj-SlopperPI/efc84222-a8fe-4ba8-9ca2-3a1f50422bb8/scratchpad/cap
+
 all: run-rom_loader run-tile_decrypt run-spr_decrypt
 
 # Reference implementation copied verbatim out of MAME.
@@ -25,6 +27,13 @@ run-tile_decrypt: obj_dir/Vspi_tile_decrypt
 
 run-spr_decrypt: obj_dir/Vspi_spr_decrypt
 	@./obj_dir/Vspi_spr_decrypt
+
+# Golden-reference tests. Need a capture from tools/mame_capture.lua in $(CAP).
+run-dma: obj_dir/Vspi_dma
+	@./obj_dir/Vspi_dma $(CAP)
+
+obj_dir/Vspi_dma: $(RTL)/spi_dma.sv tb_dma.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_dma $(RTL)/spi_dma.sv tb_dma.cpp
 
 obj_dir/Vrom_loader: $(RTL)/rom_loader.sv $(RTL)/spi_defs.vh tb_rom_loader.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module rom_loader $(RTL)/rom_loader.sv tb_rom_loader.cpp

@@ -116,8 +116,11 @@ module spi_dma
 		endcase
 	endfunction
 
-	function automatic [10:0] seg_len(input [2:0] s);
-		seg_len = (s == SEG_TEXT) ? 11'd1024 : 11'd512;
+	// 12 bits, not 11: the palette transfer is 3072 dwords, which does not fit
+	// in 11. It previously wrapped to 1024 and silently left two thirds of the
+	// palette unwritten.
+	function automatic [11:0] seg_len(input [2:0] s);
+		seg_len = (s == SEG_TEXT) ? 12'd1024 : 12'd512;
 	endfunction
 
 	// Rowscroll segments are absent entirely when rowscroll is off -- the source
@@ -135,7 +138,7 @@ module spi_dma
 
 	wire [2:0]  nseg  = seg_next(seg, rowscroll_enable);
 	wire [11:0] nbase = seg_base(nseg, fore_off, midl_off, text_off);
-	wire [10:0] nlen  = seg_len(nseg);
+	wire [11:0] nlen  = seg_len(nseg);
 
 	// ------------------------------------------------------------------
 	// Engine
@@ -146,7 +149,7 @@ module spi_dma
 	localparam [1:0] M_IDLE = 2'd0, M_TILEMAP = 2'd1, M_PALETTE = 2'd2, M_SPRITE = 2'd3;
 
 	reg [1:0]  mode;
-	reg [10:0] cnt;         // dwords left in the current segment
+	reg [11:0] cnt;         // dwords left in the current segment
 	reg [11:0] dest;        // running destination index
 
 	reg        rd_valid;    // a read was issued last cycle
@@ -162,9 +165,9 @@ module spi_dma
 	reg [1:0] pend_mode;
 	assign ram_req = busy || start_pending;
 
-	// Palette: (len+1)*2 bytes => (len+1)/2 source dwords. The palette is 6144
-	// pens = 3072 dwords, so 11 bits covers every legal transfer.
-	wire [10:0] pal_dwords = 11'((dma_len + 16'd1) >> 1);
+	// Palette: (len+1)*2 bytes => (len+1)/2 source dwords. 6144 pens = 3072
+	// dwords, which needs 12 bits.
+	wire [11:0] pal_dwords = 12'((dma_len + 16'd1) >> 1);
 
 	always @(posedge clk) begin
 		tm_we  <= 1'b0;
@@ -217,7 +220,7 @@ module spi_dma
 					case (pend_mode)
 						M_TILEMAP: begin seg <= SEG_BACK; cnt <= seg_len(SEG_BACK); end
 						M_PALETTE: cnt <= pal_dwords;
-						default:   cnt <= 11'd1024;
+						default:   cnt <= 12'd1024;
 					endcase
 				end
 			end
@@ -229,9 +232,9 @@ module spi_dma
 
 				ram_addr <= ram_addr + 16'd1;
 				dest     <= dest + 12'd1;
-				cnt      <= cnt - 11'd1;
+				cnt      <= cnt - 12'd1;
 
-				if (cnt == 11'd1) begin
+				if (cnt == 12'd1) begin
 					if (mode == M_TILEMAP && seg != SEG_TEXT) begin
 						seg  <= nseg;
 						dest <= nbase;
