@@ -333,7 +333,11 @@ module spi_top
 		.dbg_emit         (),
 		.dbg_busy         (),
 		.dbg_rowscroll    (),
-		.dbg_xstart       ()
+		.dbg_xstart       (),
+		.dbg_latch        (),
+		.dbg_finex        (),
+		.dbg_col          (),
+		.dbg_emitx        ()
 	);
 
 	// ------------------------------------------------------------------

@@ -299,6 +299,9 @@ int main(int argc, char **argv)
     std::vector<std::pair<uint32_t,uint32_t>> fore_codes;
     std::vector<uint32_t> rtl_rgb(512, 0);
     std::pair<int,int> seen_rs[4] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
+    int latch_fx[4][3] = {}, latch_col[4][3] = {}, latch_n[4] = {};
+    int emit_lo[4] = {9999,9999,9999,9999}, emit_hi[4] = {-9999,-9999,-9999,-9999};
+    long emit_cnt[4] = {};
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
@@ -320,6 +323,26 @@ int main(int argc, char **argv)
             if (dut->dbg_busy) busy_cycles++;
             if (!dut->dbg_busy && busy_cycles) finished = true;
             if (dut->dbg_layer > max_layer) max_layer = dut->dbg_layer;
+        }
+
+        // Range of screen x each layer actually emits to.
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1 && dut->dbg_emit) {
+            int L = dut->dbg_layer;
+            int ex = (int)dut->dbg_emitx;
+            if (ex > 1023) ex -= 2048;          // sign extend 11 bits
+            if (ex < emit_lo[L]) emit_lo[L] = ex;
+            if (ex > emit_hi[L]) emit_hi[L] = ex;
+            emit_cnt[L]++;
+        }
+
+        // Sample fine_x / col at the exact cycle emit_x is latched.
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1 && dut->dbg_latch) {
+            int L = dut->dbg_layer;
+            if (latch_n[L] < 3) {
+                latch_fx[L][latch_n[L]] = dut->dbg_finex;
+                latch_col[L][latch_n[L]] = dut->dbg_col;
+                latch_n[L]++;
+            }
         }
 
         // What rowscroll / x_start does each layer actually use?
@@ -441,9 +464,12 @@ int main(int argc, char **argv)
                 for (int x = 0; x < 300; x++) if (lb_fore_seen[x] == w2[x]) m++;
                 printf("fore (no rowscroll) at offset 0: %zu/300\n", m);
             }
-            for (int L = 0; L < 4; L++)
-                printf("  layer %d: rowscroll=%d x_start=%d\n", L,
+            for (int L = 0; L < 4; L++) {
+                printf("  layer %d: rowscroll=%d x_start=%d  at emit_x latch:", L,
                        (int16_t)seen_rs[L].first, seen_rs[L].second);
+                printf(" emit_x %d..%d over %ld cycles", emit_lo[L], emit_hi[L], emit_cnt[L]);
+                printf("\n");
+            }
             printf("  sprite: %ld pixel writes, min index %d, state hist:",
                    spr_writes, spr_min_index);
             for (int i = 0; i < 13; i++) if (spr_state_hist[i]) printf(" s%d:%ld", i, spr_state_hist[i]);

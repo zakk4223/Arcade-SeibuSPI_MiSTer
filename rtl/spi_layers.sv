@@ -92,7 +92,12 @@ module spi_layers
 	output            dbg_emit,
 	output            dbg_busy,
 	output     [15:0] dbg_rowscroll,
-	output      [8:0] dbg_xstart
+	output      [8:0] dbg_xstart,
+	// Sampled at the exact cycle emit_x is latched in S_GB_WT.
+	output            dbg_latch,
+	output      [3:0] dbg_finex,
+	output      [5:0] dbg_col,
+	output signed [10:0] dbg_emitx
 );
 
 `include "spi_defs.vh"
@@ -363,6 +368,10 @@ module spi_layers
 	assign dbg_busy     = busy;
 	assign dbg_rowscroll = rowscroll;
 	assign dbg_xstart    = x_start;
+	assign dbg_latch     = (state == S_GB_WT) && (sdr_ack == sdr_req);
+	assign dbg_finex     = fine_x;
+	assign dbg_col       = col;
+	assign dbg_emitx     = emit_x;
 
 	// ------------------------------------------------------------------
 	// Sequencer
