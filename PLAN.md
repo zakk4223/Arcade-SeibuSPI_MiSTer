@@ -488,19 +488,37 @@ intr nmi inta  snoop_addr snoop_valid  a20_enable  single_step  triple_fault_res
 ```
 Parameters: `PROTECT_UMA_ROM`, `DCACHE_SET_BITS`, `ICACHE_SET_BITS`.
 
-**Critical issue — cache coherency with memory-mapped I/O.** The SPI I/O registers
-live at 0x400–0x6FF, *inside* the main RAM address space, and there is no PIC or
-MMU marking them uncacheable. The z386 L1 dcache would cache input port reads.
-Options, in order of preference:
-1. Add a parameterised uncacheable address window to `l1_cache.sv` (bypass on
-   `addr < 0x800`). Small, surgical change; keep it as a patch file in `patches/`.
-2. Use `snoop_addr`/`snoop_valid` to invalidate on every I/O access — works but
-   wasteful and racy for reads.
-3. Set `DCACHE_SET_BITS` to 0 — not supported.
+**Cache coherency with memory-mapped I/O.** The SPI I/O registers live at
+0x400–0x6FF, *inside* the main RAM address space, with no PIC or MMU to mark them
+uncacheable. Findings after reading `l1_cache.sv` / `l1_icache.sv`:
 
-Go with (1). Also verify `PROTECT_UMA_ROM=0` here (no UMA on this board) and that
-the 0xFFE00000 ROM mirror is handled by our address decoder, not the z386's
-BIOS-mirror hack in `z386_MiSTer/src/system.sv` (that is SoC glue, not CPU).
+1. *The dcache is **write-through*** with a 3-entry in-order store queue
+   (`l1_cache.sv:108`). So the video DMA engines reading main RAM cannot see
+   stale data: the DMA-trigger write to 0x480 / 0x484 / 0x562 goes through the
+   same queue behind the data writes it is meant to publish. Ordering is free.
+   No flush, no snoop, no dual-port coherency scheme needed.
+
+2. *An uncacheable path already exists*, but hardcoded to the PC VGA aperture:
+   ```
+   wire cpu_uncacheable = !cache_enable || (cpu_addr[31:17] == 15'h5);  // A0000-BFFFF
+   ```
+   The patch is therefore small: parameterise it as a mask/base compare, default
+   it to the existing PC window, and instantiate with mask `0xFFFFF800` / base
+   `0x00000000` so 0x0–0x7FF is uncacheable. Plumb the two parameters through
+   `z386.sv`. Keep the diff in `patches/`.
+
+3. *Self-modifying code works.* The icache snoops the dcache's own store stream
+   (`z386.sv:678` `icache_write_snoop`) and patches the cached data, so code
+   copied into RAM and executed is coherent without any help from us.
+
+4. *Cache tags only cover addr[24:0]* (`TAG_MSB = 24`, a 32 MB window). Two CPU
+   addresses differing only above bit 24 share a cache line. Our PRG ROM at
+   0x00200000 and its real-mode mirror at 0xFFE00000 map to tag regions
+   0x0200000 and 0x1E00000 respectively, so they do not collide — but the
+   address decoder must handle the mirror itself, and nothing else may be placed
+   at 0x1E00000–0x1FFFFFF.
+
+Set `PROTECT_UMA_ROM = 0` (no UMA on this board).
 
 Vendored under `rtl/z386/` (with the fetched submodule contents) so the core builds
 standalone. `ucode.mif` / `pla_entry_rom.hex` must be copied too.
@@ -580,7 +598,21 @@ A hand-written flat `module pll` instantiating `altera_pll` directly produces
 outside every clock group and TimeQuest analyses them against every unrelated
 domain — the whole design reports tens of nanoseconds of phantom negative slack
 (clk_sys "Fmax 27.66 MHz", setup slack -90.878 ns) with no real critical path to
-find. Keep the extra level of hierarchy.
+find. Keep the extra level of hierarchy. After the fix, every clock is clean:
+
+| clock     | target      | Fmax       | setup slack | hold slack |
+|-----------|-------------|------------|-------------|------------|
+| `clk_ram` | 114.545 MHz | 140.15 MHz | +1.595 ns   | +0.247 ns  |
+| `clk_sys` |  57.273 MHz |  79.11 MHz | +3.393 ns   | +0.246 ns  |
+
+TNS 0.000 on every domain. That is the empty-skeleton baseline; the margin will
+shrink as the CPU, video and sound land, and `clk_ram` has the least of it.
+
+**Never edit `files.qip` or the QSF while a compile is running.** Quartus notices
+the change, rewrites the QSF with `sys.tcl` and a stale snapshot of `files.qip`
+expanded inline, and then dies with "quartus_map ended unexpectedly". The
+template's "do not add files in the Quartus IDE" warning covers this case too.
+Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
 
 ## 11. TASKS
 
