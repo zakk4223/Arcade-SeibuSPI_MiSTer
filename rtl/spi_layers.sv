@@ -72,6 +72,10 @@ module spi_layers
 
 	// Line buffer read side (the mixer)
 	input       [8:0] lb_x,
+	// The mixer runs two pixels ahead, so at the very end of a line it must read
+	// the NEXT line's buffer to have pixels 0 and 1 ready in time. That buffer
+	// is already complete: the renderer finishes a line well before hblank ends.
+	input             lb_wrap,
 	output            lb_bank,        // bank currently being written; the
 	                                 // mixer reads the other one
 	output      [9:0] lb_back,
@@ -325,7 +329,7 @@ module spi_layers
 	reg  [3:0] lb_we;      // one bit per layer
 
 	assign lb_bank = render_bank;
-	wire [9:0] lb_rd_addr = {~render_bank, lb_x};
+	wire [9:0] lb_rd_addr = {lb_wrap ? render_bank : ~render_bank, lb_x};
 
 	spi_dpram #(.DW(10), .AW(10)) lbuf_back
 		(.wr_clk(clk), .rd_clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[0]),

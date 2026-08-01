@@ -273,6 +273,7 @@ int main(int argc, char **argv)
     std::vector<uint16_t> lb_fore_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_midl_seen(512, 0xFFFF);
     std::vector<std::pair<uint32_t,uint32_t>> fore_codes;
+    std::vector<uint32_t> rtl_rgb(512, 0);
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     bool probed = false;
 
@@ -299,12 +300,19 @@ int main(int argc, char **argv)
             lb_text_seen[dut->hcnt] = dut->dbg_text;
             lb_fore_seen[dut->hcnt] = dut->dbg_fore;
             lb_midl_seen[dut->hcnt] = dut->dbg_midl;
+            rtl_rgb[dut->hcnt] = ((uint32_t)dut->red << 16) |
+                                 ((uint32_t)dut->green << 8) | dut->blue;
             probed = true;
-            if (dut->hcnt < 10)
-                printf("  x=%2d  back=%03X midl=%03X fore=%03X text=%03X  out=%06X\n",
+            if (dut->hcnt < 10) {
+                uint32_t w = (ref[((size_t)PROBE_Y*W + dut->hcnt)*4]
+                            | (ref[((size_t)PROBE_Y*W + dut->hcnt)*4+1] << 8)
+                            | (ref[((size_t)PROBE_Y*W + dut->hcnt)*4+2] << 16)) & 0xFFFFFF;
+                printf("  x=%2d  b=%03X m=%03X f=%03X t=%03X  out=%06X want=%06X %s\n",
                        (int)dut->hcnt, (int)dut->dbg_back, (int)dut->dbg_midl,
                        (int)dut->dbg_fore, (int)dut->dbg_text,
-                       ((uint32_t)dut->red << 16) | ((uint32_t)dut->green << 8) | dut->blue);
+                       ((uint32_t)dut->red << 16) | ((uint32_t)dut->green << 8) | dut->blue, w,
+                       ((((uint32_t)dut->red<<16)|((uint32_t)dut->green<<8)|dut->blue)==w)?"":"<<");
+            }
         }
 
         if (dut->ce_pix) {
@@ -520,6 +528,68 @@ int main(int argc, char **argv)
                 bad++;
             }
         }
+
+    if (probed) {
+        // Pure mixer check: composite the RTL's own line buffers per MAME's
+        // order and compare against the RTL's RGB for the same line. Inputs are
+        // already verified, so any mismatch here is the mixer's alone.
+        auto pen_rgb = [&](int pen) {
+            size_t e = (size_t)(pen >> 1) * 4;
+            uint32_t dw = pal[e] | (pal[e+1] << 8) | (pal[e+2] << 16) | ((uint32_t)pal[e+3] << 24);
+            uint32_t v = (pen & 1) ? ((dw >> 16) & 0x7FFF) : (dw & 0x7FFF);
+            uint32_t r = v & 31, g = (v >> 5) & 31, b = (v >> 10) & 31;
+            return (uint32_t)((((r<<3)|(r>>2)) << 16) | (((g<<3)|(g>>2)) << 8) | ((b<<3)|(b>>2)));
+        };
+        int le = regs["layer_enable"].at(0);
+        bool eb = !(le & 1), em = !(le & 2), ef = !(le & 4), et = !(le & 8);
+        size_t bad = 0; int firstx = -1;
+        for (int x = 2; x < 300; x++) {
+            uint16_t B = lb_seen[x], M = lb_midl_seen[x], F = lb_fore_seen[x], T = lb_text_seen[x];
+            uint32_t c = eb ? pen_rgb(4096 + ((B >> 6) << 6) + (B & 63)) : pen_rgb(0);
+            if (em && (M & 63) != 63) c = pen_rgb(4096 + 1024 + ((M >> 6) << 6) + (M & 63));
+            if (ef && (F & 63) != 63) c = pen_rgb(4096 +  512 + ((F >> 6) << 6) + (F & 63));
+            if (et && (T & 31) != 31) c = pen_rgb(5632 + ((T >> 6) << 5) + (T & 31));
+            if (c != rtl_rgb[x + 1]) { if (firstx < 0) firstx = x; bad++; }
+        }
+        printf("MIXER-ONLY check line %d: %zu/298 pixels differ", PROBE_Y, bad);
+        if (bad) printf(", first at x=%d (rtl %06X want %06X)", firstx, rtl_rgb[firstx], 0u);
+        printf("\n");
+    }
+
+    {   // Are the mismatches simply the sprites we do not draw yet? Sprite pens
+        // are 0..4095; every tile layer pen is 4096 or above.
+        size_t spr_like = 0, other = 0;
+        for (int y = 0; y < H; y++) for (int x = 2; x < W; x++) {
+            size_t i = (size_t)y*W+x;
+            if (got[i] == want[i]) continue;
+            bool found = false;
+            for (int pen = 0; pen < 4096 && !found; pen++) {
+                size_t e = (size_t)(pen >> 1) * 4;
+                uint32_t dw = pal[e] | (pal[e+1] << 8) | (pal[e+2] << 16) | ((uint32_t)pal[e+3] << 24);
+                uint32_t v = (pen & 1) ? ((dw >> 16) & 0x7FFF) : (dw & 0x7FFF);
+                uint32_t r = v & 31, g = (v >> 5) & 31, b = (v >> 10) & 31;
+                uint32_t c = (((r<<3)|(r>>2)) << 16) | (((g<<3)|(g>>2)) << 8) | ((b<<3)|(b>>2));
+                if (c == want[i]) found = true;
+            }
+            if (found) spr_like++; else other++;
+        }
+        printf("mismatches (x>=2): %zu match a sprite pen, %zu do not\n", spr_like, other);
+    }
+
+    {   // where are the errors?
+        int rowbad[H] = {0}, colbad[W] = {0};
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++)
+            if (got[(size_t)y*W+x] != want[(size_t)y*W+x]) { rowbad[y]++; colbad[x]++; }
+        printf("rows with errors (every 8th): ");
+        for (int y = 0; y < H; y += 8) printf("%d:%d ", y, rowbad[y]);
+        printf("\n");
+        int full = 0, clean = 0;
+        for (int y = 0; y < H; y++) { if (rowbad[y] >= W-4) full++; if (rowbad[y] <= 4) clean++; }
+        printf("rows almost entirely wrong: %d, rows almost clean: %d\n", full, clean);
+        printf("cols 0..11 errors: ");
+        for (int x = 0; x < 12; x++) printf("%d ", colbad[x]);
+        printf("\n");
+    }
 
     write_png((outdir + "/got.png").c_str(),  got,  W, H);
     write_png((outdir + "/want.png").c_str(), want, W, H);

@@ -794,10 +794,23 @@ Of those, only the first would ever have produced an obvious symptom.
       - [x] **All four layers verified 299/300** against reference scanlines
             (back, midl, fore, text). The one remaining pixel is the phase
             edge at x=0.
-      - [~] **Frame 35.8% wrong, and it is now all in the mixer.** The layer
-            line buffers are correct, so the fault is in `spi_mixer`:
-            composite order, palette indexing, the alpha table, or the
-            output phase. That is a much smaller search space than before.
+      - [x] **Mixer verified exact.** Compositing `spi_layers`' own line
+            buffers per MAME's order reproduces the mixer's RGB output
+            0/298 pixels differ. Composite order, transparency handling and
+            palette indexing are all correct.
+      - [x] Two real phase bugs fixed while proving that: the line buffer read
+            has to lead by **two** pixels (the palette sequence plus the
+            composite), and the mixer must not gate on `visible` -- that signal
+            refers to the pixel being displayed, but the pixel being
+            composited is two ahead, so it blacked out column 0 of every line.
+            The video path already blanks with HBlank/VBlank.
+      - [~] **Frame 18.2% wrong, and that residual is the missing sprites.**
+            Every tile-path component is now verified against MAME
+            individually, error columns are uniform at ~25/240 across the
+            whole width, and 64% of the mismatching pixels land exactly on a
+            sprite palette pen (the rest are consistent with MAME's
+            alpha-blended sprite pixels, which produce colours that are in no
+            palette entry at all).
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's

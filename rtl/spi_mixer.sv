@@ -41,7 +41,6 @@ module spi_mixer
 	input             ce_pix,
 
 	input       [4:0] layer_enable, // 0 = on: {sprite, text, fore, midl, back}
-	input             visible,      // inside the 320x240 active area
 
 	// Line buffer contents for this pixel: {colour[3:0], pixel[5:0]}.
 	// The text layer is 5bpp, so lb_text[5] is always zero.
@@ -240,17 +239,15 @@ module spi_mixer
 
 	// rgb_spr is latched on the same edge as ce_pix, so the composite is only
 	// stable afterwards. Take it at step 1 of the following pixel and hold it;
-	// callers lead lb_x by one pixel to line the image back up.
-	reg vis_d;
+	// callers lead lb_x by two pixels to line the image back up.
+	//
+	// No blanking here. `visible` refers to the pixel being *displayed*, but the
+	// pixel being *composited* is two ahead, so gating on it blacked out the
+	// first column of every line -- pixel 0 is processed during hblank. The
+	// video path already blanks using HBlank/VBlank.
 	always @(posedge clk) begin
-		if (reset) begin
-			{red, green, blue} <= 24'd0;
-			vis_d <= 1'b0;
-		end
-		else begin
-			if (ce_pix) vis_d <= visible;
-			if (step == 3'd1) {red, green, blue} <= vis_d ? m9 : 24'd0;
-		end
+		if (reset)              {red, green, blue} <= 24'd0;
+		else if (step == 3'd1)  {red, green, blue} <= m9;
 	end
 
 endmodule

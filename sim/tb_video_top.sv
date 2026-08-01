@@ -82,9 +82,12 @@ module tb_video_top
 		 .wr_addr(pre_pal_addr), .wr_data(pre_pal_data), .wr_en(pre_pal_we),
 		 .rd_addr(pal_ra), .rd_data(pal_rd));
 
-	// Lead the line-buffer read by one pixel: the mixer's composite is only
-	// stable a pixel after its palette lookups finish.
-	wire [8:0] lb_x = hcnt[8:0] + 9'd1;
+	// The mixer's palette sequence and composite take two pixel-times, so the
+	// line buffer is read two pixels ahead. Past the end of a line that wraps
+	// into the next line's buffer, which is what lb_wrap selects.
+	wire [9:0] lb_nx   = hcnt + 10'd2;
+	wire       lb_wrap = (lb_nx >= 10'd448);
+	wire [8:0] lb_x    = lb_wrap ? 9'(lb_nx - 10'd448) : lb_nx[8:0];
 	wire       lb_bank;
 	wire [9:0] lb_back, lb_midl, lb_fore, lb_text;
 	wire       layers_busy;
@@ -103,7 +106,7 @@ module tb_video_top
 		.tm_addr(tm_ra), .tm_data(tm_rd),
 		.sdr_addr(sdr_addr), .sdr_dout(sdr_dout),
 		.sdr_req(sdr_req), .sdr_ack(sdr_ack),
-		.lb_x(lb_x), .lb_bank(lb_bank),
+		.lb_x(lb_x), .lb_wrap(lb_wrap), .lb_bank(lb_bank),
 		.lb_back(lb_back), .lb_midl(lb_midl),
 		.lb_fore(lb_fore), .lb_text(lb_text),
 		.busy(layers_busy),
@@ -115,7 +118,6 @@ module tb_video_top
 	(
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
 		.layer_enable(layer_enable),
-		.visible(~hblank & ~vblank),
 		.lb_back(lb_back), .lb_midl(lb_midl),
 		.lb_fore(lb_fore), .lb_text(lb_text),
 		.lb_spr(15'd0),

@@ -282,7 +282,13 @@ module spi_top
 	// ------------------------------------------------------------------
 	// Lead the line-buffer read by one pixel: the mixer's composite is only
 	// stable a pixel after its palette lookups finish.
-	wire [8:0] lb_x = hcnt[8:0] + 9'd1;
+	// The mixer's palette sequence and composite take two pixel-times, so the
+	// line buffer is read two pixels ahead. Past the end of a line that wraps
+	// into the next line's buffer, which lb_wrap selects; that buffer is
+	// already complete, since the renderer finishes well before hblank ends.
+	wire [9:0] lb_nx   = hcnt + 10'd2;
+	wire       lb_wrap = (lb_nx >= 10'd448);
+	wire [8:0] lb_x    = lb_wrap ? 9'(lb_nx - 10'd448) : lb_nx[8:0];
 	wire       lb_bank;
 	wire [9:0] lb_back, lb_midl, lb_fore, lb_text;
 	wire       layers_busy;
@@ -311,6 +317,7 @@ module spi_top
 		.sdr_ack          (sdr_gfx_ack),
 
 		.lb_x             (lb_x),
+		.lb_wrap          (lb_wrap),
 		.lb_bank          (lb_bank),
 		.lb_back          (lb_back),
 		.lb_midl          (lb_midl),
@@ -333,15 +340,12 @@ module spi_top
 	// TODO(T4b): the sprite engine. Until it lands the sprite input is marked
 	// invalid, so the mixer composites the four tile layers alone.
 	// ------------------------------------------------------------------
-	wire visible = ~hblank & ~vblank;
-
 	spi_mixer mixer
 	(
 		.clk          (clk_sys),
 		.reset        (vid_reset),
 		.ce_pix       (ce_pix),
 		.layer_enable (layer_enable),
-		.visible      (visible),
 		.lb_back      (lb_back),
 		.lb_midl      (lb_midl),
 		.lb_fore      (lb_fore),
