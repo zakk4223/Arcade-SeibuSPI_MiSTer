@@ -37,9 +37,21 @@ obj_dir/Vspi_spr_decrypt: $(RTL)/spi_spr_decrypt.sv $(RTL)/seibu_partial_add.sv 
 	$(VERILATOR) $(VFLAGS) --top-module spi_spr_decrypt \
 	    $(RTL)/spi_spr_decrypt.sv $(RTL)/seibu_partial_add.sv tb_spr_decrypt.cpp
 
+# z386_pkg.sv must come first: it declares the types the rest reference.
+Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv \
+             $(RTL)/z386/l1_icache.sv $(RTL)/z386/alu.sv $(RTL)/z386/alu_alt.sv \
+             $(RTL)/z386/biu.sv $(RTL)/z386/decoder.sv $(RTL)/z386/dsp_mul.sv \
+             $(RTL)/z386/paging_tlb.sv $(RTL)/z386/paging_unit.sv \
+             $(RTL)/z386/paging_walker.sv $(RTL)/z386/prefetch.sv \
+             $(RTL)/z386/protection.sv $(RTL)/z386/segmentation_unit.sv \
+             $(RTL)/z386/ucode_rom.sv
+
+CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv \
+             $(RTL)/spi_io.sv $(RTL)/spi_mainram.sv
+
 lint:
-	$(VERILATOR) --lint-only -Wall -I$(RTL) lint.vlt --top-module spi_top \
-	    $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv
+	$(VERILATOR) --lint-only -Wall -I$(RTL) -I$(RTL)/z386 lint.vlt --top-module spi_top \
+	    $(CORE_SRCS) $(Z386_SRCS)
 
 clean:
 	rm -rf obj_dir spi_ref.h

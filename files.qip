@@ -8,7 +8,30 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_video_timing.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_cpu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_io.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_mainram.sv
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/seibu_partial_add.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_tile_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_spr_decrypt.sv
+
+# z386 CPU. z386_pkg.sv must be listed first: it declares the types the rest use.
+set_global_assignment -name SEARCH_PATH rtl/z386
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/z386_pkg.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/z386.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/l1_cache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/l1_icache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/alu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/alu_alt.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/biu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/decoder.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/dsp_mul.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/paging_tlb.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/paging_unit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/paging_walker.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/prefetch.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/protection.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/segmentation_unit.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/ucode_rom.sv
+set_global_assignment -name MISC_FILE rtl/z386/ucode.mif

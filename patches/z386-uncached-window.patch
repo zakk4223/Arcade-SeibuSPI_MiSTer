@@ -1,0 +1,54 @@
+--- /home/zakk/proj/z386_MiSTer/src/z386/l1_cache.sv	2026-08-01 05:08:21.439266593 -0400
++++ rtl/z386/l1_cache.sv	2026-08-01 06:04:11.859575725 -0400
+@@ -4,7 +4,15 @@
+     // Four ways, 16 bytes per line. SET_BITS=8 gives a 16KB data cache
+     // (256 sets x 4 ways x 16 B); =7 was 8KB.
+     parameter integer SET_BITS = 8,
+-    parameter PROTECT_UMA_ROM = 0
++    parameter PROTECT_UMA_ROM = 0,
++    // Uncacheable address window, matched as (addr & MASK) == BASE.
++    // The defaults reproduce the original hardcoded PC test
++    // (cpu_addr[31:17] == 15'h5, i.e. the A0000-BFFFF VGA aperture) so
++    // existing instantiations are unaffected.
++    // -- SlopperPI: parameterised so an arcade board can mark its
++    //    memory-mapped I/O window uncacheable instead.
++    parameter [31:0] UNCACHED_MASK = 32'hFFFE_0000,
++    parameter [31:0] UNCACHED_BASE = 32'h000A_0000
+ ) (
+     input         clk,
+     input         reset,
+@@ -68,7 +76,7 @@
+ wire [WORD_OFFSET_BITS-1:0] cpu_word = cpu_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
+ wire [BRAM_ADDR_BITS-1:0] cpu_bram_addr = {cpu_set, cpu_word};
+ wire [SET_BITS-1:0] snoop_set = snoop_addr[SET_MSB:SET_LSB];
+-wire cpu_uncacheable = !cache_enable || (cpu_addr[31:17] == 15'h5);
++wire cpu_uncacheable = !cache_enable || ((cpu_addr & UNCACHED_MASK) == UNCACHED_BASE);
+ wire cpu_protect_write = PROTECT_UMA_ROM && cpu_write && (cpu_addr[24:18] == 7'b000_0011);
+ 
+ // Tag/data storage.
+--- /home/zakk/proj/z386_MiSTer/src/z386/z386.sv	2026-08-01 05:08:21.443266552 -0400
++++ rtl/z386/z386.sv	2026-08-01 06:04:20.765494911 -0400
+@@ -18,7 +18,11 @@
+ #(
+     parameter PROTECT_UMA_ROM = 0,
+     parameter DCACHE_SET_BITS = 8,   // dcache size: 8 = 16KB, 7 = 8KB
+-    parameter ICACHE_SET_BITS = 8    // icache size: 8 = 16KB, 7 = 8KB
++    parameter ICACHE_SET_BITS = 8,   // icache size: 8 = 16KB, 7 = 8KB
++    // Uncacheable data window, (addr & MASK) == BASE. Defaults to the PC VGA
++    // aperture at A0000-BFFFF. -- SlopperPI
++    parameter [31:0] DCACHE_UNCACHED_MASK = 32'hFFFE_0000,
++    parameter [31:0] DCACHE_UNCACHED_BASE = 32'h000A_0000
+ )
+ (
+     input              clk,
+@@ -811,7 +815,9 @@
+ 
+ l1_cache #(
+     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
+-    .SET_BITS(DCACHE_SET_BITS)
++    .SET_BITS(DCACHE_SET_BITS),
++    .UNCACHED_MASK(DCACHE_UNCACHED_MASK),
++    .UNCACHED_BASE(DCACHE_UNCACHED_BASE)
+ ) dcache_inst (
+     .clk(clk),
+     .reset(!reset_n),

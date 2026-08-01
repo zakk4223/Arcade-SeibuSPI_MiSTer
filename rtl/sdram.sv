@@ -23,6 +23,11 @@
 //
 // Vendored from Arcade-IGSPGM_MiSTer (5-channel variant). Local changes:
 //   - refresh constants retuned for the 114.545455 MHz clk_ram used here.
+//   - ch1 widened from 32 to 64 bits. It carries the 386's program ROM, and the
+//     z386 caches fill 16-byte lines, so 64-bit reads make that two requests
+//     rather than four. Costs 3 cycles of extra latency per access (ch1 used to
+//     ack early, after two words); irrelevant for a line fill that needs all
+//     four words anyway.
 //
 // Address mapping (per chip):
 //   column = addr[9:1]   row = addr[22:10]   bank = addr[24:23]   chip = addr[26]
@@ -32,7 +37,13 @@
 //
 // Requests are toggle-based: flip ch*_req, wait for ch*_ack to match. Reads burst
 // 4 x 16 bits and WRAP inside the aligned 8-byte column group, so every 64-bit
-// read must be 8-byte aligned. ch1 returns only the first 32 bits.
+// read must be 8-byte aligned.
+//
+// Channel map for this core:
+//   ch1  386 program ROM     ch2  tile / char graphics
+//   ch3  ROM download, then Z80 program fetch (the only writable channel)
+//   ch4  sprite graphics     ch5  YMF271 PCM samples
+// Main RAM is on-chip, not here.
 // ---------------------------------------------------------------------------
 
 module sdram
@@ -55,7 +66,7 @@ module sdram
     output            SDRAM_CLK,   // clock for chip
 
     input      [26:0] ch1_addr,    // 25 bit address for 8bit mode. addr[0] = 0 for 16bit mode for correct operations.
-    output reg [31:0] ch1_dout,    // data output to cpu
+    output reg [63:0] ch1_dout,    // data output to cpu
     input             ch1_req,     // request
     output reg        ch1_ack,
 
@@ -186,7 +197,9 @@ always @(posedge clk) begin
 
     if(data_ready_delay1[4]) ch1_dout[15:00] <= dq_reg;
     if(data_ready_delay1[3]) ch1_dout[31:16] <= dq_reg;
-    if(data_ready_delay1[3]) ch1_ack <= ch1_req;
+    if(data_ready_delay1[2]) ch1_dout[47:32] <= dq_reg;
+    if(data_ready_delay1[1]) ch1_dout[63:48] <= dq_reg;
+    if(data_ready_delay1[1]) ch1_ack <= ch1_req;
 
     if(data_ready_delay2[4]) ch2_dout[15:00] <= dq_reg;
     if(data_ready_delay2[3]) ch2_dout[31:16] <= dq_reg;

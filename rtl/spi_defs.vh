@@ -6,6 +6,11 @@
 //  about unpacked-array parameters, and a plain include sidesteps both.
 //============================================================================
 
+// Most modules use only a few of these; suppressing the unused-parameter
+// warning here is simpler than a per-module waiver, and Verilator's -file
+// filter does not reach into included files anyway.
+/* verilator lint_off UNUSEDPARAM */
+
 // --------------------------------------------------------------------------
 // SDRAM byte-address map (see PLAN.md section 4)
 // --------------------------------------------------------------------------
@@ -58,3 +63,5 @@ localparam [23:0] TKEY3_RDFT2  = 24'h157ADC;
 localparam [23:0] TKEY1_RFJET  = 24'hAEA754;
 localparam [23:0] TKEY2_RFJET  = 24'hFE8530;
 localparam [23:0] TKEY3_RFJET  = 24'hCCB666;
+
+/* verilator lint_on UNUSEDPARAM */

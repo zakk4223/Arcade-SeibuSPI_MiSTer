@@ -1,5 +1,6 @@
 `verilator_config
-lint_off -rule UNUSEDPARAM -file "*/spi_defs.vh"
-lint_off -file "*/rtl/sdram.sv"
-lint_off -file "*/rtl/z386/*"
-lint_off -file "*/sys/*"
+lint_off -rule PINCONNECTEMPTY
+lint_off -rule TIMESCALEMOD
+lint_off -file "*sdram.sv"
+lint_off -file "*z386/*"
+lint_off -file "*sys/*"
