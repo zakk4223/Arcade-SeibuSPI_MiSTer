@@ -8,10 +8,17 @@
 //    outclk_1 = 1260 / 22 =  57.272727 MHz   clk_sys  (core logic)
 //
 //  57.272727 MHz is exactly 2 x 28.63636 MHz, the board's master crystal, so:
-//    pixel clock = clk_sys / 8 = 7.1590909 MHz  (exact, matches SPI dot clock)
+//    pixel clock = clk_sys / 8 = 7.1590909 MHz  (exact, matches the SPI dot clock)
 //    Z80 clock   = clk_sys / 8 = 7.1590909 MHz  (exact, 28.63636 / 4)
 //  and clk_ram is exactly 2 x clk_sys, phase aligned from the same PLL, so the
 //  SDRAM controller's toggle handshakes are synchronous rather than a true CDC.
+//
+//  NOTE: the pll -> pll_inst -> altera_pll_i hierarchy is not decoration. The
+//  framework's clock groups in sys/sys_top.sdc match on
+//      *|pll|pll_inst|altera_pll_i|*[*].*|divclk
+//  so flattening this module leaves the core clocks outside every clock group,
+//  and TimeQuest then analyses them against every unrelated domain. That shows
+//  up as tens of nanoseconds of phantom negative slack across the whole design.
 //============================================================================
 
 `timescale 1ns/10ps
@@ -23,6 +30,28 @@ module pll
 
 	output wire outclk_0,   // 114.545455 MHz - clk_ram
 	output wire outclk_1,   //  57.272727 MHz - clk_sys
+	output wire locked
+);
+
+	pll_0002 pll_inst
+	(
+		.refclk   (refclk),
+		.rst      (rst),
+		.outclk_0 (outclk_0),
+		.outclk_1 (outclk_1),
+		.locked   (locked)
+	);
+
+endmodule
+
+
+module pll_0002
+(
+	input  wire refclk,
+	input  wire rst,
+
+	output wire outclk_0,
+	output wire outclk_1,
 	output wire locked
 );
 

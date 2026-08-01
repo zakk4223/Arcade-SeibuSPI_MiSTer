@@ -566,16 +566,44 @@ sim/                      Verilator testbenches for the decrypt units
 
 ---
 
-## 10. TASKS
+## 10. Gotchas found the hard way
 
-- [ ] **T1** Repo skeleton: `sys/` from Template_MiSTer, `SeibuSPI.{qpf,qsf,sdc,sv}`,
-      `files.qip`, PLL, Makefile, README, vendored `rtl/z386/`.
-- [ ] **T2** ROM loader with per-part scatter + SDRAM controller + SDRAM map.
+**The core PLL must keep the `pll -> pll_inst -> altera_pll_i` hierarchy.**
+`sys/sys_top.sdc` puts the core clocks into a clock group by *name*:
+
+```
+-group [get_clocks { *|pll|pll_inst|altera_pll_i|*[*].*|divclk}]
+```
+
+A hand-written flat `module pll` instantiating `altera_pll` directly produces
+`emu|pll|altera_pll_i|...`, which matches nothing. The core clocks then sit
+outside every clock group and TimeQuest analyses them against every unrelated
+domain — the whole design reports tens of nanoseconds of phantom negative slack
+(clk_sys "Fmax 27.66 MHz", setup slack -90.878 ns) with no real critical path to
+find. Keep the extra level of hierarchy.
+
+## 11. TASKS
+
+- [x] **T1** Repo skeleton: `sys/` from Template_MiSTer, `SeibuSPI.{qpf,qsf,sdc,sv}`,
+      `files.qip`, PLL, Makefile, README.
+- [x] **T2** ROM loader with per-part scatter, SDRAM controller + map, and the
+      fetch-time GFX decryption units.
+      - `rom_loader.sv` verified byte-exact against the MAME region layout
+        (23,396,352 bytes, `sim/tb_rom_loader.cpp`).
+      - `spi_tile_decrypt.sv` verified against MAME's `decrypt_tile()` for all
+        three key sets (73,728 vectors).
+      - `spi_spr_decrypt.sv` verified against MAME's `seibuspi_sprite_decrypt()`
+        over all 4096 `addr` values (65,536 vectors), including the pixel
+        mapping, not just the arithmetic.
+      - Tables are generated from MAME by `tools/gen_spi_tables.py` (a parser)
+        while the test reference is copied from MAME by `tools/gen_ref_c.py`
+        (an extractor). Two independent paths from the same source, so agreement
+        validates the parser rather than being self-consistent.
 - [ ] **T3** z386 integration: main RAM, PRG ROM window + mirror, I/O decode,
       vblank IRQ / vector 0x20, uncacheable-window patch.
-- [ ] **T4** Video: DMA engines, palette, 4 layer pipelines, decrypt units, sprite
-      engine, mixer, 320x240 output + ROT270.
+- [ ] **T4** Video: DMA engines, palette, 4 layer pipelines, sprite engine,
+      mixer, 320x240 output + ROT270.
 - [ ] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
-- [ ] **T6** MRA, docs, Verilator lint + decrypt unit tests, build verification.
+- [ ] **T6** MRA, docs, build verification.
 
 Order matters: T4 is the visible payoff and depends only on T1–T3. T5 can lag.

@@ -8,3 +8,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_video_timing.sv
+
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/seibu_partial_add.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_tile_decrypt.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_spr_decrypt.sv
