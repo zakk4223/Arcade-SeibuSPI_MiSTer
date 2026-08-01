@@ -16,6 +16,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_dma.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_layers.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_mixer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sprite.sv
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/seibu_partial_add.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_tile_decrypt.sv

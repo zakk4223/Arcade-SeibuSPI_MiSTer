@@ -1,0 +1,72 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2E hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SlopperPI.                                     -->
+<!--                                                                     -->
+<!-- SlopperPI is free software: you can redistribute it and/or modify   -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters (Taiwan, single board)</name>
+    <setname>rdfts</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1996</year>
+    <manufacturer>Seibu Kaihatsu (Explorer System Corp. license)</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>Taiwan</region>
+    <category>Shooter</category>
+
+    <!--
+      Part order is significant. rtl/rom_loader.sv walks this list with a fixed
+      table and performs MAME's ROM_LOAD24_* / ROM_LOAD32_* byte scatter in
+      hardware, because MRA <interleave> cannot express the 3-byte period the
+      Seibu "D + P" graphics ROM pairs need. Do not reorder or insert parts
+      without updating the table in rom_loader.sv to match.
+
+      Layout produced in SDRAM (see rtl/spi_defs.vh):
+        0x0000000  2 MB   386 program
+        0x0200000  256 KB Z80 program
+        0x0240000  192 KB text tiles
+        0x0280000  2 MB   YMF271 samples
+        0x0480000  6 MB   background tiles
+        0x0A80000  12 MB  sprites, three 4 MB plane-pair chunks
+    -->
+    <rom index="0" zip="rdfts.zip|rdft.zip" md5="none">
+        <!-- 386 program -->
+        <part name="seibu_1.u0259"        crc="e278dddd"/>
+        <part name="raiden-f_prg2.u0258"  crc="58ccb10c"/>
+        <part name="raiden-f_prg34.u0262" crc="63f01d17"/>
+
+        <!-- Z80 program -->
+        <part name="seibu_zprg.u1139"     crc="c1fda3e8"/>
+
+        <!-- text layer -->
+        <part name="raiden-f_fix.u0535"   crc="2be2936b"/>
+        <part name="seibu_fix2.u0528"     crc="4d87e1ea"/>
+
+        <!-- background tiles -->
+        <part name="gun_dogs_bg1-d.u0526" crc="6a68054c"/>
+        <part name="gun_dogs_bg1-p.u0531" crc="3400794a"/>
+        <part name="gun_dogs_bg2-d.u0534" crc="61cd2991"/>
+        <part name="gun_dogs_bg2-p.u0530" crc="502d5799"/>
+
+        <!-- sprites -->
+        <part name="gun_dogs_obj-1.u0322" crc="59d86c99"/>
+        <part name="gun_dogs_obj-2.u0324" crc="1ceb0b6f"/>
+        <part name="gun_dogs_obj-3.u0323" crc="36e93234"/>
+
+        <!-- YMF271 samples -->
+        <part name="raiden-f_pcm2.u0975"  crc="3f8d4a48"/>
+    </rom>
+
+    <!--
+      INPUTS (0x604) and SYSTEM (0x60C) are active low on hardware; the core
+      inverts them. Bit 15 of INPUTS is the flip-screen DIP, exposed in the OSD
+      rather than here.
+    -->
+    <buttons names="Shot,Bomb,Button 3,-,-,Start,Coin,Service" default="A,B,X,-,-,Start,Select,-" count="3"/>
+</misterromdescription>

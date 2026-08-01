@@ -241,8 +241,7 @@ module spi_top
 		 .wr_addr(pal_wa), .wr_data(pal_wd), .wr_en(pal_we),
 		 .rd_addr(pal_ra), .rd_data(pal_rd));
 
-	// Sprite RAM: written by the DMA, read by the sprite engine (T4b).
-	wire [9:0]  spr_ra = 10'd0;
+	wire  [9:0] spr_ra;
 	wire [31:0] spr_rd;
 	spi_dpram #(.DW(32), .AW(10)) sprite_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
@@ -343,6 +342,40 @@ module spi_top
 	);
 
 	// ------------------------------------------------------------------
+	// Sprite engine. Runs on SDRAM channel 4, so it does not compete with the
+	// tile layers for the line budget.
+	// ------------------------------------------------------------------
+	wire [14:0] lb_spr;
+	wire        spr_busy;
+
+	spi_sprite sprites
+	(
+		.clk        (clk_sys),
+		.reset      (vid_reset),
+		.vcnt       (vcnt),
+		.line_start (line_start),
+		.enable     (~layer_enable[4]),
+		.spr_addr   (spr_ra),
+		.spr_data   (spr_rd),
+		.sdr_addr   (sdr_spr_addr),
+		.sdr_dout   (sdr_spr_dout),
+		.sdr_req    (sdr_spr_req),
+		.sdr_ack    (sdr_spr_ack),
+		.lb_x       (lb_x),
+		.lb_wrap    (lb_wrap),
+		.lb_out     (lb_spr),
+		.busy       (spr_busy),
+		.dbg_we     (),
+		.dbg_state  (),
+		.dbg_index  (),
+		.dbg_pix    (),
+		.dbg_emitx  (),
+		.dbg_code   (),
+		.dbg_sx     (),
+		.dbg_sy     ()
+	);
+
+	// ------------------------------------------------------------------
 	// Mixer
 	//
 	// TODO(T4b): the sprite engine. Until it lands the sprite input is marked
@@ -358,7 +391,7 @@ module spi_top
 		.lb_midl      (lb_midl),
 		.lb_fore      (lb_fore),
 		.lb_text      (lb_text),
-		.lb_spr       (15'd0),
+		.lb_spr       (lb_spr),
 		.pal_addr     (pal_ra),
 		.pal_data     (pal_rd),
 		.red          (red),
@@ -369,8 +402,6 @@ module spi_top
 	// ------------------------------------------------------------------
 	// TODO(T5) Z80 + YMF271
 	// ------------------------------------------------------------------
-	assign sdr_spr_addr = 25'd0;
-	assign sdr_spr_req  = 1'b0;
 	assign sdr_pcm_addr = 25'd0;
 	assign sdr_pcm_req  = 1'b0;
 
@@ -378,9 +409,9 @@ module spi_top
 	assign audio_r = 16'd0;
 
 	// Signals not yet consumed; each disappears as its block lands.
-	wire _unused = &{1'b0, clk_ram, dma_busy, layers_busy, spr_rd,
+	wire _unused = &{1'b0, clk_ram, dma_busy, layers_busy, spr_busy,
 	                 hcnt[9], dma_src[1:0], lb_bank,
 	                 sndfifo_din, sndfifo_wr,
-	                 sdr_spr_dout, sdr_spr_ack, sdr_pcm_dout, sdr_pcm_ack};
+	                 sdr_pcm_dout, sdr_pcm_ack};
 
 endmodule
