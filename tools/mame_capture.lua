@@ -25,6 +25,10 @@
 --
 local OUT    = os.getenv("SLOP_OUT")   or "."
 local TARGET = tonumber(os.getenv("SLOP_FRAME") or "600")
+-- Frames between the video-RAM snapshot and the bitmap grab. The two are not
+-- necessarily taken from the same side of the game's vblank update; see the
+-- note in the frame notifier.
+local BIAS   = tonumber(os.getenv("SLOP_BIAS") or "1")
 
 local mach  = manager.machine
 local space = mach.devices[":maincpu"].spaces["program"]
@@ -136,8 +140,22 @@ local function dump_share(tag, name)
     return sh.size
 end
 
+-- pixels() returns (data, width, height); assigning to one local keeps just
+-- the data, otherwise write() appends the dimensions as text.
+local function grab_frame()
+    local scr = mach.screens:at(1)
+    local px  = scr:pixels()
+    local f = assert(io.open(OUT .. "/frame.bin", "wb"))
+    f:write(px)
+    f:close()
+    print("SLOP: captured bitmap at frame " .. frames)
+    mach:exit()
+end
+
 slop_frame_sub = emu.add_machine_frame_notifier(function()
     frames = frames + 1
+
+    if BIAS ~= 0 and frames == TARGET + BIAS then grab_frame() end
 
     -- One frame early: snapshot main RAM and start tracking writes to it.
     if frames == TARGET - 1 then
@@ -157,20 +175,15 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
 
     if frames ~= TARGET then return end
 
-    -- KNOWN DEFECT: this capture is racy.
+    -- Why BIAS defaults to 1.
     --
-    -- The frame notifier fires after MAME has drawn the frame AND after the
-    -- game's vblank handler has already updated the video RAMs for the next
-    -- one. So the bitmap and the RAM snapshot can come from either side of
-    -- that update. Frame 900 happens to align (tile path reproduces it
-    -- exactly); frame 901 does not (99.96% of pixels differ), and its sprite
-    -- list is non-empty while 900's is momentarily clear -- which is why
-    -- sprites cannot be validated from a frame-900 capture.
-    --
-    -- The fix is to sample both at the same point in the emulated frame,
-    -- immediately after screen_update and before the vblank handler runs,
-    -- rather than at the frame boundary. Until then TARGET must stay on a
-    -- frame known to align.
+    -- The frame notifier fires after the game's vblank handler has already
+    -- updated the video RAMs, so the state visible at frame N is the state
+    -- MAME will draw frame N+1 with, not the one it just drew. Grabbing both
+    -- at the same frame is therefore wrong: at frame 901 that gives 99.96% of
+    -- pixels differing. Taking the RAMs at N and the bitmap at N+1 gives
+    -- 0.58%. Measured, not assumed -- an earlier fixed-frame capture happened
+    -- to align at 900 and made this look like it worked.
 
     if counts.tilemap == 0 then
         print("SLOP: no tilemap DMA seen by frame " .. TARGET)
@@ -202,14 +215,8 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
     local n_pal  = dump_share(":palette_ram", "palette_ram.bin")
     local n_spr  = dump_share(":sprite_ram",  "sprite_ram.bin")
 
-    -- pixels() returns (data, width, height); assigning to one local keeps
-    -- just the data, otherwise write() appends the dimensions as text.
-    local scr = mach.screens:at(1)
-    local px  = scr:pixels()
-    local f = assert(io.open(OUT .. "/frame.bin", "wb"))
-    f:write(px)
-    f:close()
 
+    local scr = mach.screens:at(1)
     f = assert(io.open(OUT .. "/regs.txt", "w"))
     f:write(string.format("frame %d\n", frames))
     f:write(string.format("screen %d %d\n", scr.width, scr.height))
@@ -228,6 +235,6 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
     f:write(string.format("sizes %d %d %d %d\n", n_main, n_tm, n_pal, n_spr))
     f:close()
 
-    print("SLOP: captured frame " .. frames)
-    mach:exit()
+    print("SLOP: captured RAM state at frame " .. frames)
+    if BIAS == 0 then grab_frame() end
 end)

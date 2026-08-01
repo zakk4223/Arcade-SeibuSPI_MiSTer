@@ -7,6 +7,7 @@ VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 
 
 .PHONY: all clean lint run-rom_loader run-tile_decrypt run-spr_decrypt
 
+SLOP_BIAS ?= 1
 CAP ?= /tmp/claude-1000/-home-zakk-proj-SlopperPI/efc84222-a8fe-4ba8-9ca2-3a1f50422bb8/scratchpad/cap
 
 all: run-rom_loader run-tile_decrypt run-spr_decrypt
