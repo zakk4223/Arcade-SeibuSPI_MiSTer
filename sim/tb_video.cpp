@@ -141,7 +141,7 @@ int main(int argc, char **argv)
 
     long long sdr_count = 0;
     auto tick = [&]() {
-        if (dut->sdr_req != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_delay = 8; sdr_count++; }
+        if (dut->sdr_req != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_delay = 4; sdr_count++; }
         if (sdr_delay > 0 && --sdr_delay == 0) {
             uint64_t a = (uint64_t)dut->sdr_addr & ~7ull;
             sdr_data = 0;
@@ -271,6 +271,9 @@ int main(int argc, char **argv)
     std::vector<uint16_t> lb_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_text_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_fore_seen(512, 0xFFFF);
+    std::vector<uint16_t> lb_midl_seen(512, 0xFFFF);
+    std::vector<std::pair<uint32_t,uint32_t>> fore_codes;
+    long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     bool probed = false;
 
     while (frame < 3) {
@@ -278,10 +281,24 @@ int main(int argc, char **argv)
         if (++guard > 40000000LL) { printf("FAIL: timeout\n"); return 1; }
 
         // Record the back-layer line buffer across one scanline of frame 2.
+        // How long does the renderer take per line, and does it finish?
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1) {
+            line_cycles++;
+            if (dut->dbg_busy) busy_cycles++;
+            if (!dut->dbg_busy && busy_cycles) finished = true;
+            if (dut->dbg_layer > max_layer) max_layer = dut->dbg_layer;
+        }
+
+        // Record the tile codes the fore layer actually fetches.
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1 && dut->dbg_emit && dut->dbg_layer == 2) {
+            if (fore_codes.empty() || fore_codes.back().first != dut->dbg_tcode)
+                fore_codes.push_back({dut->dbg_tcode, dut->dbg_gfx_addr});
+        }
         if (frame == 2 && dut->vcnt == PROBE_Y && dut->ce_pix && dut->hcnt < 512) {
             lb_seen[dut->hcnt] = dut->dbg_back;
             lb_text_seen[dut->hcnt] = dut->dbg_text;
             lb_fore_seen[dut->hcnt] = dut->dbg_fore;
+            lb_midl_seen[dut->hcnt] = dut->dbg_midl;
             probed = true;
             if (dut->hcnt < 10)
                 printf("  x=%2d  back=%03X midl=%03X fore=%03X text=%03X  out=%06X\n",
@@ -346,7 +363,7 @@ int main(int argc, char **argv)
                           regs["scroll_fore"].at(0) & 511, regs["scroll_fore"].at(1) & 511,
                           0x4000 | (regs["fore_d13"].at(0) ? 0x2000u : 0u), rf);
                 const std::vector<uint16_t> *refs[3] = { &rb, &rm, &rf };
-                const uint16_t *caps[3] = { lb_seen.data(), nullptr, lb_fore_seen.data() };
+                const uint16_t *caps[3] = { lb_seen.data(), lb_midl_seen.data(), lb_fore_seen.data() };
                 const char *rn[3] = { "back", "midl", "fore" };
                 for (int c = 0; c < 3; c++) {
                     if (!caps[c]) continue;
@@ -380,6 +397,31 @@ int main(int argc, char **argv)
                 for (int x = 0; x < 300; x++) if (lb_fore_seen[x] == w2[x]) m++;
                 printf("fore (no rowscroll) at offset 0: %zu/300\n", m);
             }
+            printf("  line budget: %ld cycles available, renderer busy %ld, "
+                   "max layer reached %d, finished=%s\n",
+                   line_cycles, busy_cycles, max_layer, finished ? "yes" : "NO");
+
+            {   // What codes does the RTL fetch, versus what the reference expects?
+                printf("  rtl fore codes :");
+                for (size_t i = 0; i < fore_codes.size() && i < 8; i++)
+                    printf(" %04X@%06X", fore_codes[i].first, fore_codes[i].second);
+                printf("\n  ref fore codes :");
+                uint32_t cor = 0x4000 | (regs["fore_d13"].at(0) ? 0x2000u : 0u);
+                int syy = regs["scroll_fore"].at(1) & 511;
+                int sxx = regs["scroll_fore"].at(0) & 511;
+                int src_y = (PROBE_Y + syy) & 511, rw = src_y >> 4, fy = src_y & 15;
+                for (int c = 0; c < 8; c++) {
+                    int colm = ((sxx >> 4) + c) & 31;
+                    int ti = colm * 32 + rw;
+                    size_t d = (size_t)((dut->rowscroll_enable ? 0x400 : 0x200) + (ti >> 1)) * 4;
+                    uint32_t dw = tm[d] | (tm[d+1] << 8) | (tm[d+2] << 16) | ((uint32_t)tm[d+3] << 24);
+                    uint16_t w = (ti & 1) ? (dw >> 16) : (dw & 0xFFFF);
+                    uint32_t code = (w & 0x1FFF) | cor;
+                    printf(" %04X@%06X", code, 0x0480000 + code * 192 + fy * 12);
+                }
+                printf("\n");
+            }
+
             {   // hypothesis sweep for the fore layer
                 struct H { const char *name; int base; int rs; int sx,sy; uint32_t cor; int dy; };
                 uint32_t c0 = 0x4000 | (regs["fore_d13"].at(0) ? 0x2000u : 0u);

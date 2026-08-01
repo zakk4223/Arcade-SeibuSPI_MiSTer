@@ -791,17 +791,27 @@ Of those, only the first would ever have produced an obvious symptom.
             The decrypt unit it needs is already done and verified (T2).
       - [x] Golden-reference harness against MAME (see section 12). The frame
             diff went from 100% wrong to **40.1%** as four real bugs fell out.
-      - [~] **Frame still 40.1% wrong.** back and text layers verified
-            299/300 against reference lines; the **fore layer sits at
-            168/300** and is the outstanding problem. Ruled out: tilemap base
-            (0x200 / 0x800 give 0/300), the d13 and 0x4000 code bits (0/300
-            without them), scroll contamination from midl (4/300), and a
-            vertical shift (y-1 gives 194, y+1 gives 160 -- neither clean).
-            The differences are confined to the LOW plane bits, which come
-            from byte 2 of each 24-bit group, i.e. the "P" ROM. The tiles
-            region itself is byte-exact against MAME for both halves, so the
-            data is right and the fault is in how spi_layers assembles or
-            indexes it for that layer specifically.
+      - [x] **All four layers verified 299/300** against reference scanlines
+            (back, midl, fore, text). The one remaining pixel is the phase
+            edge at x=0.
+      - [~] **Frame 35.8% wrong, and it is now all in the mixer.** The layer
+            line buffers are correct, so the fault is in `spi_mixer`:
+            composite order, palette indexing, the alpha table, or the
+            output phase. That is a much smaller search space than before.
+
+      The fore layer's long-running failure turned out NOT to be a decode bug
+      at all. `line_start` was only honoured in `S_IDLE`, so when a line's
+      rendering overran -- 104 tiles at ~30 cycles against 3584 cycles a line
+      is genuinely marginal -- the sequencer just carried on and `render_line`
+      and `render_bank` drifted out of step with the display. Every layer
+      stayed individually correct, which is exactly why it read as a decode
+      problem. Restart is now deferred to a tile boundary, so an in-flight
+      SDRAM request is never abandoned with its ack outstanding.
+
+      **Throughput is the thing to watch.** At a realistic 4-cycle SDRAM
+      latency the renderer needs 2801 of 3584 cycles per line, and the sprite
+      engine has to fit in what is left. Overlapping the next tile's fetch
+      with the current tile's emit is the obvious win.
 
       Build state with the tile layers in: 0 errors, 0 negative slack,
       67% ALMs, 77% RAM blocks, 3,265,253 block memory bits.

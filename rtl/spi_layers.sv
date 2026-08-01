@@ -79,10 +79,19 @@ module spi_layers
 	output      [9:0] lb_fore,
 	output      [9:0] lb_text,
 
-	output reg        busy
+	output reg        busy,
+
+	// Debug taps for the golden-reference testbench.
+	output      [1:0] dbg_layer,
+	output     [14:0] dbg_tcode,
+	output     [24:0] dbg_gfx_addr,
+	output            dbg_emit,
+	output            dbg_busy
 );
 
 `include "spi_defs.vh"
+
+	assign dbg_layer = layer;
 
 	// ------------------------------------------------------------------
 	// Which line is being rendered, and into which buffer
@@ -223,6 +232,18 @@ module spi_layers
 	                 S_NEXT   = 4'd11;
 
 	reg [3:0] state;
+
+	// line_start was originally only honoured in S_IDLE. If a line's rendering
+	// overruns -- and with 3 x 21 + 41 = 104 tiles at ~30 cycles each against
+	// 448 * 8 = 3584 cycles a line, it can -- the sequencer simply carried on,
+	// so render_line and render_bank drifted steadily out of step with the
+	// display. The layers stayed individually correct, which made it look like
+	// a decode bug rather than a timing one.
+	//
+	// Restarting is deferred to a tile boundary rather than taken immediately:
+	// abandoning a request mid-flight would leave sdr_req toggled with an ack
+	// still outstanding, and the next request would pair with the wrong reply.
+	reg restart_req;
 	reg [63:0] gfx_a, gfx_b;
 	reg [24:0] gfx_addr_r;
 
@@ -330,6 +351,11 @@ module spi_layers
 
 	wire emit_last = is_text ? (emit_i == 4'd7) : (emit_i == 4'd15);
 
+	assign dbg_tcode    = tcode;
+	assign dbg_gfx_addr = gfx_base;
+	assign dbg_emit     = (state == S_EMIT);
+	assign dbg_busy     = busy;
+
 	// ------------------------------------------------------------------
 	// Sequencer
 	// ------------------------------------------------------------------
@@ -337,23 +363,32 @@ module spi_layers
 		lb_we <= 4'b0000;
 
 		if (reset) begin
-			state   <= S_IDLE;
-			busy    <= 1'b0;
-			sdr_req <= 1'b0;
+			state       <= S_IDLE;
+			busy        <= 1'b0;
+			sdr_req     <= 1'b0;
+			restart_req <= 1'b0;
 		end
 		else begin
-			case (state)
+			if (line_start) restart_req <= 1'b1;
 
-			S_IDLE: if (line_start) begin
-				// Render the line the raster will show next.
+			// A tile boundary is the safe place to abandon the rest of a line.
+			if (restart_req && (state == S_IDLE || state == S_NEXT)) begin
+				restart_req <= 1'b0;
 				render_line <= (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
 				render_bank <= ~render_bank;
 				layer       <= L_BACK;
 				col         <= 6'd0;
 				busy        <= 1'b1;
-				state       <= rowscroll_enable ? S_RS_REQ : S_TM_REQ;
 				rowscroll   <= 16'd0;
+				state       <= rowscroll_enable ? S_RS_REQ : S_TM_REQ;
 			end
+			else case (state)
+
+			// Nothing to do here: starting a line is handled by the restart
+			// path above, which also covers the overrun case. Having a second
+			// line_start branch here fired the restart twice, one cycle apart,
+			// and the extra render_bank toggle put the mixer on the wrong buffer.
+			S_IDLE: ;
 
 			// -------- rowscroll table --------------------------------
 			S_RS_REQ: begin

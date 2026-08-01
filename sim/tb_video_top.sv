@@ -49,7 +49,12 @@ module tb_video_top
 	output      [9:0] dbg_back,
 	output      [9:0] dbg_midl,
 	output      [9:0] dbg_fore,
-	output      [9:0] dbg_text
+	output      [9:0] dbg_text,
+	output      [1:0] dbg_layer,
+	output     [14:0] dbg_tcode,
+	output     [24:0] dbg_gfx_addr,
+	output            dbg_emit,
+	output            dbg_busy
 );
 
 	wire hsync, vsync, line_start, vbl_rise;
@@ -101,7 +106,9 @@ module tb_video_top
 		.lb_x(lb_x), .lb_bank(lb_bank),
 		.lb_back(lb_back), .lb_midl(lb_midl),
 		.lb_fore(lb_fore), .lb_text(lb_text),
-		.busy(layers_busy)
+		.busy(layers_busy),
+		.dbg_layer(dbg_layer), .dbg_tcode(dbg_tcode),
+		.dbg_gfx_addr(dbg_gfx_addr), .dbg_emit(dbg_emit), .dbg_busy(dbg_busy)
 	);
 
 	spi_mixer mixer
