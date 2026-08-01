@@ -317,7 +317,14 @@ module spi_top
 		.lb_fore          (lb_fore),
 		.lb_text          (lb_text),
 
-		.busy             (layers_busy)
+		.busy             (layers_busy),
+
+		// Debug taps, used only by sim/tb_video.
+		.dbg_layer        (),
+		.dbg_tcode        (),
+		.dbg_gfx_addr     (),
+		.dbg_emit         (),
+		.dbg_busy         ()
 	);
 
 	// ------------------------------------------------------------------
