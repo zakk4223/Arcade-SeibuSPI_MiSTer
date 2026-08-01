@@ -36,11 +36,10 @@
 
 module spi_dma
 (
-	input             clk,          // clk_sys
-	input             reset,
+	input             clk,          // clk_cpu -- the DMA shares the 386's main
+	input             reset,       // RAM port, so it lives in that domain
 
-	// Triggers. These originate on clk_cpu, where one cycle spans two clk_sys
-	// cycles, so they are edge detected rather than used directly.
+	// Triggers, edge detected so a held level cannot restart a transfer.
 	input             trig_tilemap,
 	input             trig_palette,
 	input             trig_sprite,
@@ -51,7 +50,10 @@ module spi_dma
 	input      [15:0] dma_len,      // (len+1)*2 bytes
 	input             rowscroll_enable,
 
-	// Main RAM read port (1 cycle latency)
+	// Main RAM port, shared with the CPU. Request it, wait for the grant, then
+	// it is ours until we drop the request. 1 cycle read latency.
+	output            ram_req,
+	input             ram_gnt,
 	output reg [15:0] ram_addr,     // dword index
 	input      [31:0] ram_data,
 
@@ -151,7 +153,14 @@ module spi_dma
 	reg [1:0]  rd_mode;
 	reg [11:0] rd_dest;
 
-	assign busy = (mode != M_IDLE) || rd_valid;
+	assign busy    = (mode != M_IDLE) || rd_valid;
+
+	// Hold the request across the whole transfer, including the pending start.
+	// pend_mode remembers which transfer was asked for while we wait for the
+	// port; the trigger pulses are only one cycle wide.
+	reg       start_pending;
+	reg [1:0] pend_mode;
+	assign ram_req = busy || start_pending;
 
 	// Palette: (len+1)*2 bytes => (len+1)/2 source dwords. The palette is 6144
 	// pens = 3072 dwords, so 11 bits covers every legal transfer.
@@ -163,8 +172,9 @@ module spi_dma
 		spr_we <= 1'b0;
 
 		if (reset) begin
-			mode     <= M_IDLE;
-			rd_valid <= 1'b0;
+			mode          <= M_IDLE;
+			rd_valid      <= 1'b0;
+			start_pending <= 1'b0;
 		end
 		else begin
 			// ---- write stage --------------------------------------------
@@ -192,25 +202,23 @@ module spi_dma
 			end
 
 			// ---- read stage ----------------------------------------------
+			// A trigger raises ram_req and records what was asked for; the
+			// transfer only begins once the CPU hands over the port.
+			if (start_tm)       begin start_pending <= 1'b1; pend_mode <= M_TILEMAP; end
+			else if (start_pal) begin start_pending <= 1'b1; pend_mode <= M_PALETTE; end
+			else if (start_spr) begin start_pending <= 1'b1; pend_mode <= M_SPRITE;  end
+
 			if (mode == M_IDLE) begin
-				if (start_tm) begin
-					mode     <= M_TILEMAP;
-					seg      <= SEG_BACK;
-					cnt      <= seg_len(SEG_BACK);
-					dest     <= 12'h000;
-					ram_addr <= dma_src;
-				end
-				else if (start_pal) begin
-					mode     <= M_PALETTE;
-					cnt      <= pal_dwords;
-					dest     <= 12'h000;
-					ram_addr <= dma_src;
-				end
-				else if (start_spr) begin
-					mode     <= M_SPRITE;
-					cnt      <= 11'd1024;
-					dest     <= 12'h000;
-					ram_addr <= dma_src;
+				if (start_pending && ram_gnt) begin
+					start_pending <= 1'b0;
+					mode          <= pend_mode;
+					dest          <= 12'h000;
+					ram_addr      <= dma_src;
+					case (pend_mode)
+						M_TILEMAP: begin seg <= SEG_BACK; cnt <= seg_len(SEG_BACK); end
+						M_PALETTE: cnt <= pal_dwords;
+						default:   cnt <= 11'd1024;
+					endcase
 				end
 			end
 			else begin

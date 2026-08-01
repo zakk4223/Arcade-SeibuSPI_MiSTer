@@ -1,39 +1,39 @@
 //============================================================================
 //  SlopperPI - Seibu SPI / SXX2E
 //
-//  386 main RAM: 256 KB (64K x 32), true dual port.
+//  386 main RAM: 256 KB (64K x 32), single port.
 //
-//  Port A is the CPU. Port B is a read-only port for the video DMA engines,
-//  which copy tilemap / palette / sprite data out of main RAM when the game
-//  writes one of the DMA trigger registers.
+//  It was briefly true dual port, with a second read port for the video DMA.
+//  Quartus would not infer that: it duplicated all four byte lanes, taking the
+//  array from 2 Mbit to 4 Mbit and blowing the M10K budget outright
+//  ("device has 553 RAM locations ... design needs more than 553"). The reason
+//  it fit before was that the DMA port was still tied to a constant and had
+//  been optimised away entirely.
 //
-//  No coherency logic is needed on port B: the z386 data cache is write-through
-//  with an in-order store queue, so by the time the trigger write reaches the
-//  I/O decoder every data write it publishes has already landed here.
+//  So the DMA shares this one port instead, arbitrated in spi_cpu. It only runs
+//  in short bursts a few times a frame -- about 1.5% of the CPU's cycles -- and
+//  real hardware steals cycles for the same transfers anyway.
 //
-//  Port A read-during-write returns old data. That is fine -- l1_cache forwards
-//  from its store queue, so the CPU never observes it.
+//  No coherency logic is needed: the z386 data cache is write-through with an
+//  in-order store queue, so by the time a DMA trigger write reaches the I/O
+//  decoder, every data write it publishes has already landed here.
 //
-//  Split into four byte lanes so port A gets byte enables; Quartus infers M10K
-//  from this shape. The two ports run on different clocks -- the 386 has its own
-//  28.636 MHz domain -- which is what dual-clock M10K is for.
+//  Read-during-write returns old data, which l1_cache's store queue forwarding
+//  hides from the CPU.
+//
+//  Split into four byte lanes to get byte enables; Quartus infers M10K from
+//  this shape.
 //============================================================================
 
 module spi_mainram
 (
-	input             a_clk,      // clk_cpu
-	input             b_clk,      // clk_sys
+	input             clk,        // clk_cpu
 
-	// Port A - CPU
-	input      [15:0] a_addr,     // dword index
-	input      [31:0] a_din,
-	input       [3:0] a_be,
-	input             a_we,
-	output reg [31:0] a_dout,
-
-	// Port B - video DMA, read only
-	input      [15:0] b_addr,     // dword index
-	output reg [31:0] b_dout
+	input      [15:0] addr,       // dword index
+	input      [31:0] din,
+	input       [3:0] be,
+	input             we,
+	output reg [31:0] dout
 );
 
 	(* ramstyle = "M10K" *) reg [7:0] mem0 [0:65535];
@@ -41,17 +41,13 @@ module spi_mainram
 	(* ramstyle = "M10K" *) reg [7:0] mem2 [0:65535];
 	(* ramstyle = "M10K" *) reg [7:0] mem3 [0:65535];
 
-	always @(posedge a_clk) begin
-		if (a_we && a_be[0]) mem0[a_addr] <= a_din[ 7: 0];
-		if (a_we && a_be[1]) mem1[a_addr] <= a_din[15: 8];
-		if (a_we && a_be[2]) mem2[a_addr] <= a_din[23:16];
-		if (a_we && a_be[3]) mem3[a_addr] <= a_din[31:24];
+	always @(posedge clk) begin
+		if (we && be[0]) mem0[addr] <= din[ 7: 0];
+		if (we && be[1]) mem1[addr] <= din[15: 8];
+		if (we && be[2]) mem2[addr] <= din[23:16];
+		if (we && be[3]) mem3[addr] <= din[31:24];
 
-		a_dout <= {mem3[a_addr], mem2[a_addr], mem1[a_addr], mem0[a_addr]};
-	end
-
-	always @(posedge b_clk) begin
-		b_dout <= {mem3[b_addr], mem2[b_addr], mem1[b_addr], mem0[b_addr]};
+		dout <= {mem3[addr], mem2[addr], mem1[addr], mem0[addr]};
 	end
 
 endmodule

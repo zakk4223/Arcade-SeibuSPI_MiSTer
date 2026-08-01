@@ -109,7 +109,8 @@ module spi_top
 	wire  [3:0] io_be;
 	wire        io_wr, io_rd;
 
-	// Main RAM read port for the video DMA engines.
+	// Video DMA share of the 386's main RAM port.
+	wire        dma_req, dma_gnt;
 	wire [15:0] dma_addr;
 	wire [31:0] dma_dout;
 
@@ -124,7 +125,6 @@ module spi_top
 	spi_cpu cpu
 	(
 		.clk       (clk_cpu),
-		.clk_vid   (clk_sys),
 		.reset     (cpu_reset),
 		.cpu_en    (1'b1),
 
@@ -140,6 +140,8 @@ module spi_top
 		.io_rd     (io_rd),
 		.io_rdata  (io_rdata),
 
+		.dma_req   (dma_req),
+		.dma_gnt   (dma_gnt),
 		.dma_addr  (dma_addr),
 		.dma_dout  (dma_dout),
 
@@ -230,18 +232,21 @@ module spi_top
 	wire [11:0] pal_ra;  wire [29:0] pal_rd;
 
 	spi_dpram #(.DW(32), .AW(12)) tilemap_ram
-		(.clk(clk_sys), .wr_addr(tm_wa),  .wr_data(tm_wd),  .wr_en(tm_we),
+		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
+		 .wr_addr(tm_wa),  .wr_data(tm_wd),  .wr_en(tm_we),
 		 .rd_addr(tm_ra),  .rd_data(tm_rd));
 
 	spi_dpram #(.DW(30), .AW(12)) palette_ram
-		(.clk(clk_sys), .wr_addr(pal_wa), .wr_data(pal_wd), .wr_en(pal_we),
+		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
+		 .wr_addr(pal_wa), .wr_data(pal_wd), .wr_en(pal_we),
 		 .rd_addr(pal_ra), .rd_data(pal_rd));
 
 	// Sprite RAM: written by the DMA, read by the sprite engine (T4b).
 	wire [9:0]  spr_ra = 10'd0;
 	wire [31:0] spr_rd;
 	spi_dpram #(.DW(32), .AW(10)) sprite_ram
-		(.clk(clk_sys), .wr_addr(spr_wa), .wr_data(spr_wd), .wr_en(spr_we),
+		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
+		 .wr_addr(spr_wa), .wr_data(spr_wd), .wr_en(spr_we),
 		 .rd_addr(spr_ra), .rd_data(spr_rd));
 
 	// ------------------------------------------------------------------
@@ -251,14 +256,16 @@ module spi_top
 
 	spi_dma dma
 	(
-		.clk              (clk_sys),
-		.reset            (vid_reset),
+		.clk              (clk_cpu),
+		.reset            (cpu_reset),
 		.trig_tilemap     (dma_tilemap),
 		.trig_palette     (dma_palette),
 		.trig_sprite      (dma_sprite),
 		.dma_src          (dma_src[17:2]),
 		.dma_len          (dma_len),
 		.rowscroll_enable (rowscroll_enable),
+		.ram_req          (dma_req),
+		.ram_gnt          (dma_gnt),
 		.ram_addr         (dma_addr),
 		.ram_data         (dma_dout),
 		.tm_addr          (tm_wa),  .tm_data (tm_wd),  .tm_we (tm_we),

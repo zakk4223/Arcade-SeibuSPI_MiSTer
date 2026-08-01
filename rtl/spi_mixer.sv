@@ -182,10 +182,9 @@ module spi_mixer
 
 	always @(posedge clk) begin
 		if (reset) begin
-			step    <= 3'd0;
+			step     <= 3'd0;
 			pal_addr <= 12'd0;
 			pen_lsb  <= 1'b0;
-			{red, green, blue} <= 24'd0;
 		end
 		else begin
 			// ---- fetch ------------------------------------------------
@@ -235,7 +234,8 @@ module spi_mixer
 	wire [23:0] m9 = (en_text && !trans_text)   ? blend(m8, ctext, a_text) : m8;
 
 	always @(posedge clk) begin
-		if (ce_pix) {red, green, blue} <= visible ? m9 : 24'd0;
+		if (reset)       {red, green, blue} <= 24'd0;
+		else if (ce_pix) {red, green, blue} <= visible ? m9 : 24'd0;
 	end
 
 endmodule

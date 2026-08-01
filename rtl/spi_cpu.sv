@@ -35,7 +35,6 @@
 module spi_cpu
 (
 	input             clk,          // clk_cpu, 28.636364 MHz
-	input             clk_vid,      // clk_sys, for the DMA read port
 	input             reset,
 	input             cpu_en,       // 0 = stall the CPU (pause, throttle)
 
@@ -53,7 +52,11 @@ module spi_cpu
 	output            io_rd,
 	input      [31:0] io_rdata,
 
-	// Main RAM read port for the video DMA engines
+	// Video DMA share of the main RAM port. The DMA runs in short bursts a few
+	// times a frame; while it holds the port the CPU simply is not granted a
+	// memory cycle, which is what the real board's DMA does too.
+	input             dma_req,
+	output            dma_gnt,
 	input      [15:0] dma_addr,
 	output     [31:0] dma_dout,
 
@@ -205,18 +208,25 @@ module spi_cpu
 	reg         ram_we;
 	wire [31:0] ram_dout;
 
+	// The DMA is granted the port only when the CPU has nothing in flight, and
+	// keeps it until it drops the request. Granting mid-access would corrupt a
+	// read that has already been issued into the RAM's pipeline.
+	reg dma_own;
+	assign dma_gnt = dma_own;
+
+	wire [15:0] ram_addr_mux = dma_own ? dma_addr : ram_addr;
+
 	spi_mainram mainram
 	(
-		.a_clk  (clk),
-		.b_clk  (clk_vid),
-		.a_addr (ram_addr),
-		.a_din  (ram_din),
-		.a_be   (ram_be),
-		.a_we   (ram_we),
-		.a_dout (ram_dout),
-		.b_addr (dma_addr),
-		.b_dout (dma_dout)
+		.clk  (clk),
+		.addr (ram_addr_mux),
+		.din  (ram_din),
+		.be   (ram_be),
+		.we   (ram_we && !dma_own),
+		.dout (ram_dout)
 	);
+
+	assign dma_dout = ram_dout;
 
 	// ------------------------------------------------------------------
 	// I/O bus
@@ -247,13 +257,17 @@ module spi_cpu
 	reg  [7:0] burst_left;
 	reg [29:0] cur_dw;        // running dword address
 	reg [63:0] rom_data;
-	reg        ram_rd_pipe;   // a BRAM read was issued last cycle
+	// Read delivery is two stages deep, not one: `ram_addr` is only visible to
+	// the RAM the cycle AFTER it is assigned, and the RAM registers its output,
+	// so data is valid two cycles after the issuing state.
+	reg        ram_rd_q;
+	reg        ram_rd_pipe;
 
 	// Accept combinationally: the cache samples ready in the same cycle it
 	// drives valid, and holds valid until it sees ready. `valid` is also
 	// asserted during INTA cycles, which the INTA state machine answers
 	// instead, so they are excluded here.
-	wire mem_accept = cpu_valid && !cpu_inta && cpu_en && (state == S_IDLE);
+	wire mem_accept = cpu_valid && !cpu_inta && cpu_en && !dma_own && (state == S_IDLE);
 	assign cpu_ready = cpu_inta ? inta_ready : mem_accept;
 
 	// Guard against a zero burstcount, which would underflow the counter.
@@ -270,9 +284,10 @@ module spi_cpu
 		ram_we         <= 1'b0;
 		io_cyc_wr      <= 1'b0;
 		io_cyc_rd      <= 1'b0;
-		ram_rd_pipe    <= 1'b0;
+		ram_rd_q    <= 1'b0;
+		ram_rd_pipe <= ram_rd_q;
 
-		// Deliver the dword read from main RAM one cycle ago.
+		// Deliver the dword read from main RAM two cycles ago.
 		if (ram_rd_pipe) begin
 			mem_din        <= ram_dout;
 			mem_resp_valid <= 1'b1;
@@ -282,8 +297,18 @@ module spi_cpu
 			state      <= S_IDLE;
 			sdr_req    <= 1'b0;
 			burst_left <= 8'd0;
+			dma_own    <= 1'b0;
 		end
 		else begin
+			// Grant the DMA the RAM port only from a fully quiescent state.
+			if (!dma_own) begin
+				if (dma_req && (state == S_IDLE) && !ram_rd_q && !ram_rd_pipe)
+					dma_own <= 1'b1;
+			end
+			else if (!dma_req) begin
+				dma_own <= 1'b0;
+			end
+
 			case (state)
 
 			S_IDLE: if (mem_accept) begin
@@ -313,7 +338,7 @@ module spi_cpu
 				end
 				else if (sel_ram) begin
 					ram_addr    <= cpu_addr[17:2];
-					ram_rd_pipe <= 1'b1;
+					ram_rd_q    <= 1'b1;
 					cur_dw      <= cpu_addr + 30'd1;
 					burst_left  <= burst_n - 8'd1;
 					state       <= (burst_n > 8'd1) ? S_RAM_RD : S_IDLE;
@@ -335,7 +360,7 @@ module spi_cpu
 			// Remaining dwords of a RAM burst: one BRAM read per cycle.
 			S_RAM_RD: begin
 				ram_addr    <= cur_dw[15:0];
-				ram_rd_pipe <= 1'b1;
+				ram_rd_q    <= 1'b1;
 				cur_dw      <= cur_dw + 30'd1;
 				burst_left  <= burst_left - 8'd1;
 				if (burst_left == 8'd1) state <= S_IDLE;

@@ -299,16 +299,16 @@ module spi_layers
 	wire [9:0] lb_rd_addr = {~render_bank, lb_x};
 
 	spi_dpram #(.DW(10), .AW(10)) lbuf_back
-		(.clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[0]),
+		(.wr_clk(clk), .rd_clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[0]),
 		 .rd_addr(lb_rd_addr), .rd_data(lb_back));
 	spi_dpram #(.DW(10), .AW(10)) lbuf_midl
-		(.clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[1]),
+		(.wr_clk(clk), .rd_clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[1]),
 		 .rd_addr(lb_rd_addr), .rd_data(lb_midl));
 	spi_dpram #(.DW(10), .AW(10)) lbuf_fore
-		(.clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[2]),
+		(.wr_clk(clk), .rd_clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[2]),
 		 .rd_addr(lb_rd_addr), .rd_data(lb_fore));
 	spi_dpram #(.DW(10), .AW(10)) lbuf_text
-		(.clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[3]),
+		(.wr_clk(clk), .rd_clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[3]),
 		 .rd_addr(lb_rd_addr), .rd_data(lb_text));
 
 	// Screen x of the pixel currently being emitted.

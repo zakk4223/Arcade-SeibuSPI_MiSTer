@@ -648,6 +648,35 @@ find. Keep the extra level of hierarchy. After the fix, every clock is clean:
 TNS 0.000 on every domain. That is the empty-skeleton baseline; the margin will
 shrink as the CPU, video and sound land, and `clk_ram` has the least of it.
 
+**Do not ask Quartus for a true dual port memory.** Main RAM was briefly true
+dual port — CPU on one side, video DMA read on the other. Quartus refused to
+infer it and **duplicated all four byte lanes**, taking the array from 2 Mbit to
+4 Mbit and overflowing the device: *"device has 553 RAM locations ... design
+needs more than 553"*. It had fitted before only because the DMA port was still
+tied to a constant and had been optimised away entirely, so the cost appeared
+the moment the port became real.
+
+The fix was architectural and is the better design anyway: the DMA moved into
+the CPU's clock domain and now shares the single main RAM port through a
+request/grant handshake in `spi_cpu`. It only runs in short bursts a few times a
+frame (~1.5% of CPU cycles), and the real board steals cycles for the same
+transfers. Block memory went 5,316,901 -> 3,265,253 bits.
+
+One write port plus one read port (simple dual port) *is* inferred cleanly, even
+with different clocks — that is what `spi_dpram` uses for the video RAMs.
+
+Tracing that arbitration also exposed a pre-existing off-by-one: `spi_cpu`
+delivered main RAM reads one cycle too early. `ram_addr` is a register, so the
+RAM only sees it the cycle *after* it is assigned, and the RAM registers its
+output on top of that — delivery is two stages deep, not one. It would have
+returned stale data for every RAM read the CPU made.
+
+**Verilator lint is not a substitute for a Quartus run.** `spi_mixer` drove
+`red/green/blue` from two `always @(posedge clk)` blocks — the reset in one and
+the pixel output in the other. Verilator `-Wall` passed it; Quartus rejected it
+outright with "Can't resolve multiple constant drivers". Run at least
+`quartus_map` before believing a module is done.
+
 **Never edit `files.qip` or the QSF while a compile is running.** Quartus notices
 the change, rewrites the QSF with `sys.tcl` and a stale snapshot of `files.qip`
 expanded inline, and then dies with "quartus_map ended unexpectedly". The
