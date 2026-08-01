@@ -12,6 +12,10 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_cpu.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_io.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_mainram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_reset_sync.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_dpram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_dma.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_layers.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_mixer.sv
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/seibu_partial_add.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_tile_decrypt.sv

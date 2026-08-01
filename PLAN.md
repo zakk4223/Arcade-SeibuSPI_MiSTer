@@ -686,8 +686,26 @@ Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
         (a registered one accepts every write twice, because `l1_cache` holds
         `valid` until it observes `ready`), and `cpu_addr` is declared `[31:2]`
         so the main RAM dword index is `cpu_addr[17:2]`, not `[15:0]`.
-- [ ] **T4** Video: DMA engines, palette, 4 layer pipelines, sprite engine,
+- [~] **T4** Video: DMA engines, palette, 4 layer pipelines, sprite engine,
       mixer, 320x240 output + ROT270.
+      - [x] `spi_dma.sv` — tilemap / palette / sprite DMA, including the oddly
+            interleaved rowscroll destinations and the segment skipping when
+            rowscroll is off. Triggers are edge detected because they arrive
+            from clk_cpu, where one cycle spans two clk_sys cycles.
+      - [x] `spi_layers.sv` — back / midl / fore (16x16 6bpp) and text
+            (8x8 5bpp), rendered one line ahead into double-buffered line
+            buffers, sharing the SDRAM gfx channel and the tilemap RAM port.
+            Fetch-time tile decryption is wired in here.
+      - [x] `spi_mixer.sv` — MAME's exact composite order including the
+            "draw back again" step, the alpha table, and BGR555 expansion.
+      - [x] `spi_dpram.sv`, tilemap / palette / sprite RAMs.
+      - [ ] **`spi_sprite.sv` — not started.** The mixer's sprite input is tied
+            invalid, so it currently composites the four tile layers alone.
+            The decrypt unit it needs is already done and verified (T2).
+      - [ ] Not yet verified against MAME frame output; only lint + synthesis
+            so far. The most likely first bugs are the mixer's one-pixel
+            pipeline offset (`lb_x` vs the mixer's 8-cycle palette sequence)
+            and the line-buffer bank phasing.
 - [ ] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
 - [ ] **T6** MRA, docs, build verification.
 

@@ -65,7 +65,8 @@ module spi_layers
 
 	// Line buffer read side (the mixer)
 	input       [8:0] lb_x,
-	input             lb_bank,        // buffer being displayed
+	output            lb_bank,        // bank currently being written; the
+	                                 // mixer reads the other one
 	output      [9:0] lb_back,
 	output      [9:0] lb_midl,
 	output      [9:0] lb_fore,
@@ -294,7 +295,8 @@ module spi_layers
 	reg  [9:0] lb_wr_data;
 	reg  [3:0] lb_we;      // one bit per layer
 
-	wire [9:0] lb_rd_addr = {~lb_bank, lb_x};
+	assign lb_bank = render_bank;
+	wire [9:0] lb_rd_addr = {~render_bank, lb_x};
 
 	spi_dpram #(.DW(10), .AW(10)) lbuf_back
 		(.clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[0]),

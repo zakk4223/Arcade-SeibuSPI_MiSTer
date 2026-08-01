@@ -109,8 +109,8 @@ module spi_top
 	wire  [3:0] io_be;
 	wire        io_wr, io_rd;
 
-	// Main RAM read port for the video DMA engines (T4).
-	wire [15:0] dma_addr = 16'd0;
+	// Main RAM read port for the video DMA engines.
+	wire [15:0] dma_addr;
 	wire [31:0] dma_dout;
 
 	// The vblank pulse is one clk_sys cycle, which a half-rate clock can miss,
@@ -220,31 +220,139 @@ module spi_top
 	end
 
 	// ------------------------------------------------------------------
-	// TODO(T4) tilemap / sprite / palette pipelines and the mixer
+	// Video RAMs
+	// ------------------------------------------------------------------
+	wire [11:0] tm_wa;   wire [31:0] tm_wd;   wire tm_we;
+	wire [11:0] pal_wa;  wire [29:0] pal_wd;  wire pal_we;
+	wire  [9:0] spr_wa;  wire [31:0] spr_wd;  wire spr_we;
+
+	wire [11:0] tm_ra;   wire [31:0] tm_rd;
+	wire [11:0] pal_ra;  wire [29:0] pal_rd;
+
+	spi_dpram #(.DW(32), .AW(12)) tilemap_ram
+		(.clk(clk_sys), .wr_addr(tm_wa),  .wr_data(tm_wd),  .wr_en(tm_we),
+		 .rd_addr(tm_ra),  .rd_data(tm_rd));
+
+	spi_dpram #(.DW(30), .AW(12)) palette_ram
+		(.clk(clk_sys), .wr_addr(pal_wa), .wr_data(pal_wd), .wr_en(pal_we),
+		 .rd_addr(pal_ra), .rd_data(pal_rd));
+
+	// Sprite RAM: written by the DMA, read by the sprite engine (T4b).
+	wire [9:0]  spr_ra = 10'd0;
+	wire [31:0] spr_rd;
+	spi_dpram #(.DW(32), .AW(10)) sprite_ram
+		(.clk(clk_sys), .wr_addr(spr_wa), .wr_data(spr_wd), .wr_en(spr_we),
+		 .rd_addr(spr_ra), .rd_data(spr_rd));
+
+	// ------------------------------------------------------------------
+	// Video DMA
+	// ------------------------------------------------------------------
+	wire dma_busy;
+
+	spi_dma dma
+	(
+		.clk              (clk_sys),
+		.reset            (vid_reset),
+		.trig_tilemap     (dma_tilemap),
+		.trig_palette     (dma_palette),
+		.trig_sprite      (dma_sprite),
+		.dma_src          (dma_src[17:2]),
+		.dma_len          (dma_len),
+		.rowscroll_enable (rowscroll_enable),
+		.ram_addr         (dma_addr),
+		.ram_data         (dma_dout),
+		.tm_addr          (tm_wa),  .tm_data (tm_wd),  .tm_we (tm_we),
+		.pal_addr         (pal_wa), .pal_data(pal_wd), .pal_we(pal_we),
+		.spr_addr         (spr_wa), .spr_data(spr_wd), .spr_we(spr_we),
+		.busy             (dma_busy)
+	);
+
+	// ------------------------------------------------------------------
+	// Tile layers
+	//
+	// bg_fore_pos is 0x4000 for a 6 MB tile region (seibuspi_v.cpp:580); rdfts
+	// has exactly 0x600000 of tiles.
+	// ------------------------------------------------------------------
+	wire [8:0] lb_x = hcnt[8:0];
+	wire       lb_bank;
+	wire [9:0] lb_back, lb_midl, lb_fore, lb_text;
+	wire       layers_busy;
+
+	spi_layers layers
+	(
+		.clk              (clk_sys),
+		.reset            (vid_reset),
+		.vcnt             (vcnt),
+		.line_start       (line_start),
+
+		.scroll_bx        (scroll_bx), .scroll_by(scroll_by),
+		.scroll_mx        (scroll_mx), .scroll_my(scroll_my),
+		.scroll_fx        (scroll_fx), .scroll_fy(scroll_fy),
+		.rowscroll_enable (rowscroll_enable),
+		.fore_layer_d13   (fore_layer_d13),
+		.rf2_layer_bank   (rf2_layer_bank),
+		.bg_fore_pos      (15'h4000),
+
+		.tm_addr          (tm_ra),
+		.tm_data          (tm_rd),
+
+		.sdr_addr         (sdr_gfx_addr),
+		.sdr_dout         (sdr_gfx_dout),
+		.sdr_req          (sdr_gfx_req),
+		.sdr_ack          (sdr_gfx_ack),
+
+		.lb_x             (lb_x),
+		.lb_bank          (lb_bank),
+		.lb_back          (lb_back),
+		.lb_midl          (lb_midl),
+		.lb_fore          (lb_fore),
+		.lb_text          (lb_text),
+
+		.busy             (layers_busy)
+	);
+
+	// ------------------------------------------------------------------
+	// Mixer
+	//
+	// TODO(T4b): the sprite engine. Until it lands the sprite input is marked
+	// invalid, so the mixer composites the four tile layers alone.
+	// ------------------------------------------------------------------
+	wire visible = ~hblank & ~vblank;
+
+	spi_mixer mixer
+	(
+		.clk          (clk_sys),
+		.reset        (vid_reset),
+		.ce_pix       (ce_pix),
+		.layer_enable (layer_enable),
+		.visible      (visible),
+		.lb_back      (lb_back),
+		.lb_midl      (lb_midl),
+		.lb_fore      (lb_fore),
+		.lb_text      (lb_text),
+		.lb_spr       (15'd0),
+		.pal_addr     (pal_ra),
+		.pal_data     (pal_rd),
+		.red          (red),
+		.green        (green),
+		.blue         (blue)
+	);
+
+	// ------------------------------------------------------------------
 	// TODO(T5) Z80 + YMF271
 	// ------------------------------------------------------------------
-	assign sdr_gfx_addr = 25'd0;
-	assign sdr_gfx_req  = 1'b0;
 	assign sdr_spr_addr = 25'd0;
 	assign sdr_spr_req  = 1'b0;
 	assign sdr_pcm_addr = 25'd0;
 	assign sdr_pcm_req  = 1'b0;
 
-	assign red   = 8'd0;
-	assign green = 8'd0;
-	assign blue  = 8'd0;
-
 	assign audio_l = 16'd0;
 	assign audio_r = 16'd0;
 
 	// Signals not yet consumed; each disappears as its block lands.
-	wire _unused = &{1'b0, clk_ram, line_start, vid_reset, hcnt, vcnt, dma_dout,
-	                 layer_enable, rowscroll_enable, fore_layer_d13,
-	                 rf2_layer_bank, scroll_bx, scroll_by, scroll_mx, scroll_my,
-	                 scroll_fx, scroll_fy, dma_src, dma_len,
-	                 dma_tilemap, dma_palette, dma_sprite,
+	wire _unused = &{1'b0, clk_ram, dma_busy, layers_busy, spr_rd,
+	                 hcnt[9], dma_src[1:0], lb_bank,
 	                 sndfifo_din, sndfifo_wr,
-	                 sdr_gfx_dout, sdr_gfx_ack, sdr_spr_dout, sdr_spr_ack,
-	                 sdr_pcm_dout, sdr_pcm_ack};
+	                 sdr_spr_dout, sdr_spr_ack, sdr_pcm_dout, sdr_pcm_ack};
 
 endmodule
