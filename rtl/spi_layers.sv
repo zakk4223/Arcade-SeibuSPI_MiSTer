@@ -90,7 +90,9 @@ module spi_layers
 	output     [14:0] dbg_tcode,
 	output     [24:0] dbg_gfx_addr,
 	output            dbg_emit,
-	output            dbg_busy
+	output            dbg_busy,
+	output     [15:0] dbg_rowscroll,
+	output      [8:0] dbg_xstart
 );
 
 `include "spi_defs.vh"
@@ -359,6 +361,8 @@ module spi_layers
 	assign dbg_gfx_addr = gfx_base;
 	assign dbg_emit     = (state == S_EMIT);
 	assign dbg_busy     = busy;
+	assign dbg_rowscroll = rowscroll;
+	assign dbg_xstart    = x_start;
 
 	// ------------------------------------------------------------------
 	// Sequencer

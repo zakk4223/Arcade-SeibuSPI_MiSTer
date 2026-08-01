@@ -298,6 +298,7 @@ int main(int argc, char **argv)
     std::vector<uint16_t> lb_midl_seen(512, 0xFFFF);
     std::vector<std::pair<uint32_t,uint32_t>> fore_codes;
     std::vector<uint32_t> rtl_rgb(512, 0);
+    std::pair<int,int> seen_rs[4] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
@@ -320,6 +321,10 @@ int main(int argc, char **argv)
             if (!dut->dbg_busy && busy_cycles) finished = true;
             if (dut->dbg_layer > max_layer) max_layer = dut->dbg_layer;
         }
+
+        // What rowscroll / x_start does each layer actually use?
+        if (frame == 2 && dut->vcnt == PROBE_Y - 1 && dut->dbg_emit)
+            seen_rs[dut->dbg_layer] = {dut->dbg_rowscroll, dut->dbg_xstart};
 
         // Record the tile codes the fore layer actually fetches.
         if (frame == 2 && dut->vcnt == PROBE_Y - 1 && dut->dbg_emit && dut->dbg_layer == 2) {
@@ -436,6 +441,9 @@ int main(int argc, char **argv)
                 for (int x = 0; x < 300; x++) if (lb_fore_seen[x] == w2[x]) m++;
                 printf("fore (no rowscroll) at offset 0: %zu/300\n", m);
             }
+            for (int L = 0; L < 4; L++)
+                printf("  layer %d: rowscroll=%d x_start=%d\n", L,
+                       (int16_t)seen_rs[L].first, seen_rs[L].second);
             printf("  sprite: %ld pixel writes, min index %d, state hist:",
                    spr_writes, spr_min_index);
             for (int i = 0; i < 13; i++) if (spr_state_hist[i]) printf(" s%d:%ld", i, spr_state_hist[i]);
@@ -479,6 +487,8 @@ int main(int argc, char **argv)
                     {"midl scroll",  0x400, 0xA00, 264, 32, c0,   0},
                     {"midl sx only", 0x400, 0xA00, 264,  0, c0,   0},
                     {"midl sy only", 0x400, 0xA00,   0, 32, c0,   0},
+                    {"sx+1",         0x400, 0xA00,   1,  0, c0,   0},
+                    {"sx-1",         0x400, 0xA00, 511,  0, c0,   0},
                 };
                 for (auto &h : hs) {
                     std::vector<uint16_t> w2;

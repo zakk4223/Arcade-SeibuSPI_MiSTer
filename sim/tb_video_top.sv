@@ -64,6 +64,8 @@ module tb_video_top
 	output     [24:0] dbg_gfx_addr,
 	output            dbg_emit,
 	output            dbg_busy,
+	output     [15:0] dbg_rowscroll,
+	output      [8:0] dbg_xstart,
 	output            dbg_spr_we,
 	output      [3:0] dbg_spr_state,
 	output      [8:0] dbg_spr_index
@@ -123,7 +125,8 @@ module tb_video_top
 		.lb_fore(lb_fore), .lb_text(lb_text),
 		.busy(layers_busy),
 		.dbg_layer(dbg_layer), .dbg_tcode(dbg_tcode),
-		.dbg_gfx_addr(dbg_gfx_addr), .dbg_emit(dbg_emit), .dbg_busy(dbg_busy)
+		.dbg_gfx_addr(dbg_gfx_addr), .dbg_emit(dbg_emit), .dbg_busy(dbg_busy),
+		.dbg_rowscroll(dbg_rowscroll), .dbg_xstart(dbg_xstart)
 	);
 
 	wire  [9:0] spr_ra;

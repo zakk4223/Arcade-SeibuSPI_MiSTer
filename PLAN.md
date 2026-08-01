@@ -824,8 +824,24 @@ Of those, only the first would ever have produced an obvious symptom.
             0x4000 code bits, midl scroll contamination, rowscroll (0 on the
             rows probed), and a vertical shift. The tile codes and gfx
             addresses the RTL fetches match the reference exactly, so this is
-            a horizontal phase error in the fore path specifically -- most
-            likely in `emit_x` / `fine_x` when that layer is set up.
+            a horizontal phase error in the fore path specifically.
+
+            **Narrowed to an exact signature:** the reference reproduces the
+            RTL's fore output **300/300** if `scroll_fx` is increased by 1.
+            So the RTL renders fore as though its X scroll were one larger.
+            MAME's frame agrees with the reference at `sx = 0`, so the RTL is
+            the one that is wrong, not the capture.
+
+            What that rules out: the tile codes and gfx addresses match
+            exactly (a fine_x of 1 shifts pixels without changing which tile
+            is fetched, since `x_start >> 4` is still 0), and taps on the
+            RTL's own `rowscroll` and `x_start` read 0 for the fore layer,
+            the same as back. So `x_start` is 0 where it is observable, yet
+            the emitted pixels land as if `fine_x` were 1. The discrepancy is
+            between `x_start` as sampled and the `fine_x` actually used when
+            `emit_x` is latched in S_GB_WT -- worth checking whether `layer`
+            or `rowscroll` is momentarily stale at that point, since `sx`,
+            `fine_x` and `cur_col` are all combinational off `layer`.
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's
