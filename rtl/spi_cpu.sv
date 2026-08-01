@@ -26,11 +26,16 @@
 //      sequential dwords from `addr`
 //    - writes are always burstcount 1 and produce no `resp_valid`
 //  Only one request is accepted at a time.
+//
+//  This whole block runs on clk_cpu (28.636364 MHz), which is exactly clk_sys/2
+//  and phase aligned. Main RAM's DMA port and the I/O register file's consumers
+//  live on clk_sys; see rtl/pll.v for why the 386 has its own clock.
 //============================================================================
 
 module spi_cpu
 (
-	input             clk,          // clk_sys
+	input             clk,          // clk_cpu, 28.636364 MHz
+	input             clk_vid,      // clk_sys, for the DMA read port
 	input             reset,
 	input             cpu_en,       // 0 = stall the CPU (pause, throttle)
 
@@ -52,8 +57,9 @@ module spi_cpu
 	input      [15:0] dma_addr,
 	output     [31:0] dma_dout,
 
-	// Vertical blanking interrupt
-	input             vbl_rise
+	// Vertical blanking interrupt. Crosses from clk_sys as a toggle: a one-cycle
+	// clk_sys pulse would be invisible to a clock running at half the rate.
+	input             vbl_toggle
 );
 
 `include "spi_defs.vh"
@@ -135,6 +141,7 @@ module spi_cpu
 
 	reg [1:0] istate;
 	reg       inta_responded;
+	reg       vbl_tgl_d;
 
 	always @(posedge clk) begin
 		inta_ready <= 1'b0;
@@ -143,9 +150,11 @@ module spi_cpu
 			istate         <= I_IDLE;
 			inta_responded <= 1'b0;
 			irq_pending    <= 1'b0;
+			vbl_tgl_d      <= vbl_toggle;
 		end
 		else begin
-			if (vbl_rise) irq_pending <= 1'b1;
+			vbl_tgl_d <= vbl_toggle;
+			if (vbl_toggle != vbl_tgl_d) irq_pending <= 1'b1;
 
 			case (istate)
 				I_IDLE: if (cpu_inta && !inta_responded) begin
@@ -198,7 +207,8 @@ module spi_cpu
 
 	spi_mainram mainram
 	(
-		.clk    (clk),
+		.a_clk  (clk),
+		.b_clk  (clk_vid),
 		.a_addr (ram_addr),
 		.a_din  (ram_din),
 		.a_be   (ram_be),

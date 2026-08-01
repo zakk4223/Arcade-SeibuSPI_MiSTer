@@ -9,8 +9,9 @@
 
 module spi_top
 (
-	input             clk_sys,     // 57.272727 MHz
-	input             clk_ram,     // 114.545455 MHz
+	input             clk_sys,     // 57.272727 MHz - video, I/O, sound
+	input             clk_cpu,     // 28.636364 MHz - the 386 (clk_sys / 2)
+	input             clk_ram,     // 114.545455 MHz - SDRAM
 	input             reset,
 	input             rom_ready,
 
@@ -66,10 +67,13 @@ module spi_top
 	wire [9:0] hcnt, vcnt;
 	wire       line_start, vbl_rise;
 
+	wire sys_reset;
+	spi_reset_sync rst_sys (.clk(clk_sys), .rst_in(reset), .rst_out(sys_reset));
+
 	spi_video_timing timing
 	(
 		.clk        (clk_sys),
-		.reset      (reset),
+		.reset      (sys_reset),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
@@ -82,9 +86,23 @@ module spi_top
 	);
 
 	// ------------------------------------------------------------------
+	// Resets
+	//
+	// `reset` and `rom_ready` originate in other clock domains (clk_sys and the
+	// loader's clk_ram), and z386 contains genuine asynchronous clears, so each
+	// domain gets its own synchroniser. See rtl/spi_reset_sync.sv.
+	// ------------------------------------------------------------------
+	wire raw_reset = reset | ~rom_ready;
+
+	wire cpu_reset;
+	spi_reset_sync rst_cpu (.clk(clk_cpu), .rst_in(raw_reset), .rst_out(cpu_reset));
+
+	wire vid_reset;
+	spi_reset_sync rst_vid (.clk(clk_sys), .rst_in(raw_reset), .rst_out(vid_reset));
+
+	// ------------------------------------------------------------------
 	// 386 subsystem
 	// ------------------------------------------------------------------
-	wire        cpu_reset = reset | ~rom_ready;
 
 	wire [10:2] io_addr;
 	wire [31:0] io_wdata, io_rdata;
@@ -95,9 +113,18 @@ module spi_top
 	wire [15:0] dma_addr = 16'd0;
 	wire [31:0] dma_dout;
 
+	// The vblank pulse is one clk_sys cycle, which a half-rate clock can miss,
+	// so it crosses as a toggle.
+	reg vbl_toggle;
+	always @(posedge clk_sys) begin
+		if (sys_reset)     vbl_toggle <= 1'b0;
+		else if (vbl_rise) vbl_toggle <= ~vbl_toggle;
+	end
+
 	spi_cpu cpu
 	(
-		.clk       (clk_sys),
+		.clk       (clk_cpu),
+		.clk_vid   (clk_sys),
 		.reset     (cpu_reset),
 		.cpu_en    (1'b1),
 
@@ -116,7 +143,7 @@ module spi_top
 		.dma_addr  (dma_addr),
 		.dma_dout  (dma_dout),
 
-		.vbl_rise  (vbl_rise)
+		.vbl_toggle (vbl_toggle)
 	);
 
 	// ------------------------------------------------------------------
@@ -132,9 +159,13 @@ module spi_top
 	wire  [7:0] sndfifo_din;
 	wire        sndfifo_wr, coin_latch_rd;
 
+	// The I/O register file is written by the 386, so it lives in the CPU domain.
+	// Its outputs are stable register values read by clk_sys logic; both clocks
+	// come from the same PLL and sit in the same clock group, so TimeQuest
+	// analyses those transfers normally.
 	spi_io io
 	(
-		.clk              (clk_sys),
+		.clk              (clk_cpu),
 		.reset            (cpu_reset),
 
 		.addr             (io_addr),
@@ -175,7 +206,7 @@ module spi_top
 	// the sound CPU lands (T5), latch them here so coins still register.
 	reg [7:0] coin_sr;
 	reg [7:0] coin_prev;
-	always @(posedge clk_sys) begin
+	always @(posedge clk_cpu) begin
 		if (cpu_reset) begin
 			coin_sr   <= 8'd0;
 			coin_prev <= 8'hFF;
@@ -207,7 +238,7 @@ module spi_top
 	assign audio_r = 16'd0;
 
 	// Signals not yet consumed; each disappears as its block lands.
-	wire _unused = &{1'b0, clk_ram, line_start, hcnt, vcnt, dma_dout,
+	wire _unused = &{1'b0, clk_ram, line_start, vid_reset, hcnt, vcnt, dma_dout,
 	                 layer_enable, rowscroll_enable, fore_layer_d13,
 	                 rf2_layer_bank, scroll_bx, scroll_by, scroll_mx, scroll_my,
 	                 scroll_fx, scroll_fy, dma_src, dma_len,

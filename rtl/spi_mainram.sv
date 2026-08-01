@@ -15,12 +15,14 @@
 //  from its store queue, so the CPU never observes it.
 //
 //  Split into four byte lanes so port A gets byte enables; Quartus infers M10K
-//  from this shape.
+//  from this shape. The two ports run on different clocks -- the 386 has its own
+//  28.636 MHz domain -- which is what dual-clock M10K is for.
 //============================================================================
 
 module spi_mainram
 (
-	input             clk,
+	input             a_clk,      // clk_cpu
+	input             b_clk,      // clk_sys
 
 	// Port A - CPU
 	input      [15:0] a_addr,     // dword index
@@ -39,7 +41,7 @@ module spi_mainram
 	(* ramstyle = "M10K" *) reg [7:0] mem2 [0:65535];
 	(* ramstyle = "M10K" *) reg [7:0] mem3 [0:65535];
 
-	always @(posedge clk) begin
+	always @(posedge a_clk) begin
 		if (a_we && a_be[0]) mem0[a_addr] <= a_din[ 7: 0];
 		if (a_we && a_be[1]) mem1[a_addr] <= a_din[15: 8];
 		if (a_we && a_be[2]) mem2[a_addr] <= a_din[23:16];
@@ -48,7 +50,7 @@ module spi_mainram
 		a_dout <= {mem3[a_addr], mem2[a_addr], mem1[a_addr], mem0[a_addr]};
 	end
 
-	always @(posedge clk) begin
+	always @(posedge b_clk) begin
 		b_dout <= {mem3[b_addr], mem2[b_addr], mem1[b_addr], mem0[b_addr]};
 	end
 

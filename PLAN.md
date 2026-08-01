@@ -457,12 +457,44 @@ runs the C algorithm and the RTL over the same pseudo-random inputs.
 
 ```
 50 MHz ref -> PLL:  n=5, m=126  => VCO 1260 MHz
-  c0 = /11  = 114.545454 MHz   clk_ram   (SDRAM)
-  c1 = /22  =  57.272727 MHz   clk_sys   (logic)  = 28.63636 * 2
-  c2 = /11  = 114.545454 MHz   clk_ram shifted -2.5ns for SDRAM_CLK
+  c0 = /11  = 114.545455 MHz   clk_ram   (SDRAM)
+  c1 = /22  =  57.272727 MHz   clk_sys   (video, I/O, sound) = 28.63636 * 2
+  c2 = /44  =  28.636364 MHz   clk_cpu   (the 386)
   pixel clock = clk_sys / 8 = 7.1590909 MHz   (exact)
   Z80 CE      = clk_sys / 8 = 7.1590909 MHz   (exact)
 ```
+
+**Why the 386 has its own clock.** With z386 on clk_sys the design missed setup
+by 1.030 ns (TNS -32.487). Every failing path was internal to the CPU, from
+`IND[0]` to the microcode ROM's address register — nothing to do with the glue
+logic. Upstream z386_MiSTer ships PLL profiles at 50 / 65 / 85 MHz, so the core
+can go faster, but they build with Quartus **Standard** and keep a `seed_sweep.py`
+in the repo, which says something about how hard 85 MHz is to hit.
+
+Halving the CPU clock fixes it with margin and improves accuracy at the same
+time: 28.64 MHz is far closer to the board's real 386DX-25 than 57.27 MHz was.
+clk_cpu is exactly clk_sys/2 and phase aligned from the same PLL, so every
+clk_cpu edge coincides with a clk_sys edge and both sit in the same clock group
+— TimeQuest analyses the crossings normally instead of them being a true CDC.
+
+Crossings that needed care:
+* **vblank -> CPU IRQ**: a one-cycle clk_sys pulse is invisible to a half-rate
+  clock, so it crosses as a toggle (`vbl_toggle`) and is edge-detected in
+  `spi_cpu`.
+* **main RAM**: dual-clock M10K, port A on clk_cpu, port B (video DMA) on
+  clk_sys.
+* **I/O registers**: written on clk_cpu, read by video on clk_sys. These are
+  stable register values, not pulses.
+* **DMA trigger pulses** (clk_cpu, one cycle = two clk_sys cycles) will need
+  edge detection in the clk_sys DMA engine when T4 lands, or they will fire
+  twice.
+* **reset**: `reset` comes from clk_sys logic and `rom_ready` from the loader on
+  clk_ram, while z386 contains genuine asynchronous clears
+  (`dsp_mul.sv:57`, `always_ff @(posedge clk or negedge reset_n)`). Feeding that
+  combination straight in produced a real recovery violation
+  (`rom_loader|rom_ready` -> `dsp_mul|acc[*]`, -0.394 ns), which in hardware
+  means the CPU can leave reset part-way through a cycle. Each domain now gets
+  its own `spi_reset_sync`.
 * **YMF271** 16.9344 MHz — unrelated to 28.636 MHz. Generate a fractional clock
   enable from clk_sys, or better, generate the 44100 Hz sample tick directly
   (16934400 / 384 = 44100) and clock the synth's internal slot pipeline from
@@ -569,7 +601,15 @@ sim/                      Verilator testbenches for the decrypt units
    fetch budget. Measure in sim before trusting it.
 3. **SDRAM at 114.5 MHz** with CAS3 — above the usual 100 MHz for this controller.
    Fallback: drop to 95.45 MHz (28.63636 × 10/3) and re-check bandwidth.
-4. **z386 accuracy/speed** vs a real 386DX-25 (see §6).
+4. **z386 accuracy/speed** vs a real 386DX-25 (see §6). Currently the core runs
+   at the full 57.27 MHz `clk_sys`, which is 2.3x a 386DX-25 before counting
+   z386x's caches and fast paths. Gameplay speed is locked to the 54 Hz vblank
+   interrupt either way, but the per-frame compute budget is not: Raiden
+   Fighters' slowdown under heavy fire is part of how the game plays, and at
+   this speed it will not happen. `spi_cpu` already has a `cpu_en` input for
+   this; what it needs is a calibrated throttle and an OSD control. z386 has no
+   clock-enable port, so the lever is either wait-states on the memory
+   interface or adding a real `cpu_en` to the core. **Unresolved.**
 5. **Decrypt table transcription** (see §5.4) — script-generated + Verilator-checked.
 6. **Alpha blending** is a MAME approximation, not the real hardware behaviour
    (MAME's own TODO). Ours will be equally approximate.
@@ -631,8 +671,21 @@ Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
         while the test reference is copied from MAME by `tools/gen_ref_c.py`
         (an extractor). Two independent paths from the same source, so agreement
         validates the parser rather than being self-consistent.
-- [ ] **T3** z386 integration: main RAM, PRG ROM window + mirror, I/O decode,
+- [x] **T3** z386 integration: main RAM, PRG ROM window + mirror, I/O decode,
       vblank IRQ / vector 0x20, uncacheable-window patch.
+      - `rtl/z386/` vendored at `516ced0`; the one local change is kept as
+        `patches/z386-uncached-window.patch` and is backward compatible.
+      - `rtl/spi_cpu.sv`, `rtl/spi_io.sv`, `rtl/spi_mainram.sv`.
+      - QSF must define `Z386_QUARTUS_M10K_UCODE=1` and `Z386_ALTERA_ALU=1`,
+        as upstream's own project does. Without the first, the microcode ROM
+        synthesises into logic instead of M10K.
+      - `files.qip` must list `z386_pkg.sv` before everything else, and the
+        Verilator lint target too — a plain glob sorts it last and every type
+        reference then fails.
+      - Two bugs worth remembering: the bus `ready` has to be combinational
+        (a registered one accepts every write twice, because `l1_cache` holds
+        `valid` until it observes `ready`), and `cpu_addr` is declared `[31:2]`
+        so the main RAM dword index is `cpu_addr[17:2]`, not `[15:0]`.
 - [ ] **T4** Video: DMA engines, palette, 4 layer pipelines, sprite engine,
       mixer, 320x240 output + ROT270.
 - [ ] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).

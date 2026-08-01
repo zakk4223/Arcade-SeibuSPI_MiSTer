@@ -258,8 +258,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 ///////////////////////   CLOCKS   ///////////////////////////////
 
-wire clk_sys;   // 57.272727 MHz
-wire clk_ram;   // 114.545455 MHz
+wire clk_sys;   //  57.272727 MHz - video, I/O, sound
+wire clk_cpu;   //  28.636364 MHz - the 386
+wire clk_ram;   // 114.545455 MHz - SDRAM
 wire pll_locked;
 
 pll pll
@@ -268,6 +269,7 @@ pll pll
 	.rst     (1'b0),
 	.outclk_0(clk_ram),
 	.outclk_1(clk_sys),
+	.outclk_2(clk_cpu),
 	.locked  (pll_locked)
 );
 
@@ -407,6 +409,7 @@ wire [15:0] audio_l, audio_r;
 spi_top spi_top
 (
 	.clk_sys      (clk_sys),
+	.clk_cpu      (clk_cpu),
 	.clk_ram      (clk_ram),
 	.reset        (reset),
 	.rom_ready    (rom_ready),
