@@ -74,7 +74,11 @@ module tb_video_top
 	output      [3:0] dbg_emiti,
 	output            dbg_spr_we,
 	output      [3:0] dbg_spr_state,
-	output      [8:0] dbg_spr_index
+	output      [8:0] dbg_spr_index,
+	output      [5:0] dbg_spr_pix,
+	output signed [10:0] dbg_spr_emitx,
+	output     [15:0] dbg_spr_code,
+	output      [8:0] dbg_spr_sx, dbg_spr_sy
 );
 
 	wire hsync, vsync, line_start, vbl_rise;
@@ -158,7 +162,9 @@ module tb_video_top
 		.sdr_req(spr_sdr_req), .sdr_ack(spr_sdr_ack),
 		.lb_x(lb_x), .lb_wrap(lb_wrap), .lb_out(lb_spr),
 		.busy(spr_busy),
-		.dbg_we(dbg_spr_we), .dbg_state(dbg_spr_state), .dbg_index(dbg_spr_index)
+		.dbg_we(dbg_spr_we), .dbg_state(dbg_spr_state), .dbg_index(dbg_spr_index),
+		.dbg_pix(dbg_spr_pix), .dbg_emitx(dbg_spr_emitx), .dbg_code(dbg_spr_code),
+		.dbg_sx(dbg_spr_sx), .dbg_sy(dbg_spr_sy)
 	);
 
 	spi_mixer mixer

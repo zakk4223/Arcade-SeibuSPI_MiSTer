@@ -66,7 +66,11 @@ module spi_sprite
 	// Debug taps for the testbench
 	output            dbg_we,
 	output      [3:0] dbg_state,
-	output      [8:0] dbg_index
+	output      [8:0] dbg_index,
+	output      [5:0] dbg_pix,
+	output signed [10:0] dbg_emitx,
+	output     [15:0] dbg_code,
+	output      [8:0] dbg_sx, dbg_sy
 );
 
 `include "spi_defs.vh"
@@ -74,6 +78,11 @@ module spi_sprite
 	assign dbg_we    = lb_we;
 	assign dbg_state = state;
 	assign dbg_index = index;
+	assign dbg_pix   = pix_sel;
+	assign dbg_emitx = emit_x;
+	assign dbg_code  = code;
+	assign dbg_sx    = sx_raw;
+	assign dbg_sy    = sy_raw;
 
 	// ------------------------------------------------------------------
 	// Line buffers, double buffered like the tile layers
@@ -151,8 +160,15 @@ module spi_sprite
 	// ------------------------------------------------------------------
 	// Decryption inputs: three 16-bit words, one per chunk
 	// ------------------------------------------------------------------
-	reg [15:0] y1, y2, y3;
+	// One 64-bit read per chunk already covers the whole 16-pixel row: the four
+	// row bytes hold word i (pixels 0-7) and word i+1 (pixels 8-15). Both are
+	// latched, so a row costs three reads rather than six.
+	reg [15:0] y1a, y1b, y2a, y2b, y3a, y3b;
 	reg        half;                      // which 8 pixels of the row
+
+	wire [15:0] y1 = half ? y1b : y1a;
+	wire [15:0] y2 = half ? y2b : y2a;
+	wire [15:0] y3 = half ? y3b : y3a;
 
 	wire [5:0] p0, p1, p2, p3, p4, p5, p6, p7;
 
@@ -274,6 +290,7 @@ module spi_sprite
 				if (y_hit_now && code != 16'd0) begin
 					axc   <= 3'd0;
 					chunk <= 2'd0;
+					half  <= 1'b0;
 					state <= S_REQ;
 				end
 				else state <= S_NEXTS;
@@ -284,6 +301,7 @@ module spi_sprite
 				else begin
 					axc   <= axc + 3'd1;
 					chunk <= 2'd0;
+					half  <= 1'b0;
 					state <= S_REQ;
 				end
 			end
@@ -298,12 +316,20 @@ module spi_sprite
 				// 4 bytes of the row, selected by bit 2 of the address
 				fetched <= sdr_dout;
 				case (chunk)
-					2'd0: y1 <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-					2'd1: y2 <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-					default: y3 <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+					2'd0: begin
+						y1a <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+						y1b <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+					end
+					2'd1: begin
+						y2a <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+						y2b <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+					end
+					default: begin
+						y3a <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+						y3b <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+					end
 				endcase
 				if (chunk == 2'd2) begin
-					half  <= 1'b0;
 					pcnt  <= 3'd0;
 					state <= S_EMIT;
 				end
@@ -321,12 +347,14 @@ module spi_sprite
 				end
 				pcnt <= pcnt + 3'd1;
 				if (pcnt == 3'd7) begin
+					// Both halves are already latched, so the second 8 pixels
+					// need no further fetch. `half` is cleared when a new
+					// column starts, NOT here -- clearing it in S_WAIT was what
+					// made the engine loop forever on one tile.
 					if (half) state <= S_NEXTC;
 					else begin
-						// second half of the row: the next word of each chunk
-						half  <= 1'b1;
-						chunk <= 2'd0;
-						state <= S_REQ;
+						half <= 1'b1;
+						pcnt <= 3'd0;
 					end
 				end
 			end

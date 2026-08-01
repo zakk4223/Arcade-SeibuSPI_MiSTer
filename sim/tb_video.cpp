@@ -304,6 +304,7 @@ int main(int argc, char **argv)
     int emit_lo[4] = {9999,9999,9999,9999}, emit_hi[4] = {-9999,-9999,-9999,-9999};
     long emit_cnt[4] = {};
     std::vector<std::array<int,4>> fore_emits;
+    std::vector<std::array<int,5>> spr_emits;
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
@@ -315,6 +316,11 @@ int main(int argc, char **argv)
         // Record the back-layer line buffer across one scanline of frame 2.
         if (frame == 2 && dut->vcnt == PROBE_Y - 1) {
             if (dut->dbg_spr_we) spr_writes++;
+            if (dut->dbg_spr_state == 9 && spr_emits.size() < 24) {   // S_EMIT
+                int ex = (int)dut->dbg_spr_emitx; if (ex > 1023) ex -= 2048;
+                spr_emits.push_back({(int)dut->dbg_spr_code, ex, (int)dut->dbg_spr_pix,
+                                     (int)dut->dbg_spr_sx, (int)dut->dbg_spr_sy});
+            }
             spr_state_hist[dut->dbg_spr_state]++;
             if (dut->dbg_spr_index < spr_min_index) spr_min_index = dut->dbg_spr_index;
         }
@@ -481,6 +487,13 @@ int main(int argc, char **argv)
                 printf(" emit_x %d..%d over %ld cycles", emit_lo[L], emit_hi[L], emit_cnt[L]);
                 printf("\n");
             }
+            printf("  sprite emits (code, emit_x, pix, sx, sy):\n   ");
+            for (size_t i = 0; i < spr_emits.size(); i++) {
+                printf("(%04X,%d,%02X,%d,%d) ", spr_emits[i][0], spr_emits[i][1],
+                       spr_emits[i][2], spr_emits[i][3], spr_emits[i][4]);
+                if ((i % 4) == 3) printf("\n   ");
+            }
+            printf("\n");
             printf("  sprite: %ld pixel writes, min index %d, state hist:",
                    spr_writes, spr_min_index);
             for (int i = 0; i < 13; i++) if (spr_state_hist[i]) printf(" s%d:%ld", i, spr_state_hist[i]);
