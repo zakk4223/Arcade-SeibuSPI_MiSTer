@@ -280,7 +280,9 @@ module spi_top
 	// bg_fore_pos is 0x4000 for a 6 MB tile region (seibuspi_v.cpp:580); rdfts
 	// has exactly 0x600000 of tiles.
 	// ------------------------------------------------------------------
-	wire [8:0] lb_x = hcnt[8:0];
+	// Lead the line-buffer read by one pixel: the mixer's composite is only
+	// stable a pixel after its palette lookups finish.
+	wire [8:0] lb_x = hcnt[8:0] + 9'd1;
 	wire       lb_bank;
 	wire [9:0] lb_back, lb_midl, lb_fore, lb_text;
 	wire       layers_busy;

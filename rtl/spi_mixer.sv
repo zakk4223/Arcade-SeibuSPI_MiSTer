@@ -109,9 +109,12 @@ module spi_mixer
 		endcase
 	end
 
-	// One RAM entry holds two pens; bit 0 of the index selects the half.
-	reg pen_lsb;
-	wire [14:0] pal_pen = pen_lsb ? pal_data[29:15] : pal_data[14:0];
+	// One RAM entry holds two pens; bit 0 of the index selects the half. The
+	// selector has to be delayed to line up with the data: pal_addr is a
+	// register, so the RAM only sees it the cycle after it is assigned, and the
+	// RAM registers its output on top of that -- two cycles from issue to data.
+	reg pen_lsb, pen_lsb_d;
+	wire [14:0] pal_pen = pen_lsb_d ? pal_data[29:15] : pal_data[14:0];
 
 	// ------------------------------------------------------------------
 	// Alpha table (seibuspi_v.cpp:603)
@@ -191,14 +194,16 @@ module spi_mixer
 			pal_addr <= pen_sel[12:1];
 			pen_lsb  <= pen_sel[0];
 
-			// The entry requested last cycle lands now.
+			pen_lsb_d <= pen_lsb;
+
+			// Issued at step N, the entry lands at step N+2.
 			case (step)
-				3'd1: begin rgb0     <= pal_pen; end
-				3'd2: begin rgb_back <= pal_pen; a_back <= alpha_of(pen_back); end
-				3'd3: begin rgb_midl <= pal_pen; a_midl <= alpha_of(pen_midl); end
-				3'd4: begin rgb_fore <= pal_pen; a_fore <= alpha_of(pen_fore); end
-				3'd5: begin rgb_text <= pal_pen; a_text <= alpha_of(pen_text); end
-				3'd6: begin rgb_spr  <= pal_pen; a_spr  <= alpha_of(pen_spr);  end
+				3'd2: begin rgb0     <= pal_pen; end
+				3'd3: begin rgb_back <= pal_pen; a_back <= alpha_of(pen_back); end
+				3'd4: begin rgb_midl <= pal_pen; a_midl <= alpha_of(pen_midl); end
+				3'd5: begin rgb_fore <= pal_pen; a_fore <= alpha_of(pen_fore); end
+				3'd6: begin rgb_text <= pal_pen; a_text <= alpha_of(pen_text); end
+				3'd7: begin rgb_spr  <= pal_pen; a_spr  <= alpha_of(pen_spr);  end
 				default: ;
 			endcase
 
@@ -233,9 +238,19 @@ module spi_mixer
 	wire [23:0] m8 = draw_spr3                  ? blend(m7, cspr,  a_spr)  : m7;
 	wire [23:0] m9 = (en_text && !trans_text)   ? blend(m8, ctext, a_text) : m8;
 
+	// rgb_spr is latched on the same edge as ce_pix, so the composite is only
+	// stable afterwards. Take it at step 1 of the following pixel and hold it;
+	// callers lead lb_x by one pixel to line the image back up.
+	reg vis_d;
 	always @(posedge clk) begin
-		if (reset)       {red, green, blue} <= 24'd0;
-		else if (ce_pix) {red, green, blue} <= visible ? m9 : 24'd0;
+		if (reset) begin
+			{red, green, blue} <= 24'd0;
+			vis_d <= 1'b0;
+		end
+		else begin
+			if (ce_pix) vis_d <= visible;
+			if (step == 3'd1) {red, green, blue} <= vis_d ? m9 : 24'd0;
+		end
 	end
 
 endmodule

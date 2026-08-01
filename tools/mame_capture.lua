@@ -108,6 +108,21 @@ slop_tap = space:install_write_tap(0x400, 0x7ff, "spi_video_io", function(offset
     end
 end)
 
+-- MAME decrypts the graphics regions in place at init, so dumping one gives a
+-- ground-truth decrypted image to check our fetch-time decryption against.
+local function dump_region(tag, name, limit, start)
+    local rg = mach.memory.regions[tag]
+    if not rg then return 0 end
+    start = start or 0
+    local n = limit and math.min(limit, rg.size - start) or (rg.size - start)
+    local t = {}
+    for i = 0, n - 1 do t[#t+1] = string.char(rg:read_u8(start + i)) end
+    local f = assert(io.open(OUT .. "/" .. name, "wb"))
+    f:write(table.concat(t))
+    f:close()
+    return n
+end
+
 local function dump_share(tag, name)
     local sh = mach.memory.shares[tag]
     if not sh then return 0 end
@@ -159,6 +174,11 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
     wf("dma_tilemap_src.bin", cap.tilemap)
     wf("dma_palette_src.bin", cap.palette)
     if cap.sprite then wf("dma_sprite_src.bin", cap.sprite) end
+
+    dump_region(":maincpu", "maincpu.bin")
+    dump_region(":chars", "chars_decrypted.bin")
+    dump_region(":tiles", "tiles_decrypted_head.bin", 0x40000)
+    dump_region(":tiles", "tiles_decrypted_bg2.bin", 0x40000, 0x480000)
 
     local n_main = dump_share(":mainram",     "mainram.bin")
     local n_tm   = dump_share(":tilemap_ram", "tilemap_ram.bin")

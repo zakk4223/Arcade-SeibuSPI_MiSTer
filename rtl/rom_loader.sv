@@ -9,6 +9,13 @@
 //  3-byte group and a third supplies byte 2. So the MRA just concatenates the
 //  raw files in a fixed order and this module places every byte.
 //
+//  NOTE on the 24-bit word mode: MAME's ROM_GROUPWORD swaps the two bytes of
+//  each source word when the destination is a plain ROM_REGION, as "chars" and
+//  "tiles" are. The 32-bit modes do NOT swap, because "maincpu" is declared
+//  ROM_REGION32_LE. This was verified by comparing tools/build_sdram_image.py's
+//  output against MAME's own :maincpu region (byte exact) and against its
+//  decrypted :chars and :tiles regions (exact after decryption).
+//
 //  One 16-bit masked SDRAM write per input byte. That caps the loader at about
 //  14 MB/s, at or above what the HPS delivers over ioctl, so merging adjacent
 //  bytes into single writes would not measurably help.
@@ -52,7 +59,7 @@ module rom_loader
 	localparam [3:0] M_24_B0   = 4'd7;   // dest = base + i*3 + 0
 	localparam [3:0] M_24_B1   = 4'd8;   // dest = base + i*3 + 1
 	localparam [3:0] M_24_B2   = 4'd9;   // dest = base + i*3 + 2
-	localparam [3:0] M_24_W01  = 4'd10;  // dest = base + (i>>1)*3 + (i&1)
+	localparam [3:0] M_24_W01  = 4'd10;  // dest = base + (i>>1)*3 + (1 - (i&1))
 
 	localparam [3:0] NPARTS = 4'd14;
 
@@ -105,7 +112,7 @@ module rom_loader
 			M_24_B0 : scat = {off[23:0], 1'b0} + off;
 			M_24_B1 : scat = {off[23:0], 1'b0} + off + 25'd1;
 			M_24_B2 : scat = {off[23:0], 1'b0} + off + 25'd2;
-			M_24_W01: scat = {off[23:1], 1'b0} + {1'b0, off[24:1]} + {24'd0, off[0]};
+			M_24_W01: scat = {off[23:1], 1'b0} + {1'b0, off[24:1]} + {24'd0, ~off[0]};
 			default : scat =  off;
 		endcase
 	end

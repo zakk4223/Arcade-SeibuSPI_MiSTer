@@ -692,6 +692,55 @@ expanded inline, and then dies with "quartus_map ended unexpectedly". The
 template's "do not add files in the Quartus IDE" warning covers this case too.
 Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
 
+## 12. Golden-reference testing against MAME
+
+MAME exposes the SPI driver's internals by name, which makes it a usable oracle
+rather than just a thing to read:
+
+* shares `:mainram`, `:tilemap_ram`, `:palette_ram`, `:sprite_ram`
+* regions `:maincpu`, `:chars`, `:tiles` -- and the graphics regions are
+  **decrypted in place at init**, so they are ground truth for the decryption
+
+`tools/mame_capture.lua` drives this; `tools/build_sdram_image.py` builds the
+SDRAM image from a ROM set (matching by CRC32, since merged sets store shared
+ROMs under the parent's filenames). Tests: `make -C sim run-dma`, `run-video`.
+
+Traps worth remembering:
+
+* **Reading memory inside a MAME write tap segfaults** -- it re-enters the
+  memory system. Shadow registers in the tap; read RAM in the frame notifier.
+* **Lua subscriptions must be held in globals.** Held in a local, the tap and
+  frame notifier are collected once the autoboot chunk ends and silently stop
+  firing, which looks exactly like the game never touching the hardware.
+* **The DMA reads main RAM at the instant it is triggered**, and the game has
+  overwritten it by the frame notifier. Comparing against an end-of-frame dump
+  showed ~20% of tilemap entries differing for no real reason. The script
+  shadows main RAM for one frame and snapshots the source at trigger time.
+* `screen:pixels()` returns (data, width, height); `f:write(scr:pixels())`
+  appends the dimensions as text.
+
+### What this caught that nothing else would have
+
+1. **spi_dma's segment counter was 11 bits** but the palette moves 3072 dwords.
+   It wrapped to 1024 and left two thirds of the palette unwritten. The first
+   mismatch landed at exactly 0x400.
+2. **ROM_LOAD24_WORD byte order was backwards.** MAME's ROM_GROUPWORD swaps the
+   bytes of each source word when the destination is a plain ROM_REGION, as
+   `chars` and `tiles` are; it does NOT for `maincpu`, which is
+   ROM_REGION32_LE. `tb_rom_loader` had passed all along because it compared
+   the RTL against my own reference implementing the same wrong rule --
+   self-consistent, not correct. Now verified against MAME's actual regions:
+   PRG byte-exact, chars and tiles exact after decryption.
+3. **The gfx plane order was reversed.** `gfx_layout.planeoffset[]` is listed
+   MOST significant plane first -- `decodechar` uses
+   `planebit = 1 << (planes - 1 - plane)`. Getting this backwards bit-reverses
+   every colour index, which renders as plausible garbage rather than an
+   obvious failure.
+4. **The rowscroll table fetch was a cycle short**, same class as the two
+   earlier pipeline-depth bugs.
+
+Of those, only the first would ever have produced an obvious symptom.
+
 ## 11. TASKS
 
 - [x] **T1** Repo skeleton: `sys/` from Template_MiSTer, `SeibuSPI.{qpf,qsf,sdc,sv}`,
@@ -740,11 +789,19 @@ Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
       - [ ] **`spi_sprite.sv` — not started.** The mixer's sprite input is tied
             invalid, so it currently composites the four tile layers alone.
             The decrypt unit it needs is already done and verified (T2).
-      - [ ] **Never rendered a frame.** Lint + synthesis only; nothing is
-            verified against MAME output. Most likely first bugs: the mixer's
-            one-pixel offset (`lb_x` vs its 8-cycle palette sequence) and
-            line-buffer bank phasing. Both would show as a shifted or torn
-            image rather than a blank one.
+      - [x] Golden-reference harness against MAME (see section 12). The frame
+            diff went from 100% wrong to **40.1%** as four real bugs fell out.
+      - [~] **Frame still 40.1% wrong.** back and text layers verified
+            299/300 against reference lines; the **fore layer sits at
+            168/300** and is the outstanding problem. Ruled out: tilemap base
+            (0x200 / 0x800 give 0/300), the d13 and 0x4000 code bits (0/300
+            without them), scroll contamination from midl (4/300), and a
+            vertical shift (y-1 gives 194, y+1 gives 160 -- neither clean).
+            The differences are confined to the LOW plane bits, which come
+            from byte 2 of each 24-bit group, i.e. the "P" ROM. The tiles
+            region itself is byte-exact against MAME for both halves, so the
+            data is right and the fault is in how spi_layers assembles or
+            indexes it for that layer specifically.
 
       Build state with the tile layers in: 0 errors, 0 negative slack,
       67% ALMs, 77% RAM blocks, 3,265,253 block memory bits.

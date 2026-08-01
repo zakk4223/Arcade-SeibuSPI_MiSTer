@@ -24,15 +24,22 @@
 //    text: code = w[11:0]                             colour = w[15:12]
 //
 //  GFX layout. A 16x16 tile is 192 bytes, 12 per row, four 24-bit groups of
-//  four pixels. An 8x8 char is 48 bytes, 6 per row, two groups. Within a
-//  decrypted group v (v[23] is the MSB of the first byte), MAME's gfx_layout
-//  puts pixel p of plane k at bit offset 4k + (3-p), and bit offset n is
-//  v[23-n], so:
+//  four pixels. An 8x8 char is 48 bytes, 6 per row, two groups.
 //
-//    16x16, planes {0,4,8,12,16,20}: pixel p = {v[p], v[4+p], ... v[20+p]}
-//    8x8,   planes {4,8,12,16,20}:   pixel p = {v[p], v[4+p], ... v[16+p]}
+//  Within a decrypted group v (v[23] is the MSB of the first byte), MAME's
+//  gfx_layout puts entry k of planeoffset[] at bit offset 4k, pixel p at a
+//  further (3-p), and bit offset n reads as v[23-n].
 //
-//  reading MSB first, i.e. the top bit is the highest plane.
+//  The catch is that gfx_layout's planeoffset array is listed MOST significant
+//  plane first -- decodechar uses `planebit = 1 << (planes - 1 - plane)`. So
+//  planeoffset[0] is the pixel's TOP bit, not its bottom one:
+//
+//    16x16, planes {0,4,8,12,16,20}: pixel p = {v[20+p], v[16+p], ... v[p]}
+//    8x8,   planes {4,8,12,16,20}:   pixel p = {v[16+p], v[12+p], ... v[p]}
+//
+//  written MSB first. Getting this backwards renders every pixel's colour
+//  index bit-reversed, which looks like plausible garbage rather than an
+//  obvious failure.
 //============================================================================
 
 module spi_layers
@@ -204,6 +211,7 @@ module spi_layers
 	localparam [3:0] S_IDLE   = 4'd0,
 	                 S_RS_REQ = 4'd1,   // rowscroll table read
 	                 S_RS_WT  = 4'd2,
+	                 S_RS_LAT = 4'd12,
 	                 S_TM_REQ = 4'd3,   // tilemap word read
 	                 S_TM_WT  = 4'd4,
 	                 S_TM_LAT = 4'd5,
@@ -269,10 +277,10 @@ module spi_layers
 	// Pixel extraction, MSB = highest plane.
 	function automatic [5:0] pix16(input [23:0] v, input [1:0] p);
 		case (p)
-			2'd0:    pix16 = {v[0], v[4], v[ 8], v[12], v[16], v[20]};
-			2'd1:    pix16 = {v[1], v[5], v[ 9], v[13], v[17], v[21]};
-			2'd2:    pix16 = {v[2], v[6], v[10], v[14], v[18], v[22]};
-			default: pix16 = {v[3], v[7], v[11], v[15], v[19], v[23]};
+			2'd0:    pix16 = {v[20], v[16], v[12], v[ 8], v[ 4], v[ 0]};
+			2'd1:    pix16 = {v[21], v[17], v[13], v[ 9], v[ 5], v[ 1]};
+			2'd2:    pix16 = {v[22], v[18], v[14], v[10], v[ 6], v[ 2]};
+			default: pix16 = {v[23], v[19], v[15], v[11], v[ 7], v[ 3]};
 		endcase
 	endfunction
 
@@ -280,10 +288,10 @@ module spi_layers
 	/* verilator lint_off UNUSEDSIGNAL */
 	function automatic [5:0] pix8(input [23:0] v, input [1:0] p);
 		case (p)
-			2'd0:    pix8 = {1'b0, v[0], v[4], v[ 8], v[12], v[16]};
-			2'd1:    pix8 = {1'b0, v[1], v[5], v[ 9], v[13], v[17]};
-			2'd2:    pix8 = {1'b0, v[2], v[6], v[10], v[14], v[18]};
-			default: pix8 = {1'b0, v[3], v[7], v[11], v[15], v[19]};
+			2'd0:    pix8 = {1'b0, v[16], v[12], v[ 8], v[ 4], v[ 0]};
+			2'd1:    pix8 = {1'b0, v[17], v[13], v[ 9], v[ 5], v[ 1]};
+			2'd2:    pix8 = {1'b0, v[18], v[14], v[10], v[ 6], v[ 2]};
+			default: pix8 = {1'b0, v[19], v[15], v[11], v[ 7], v[ 3]};
 		endcase
 	endfunction
 	/* verilator lint_on UNUSEDSIGNAL */
@@ -352,7 +360,11 @@ module spi_layers
 				tm_addr <= rs_base + {3'd0, rs_index[8:1]};
 				state   <= S_RS_WT;
 			end
-			S_RS_WT: begin
+			// Two cycles, not one: tm_addr is a register, so the RAM only sees
+			// it the cycle after S_RS_REQ, and the RAM registers its output on
+			// top of that. Latching in S_RS_WT reads the previous entry.
+			S_RS_WT: state <= S_RS_LAT;
+			S_RS_LAT: begin
 				rowscroll <= rs_index[0] ? tm_data[31:16] : tm_data[15:0];
 				state     <= S_TM_REQ;
 			end

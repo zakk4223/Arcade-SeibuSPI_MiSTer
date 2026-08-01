@@ -35,6 +35,20 @@ run-dma: obj_dir/Vspi_dma
 obj_dir/Vspi_dma: $(RTL)/spi_dma.sv tb_dma.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module spi_dma $(RTL)/spi_dma.sv tb_dma.cpp
 
+SDRAM ?= $(CAP)/../sdram.bin
+
+run-video: obj_dir/Vtb_video_top
+	@./obj_dir/Vtb_video_top $(CAP) $(SDRAM)
+
+obj_dir/Vtb_video_top: tb_video_top.sv tb_video.cpp lint.vlt \
+                       $(RTL)/spi_layers.sv $(RTL)/spi_mixer.sv $(RTL)/spi_dpram.sv \
+                       $(RTL)/spi_video_timing.sv $(RTL)/spi_tile_decrypt.sv \
+                       $(RTL)/seibu_partial_add.sv
+	$(VERILATOR) $(VFLAGS) -LDFLAGS "-lz" --top-module tb_video_top tb_video_top.sv \
+	    $(RTL)/spi_layers.sv $(RTL)/spi_mixer.sv $(RTL)/spi_dpram.sv \
+	    $(RTL)/spi_video_timing.sv $(RTL)/spi_tile_decrypt.sv \
+	    $(RTL)/seibu_partial_add.sv tb_video.cpp
+
 obj_dir/Vrom_loader: $(RTL)/rom_loader.sv $(RTL)/spi_defs.vh tb_rom_loader.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module rom_loader $(RTL)/rom_loader.sv tb_rom_loader.cpp
 

@@ -1,6 +1,12 @@
 //============================================================================
 //  SlopperPI - testbench for rom_loader
 //
+//  CAUTION: this test only proves the RTL agrees with the model below. It does
+//  not prove either is right -- the W24_W01 byte order was wrong in both for a
+//  while, and only fell out when tools/build_sdram_image.py's output was
+//  compared against MAME's own ROM regions. Keep dest_of() here in step with
+//  dest_of() in that script, which is the one checked against MAME.
+//
 //  Streams a synthetic concatenated ROM image (byte value = low 8 bits of its
 //  offset within its own part, so every part is independently checkable) through
 //  the loader and compares the resulting SDRAM image against a reference model
@@ -63,7 +69,7 @@ static uint32_t dest_of(const Part &p, uint32_t i)
     case W24_B0:  return p.base + i * 3 + 0;
     case W24_B1:  return p.base + i * 3 + 1;
     case W24_B2:  return p.base + i * 3 + 2;
-    case W24_W01: return p.base + (i >> 1) * 3 + (i & 1);
+    case W24_W01: return p.base + (i >> 1) * 3 + (1 - (i & 1));
     }
     return 0;
 }
