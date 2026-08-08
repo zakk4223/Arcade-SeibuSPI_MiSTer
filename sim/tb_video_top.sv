@@ -81,7 +81,13 @@ module tb_video_top
 	output     [15:0] dbg_spr_tile,
 	output      [3:0] dbg_spr_ry,
 	output      [3:0] dbg_spr_px,
-	output      [8:0] dbg_spr_sx, dbg_spr_sy
+	output      [8:0] dbg_spr_sx, dbg_spr_sy,
+	// Starvation: lines that ended with sprites still unscanned. This is
+	// the thing the sprite-budget work is trying to drive to zero, so it
+	// has to be visible here rather than only on hardware.
+	output     [15:0] dbg_spr_starved,
+	output     [15:0] dbg_spr_yhit_o,
+	output     [15:0] dbg_spr_scanned_o
 );
 
 	wire hsync, vsync, line_start, vbl_rise;
@@ -169,8 +175,8 @@ module tb_video_top
 		.dbg_we(dbg_spr_we), .dbg_state(dbg_spr_state), .dbg_index(dbg_spr_index),
 		.dbg_pix(dbg_spr_pix), .dbg_emitx(dbg_spr_emitx), .dbg_code(dbg_spr_code),
 		.dbg_sx(dbg_spr_sx), .dbg_sy(dbg_spr_sy),
-		.dbg_scanned(), .dbg_yhit(), .dbg_emitted(),
-		.dbg_starved(), .dbg_tiles(),
+		.dbg_scanned(dbg_spr_scanned_o), .dbg_yhit(dbg_spr_yhit_o), .dbg_emitted(),
+		.dbg_starved(dbg_spr_starved), .dbg_tiles(),
 		.dbg_codes_nz(), .dbg_spr_or(),
 		.dbg_tile_code(dbg_spr_tile), .dbg_ry(dbg_spr_ry), .dbg_px(dbg_spr_px)
 	);

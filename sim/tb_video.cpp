@@ -739,7 +739,11 @@ int main(int argc, char **argv)
     {
         size_t nonblack = 0;
         for (auto c : got) if (c) nonblack++;
-        printf("diag: sdram reads=%lld  non-black output pixels=%zu\n", sdr_count, nonblack);
+        printf("sprite budget: %u lines ended with sprites unscanned (starved),"
+           " %u scanned, %u y-hits\n",
+           (unsigned)dut->dbg_spr_starved, (unsigned)dut->dbg_spr_scanned_o,
+           (unsigned)dut->dbg_spr_yhit_o);
+    printf("diag: sdram reads=%lld  non-black output pixels=%zu\n", sdr_count, nonblack);
     }
 
     // ---- compare -----------------------------------------------------------

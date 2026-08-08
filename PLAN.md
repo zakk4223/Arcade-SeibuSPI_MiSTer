@@ -1418,6 +1418,87 @@ And "matches a sprite pen" is not evidence. With 4096 candidate pens, most
 colours match one. It survived as a conclusion across three sessions and was
 wrong every time.
 
+## 13b. Sprite starvation, and three levers (2026-08-08)
+
+The sprite engine dropped sprites under load, and the symptom was ugly: the
+list is walked 511->0 and drawn in that order so entry 0 lands on top, which
+means when the budget runs out what gets dropped is the TAIL -- the lowest
+indices, the last-drawn, the topmost sprites. Not background clutter: the
+player ship. On a frozen scene it showed as a slice cut out of the ship,
+vertical on screen because source scanlines map to display X under the
+rotation.
+
+Three changes, in increasing order of payoff:
+
+**1. Scan and draw concurrently.** The list walk reads sprite RAM, the drawing
+reads SDRAM -- different resources, but the old FSM ran them one after the
+other, so 1536 of the 3200-cycle budget was dead time before a single pixel.
+Split into a scanner and a drawer with an 8-entry FIFO; the scanner streams at
+2 cycles a sprite (the floor for one RAM port and two reads per entry) and the
+walk hides entirely behind the drawing. FIFO order is list order, so the draw
+order is unchanged. Sim: 246 starved lines -> 0, and the attract frame went
+1.78% -> 0.23%, which is where most of that "unexplained" residual went.
+
+**2. Horizontal culling.** There was none: the scanner tested only Y, and the
+only X test was per-pixel at write time, AFTER the fetch. A sprite parked off
+the side still cost three SDRAM reads and sixteen emit cycles per column for
+pixels that were then discarded. Now culled per sprite in the scanner and per
+column in the drawer (an off-screen column costs one cycle instead of ~40).
+Note it is not free: entering columns via S_COL adds ~1 cycle per column, so on
+a scene with nothing off-screen it is a slight net loss.
+
+**3. Overlap the fetch with the emit.** The big one, and the same optimisation
+the tile layers already had. Each column serialised three SDRAM round trips
+(~21 cycles) and THEN 16 emit cycles. Those use different resources, so the row
+data is now double-buffered: the fetcher fills one bank while the emitter
+drains the other. Everything the emitter needs about a column (tile code, col_x,
+flipx, colour, priority, ry) is captured with the data, because by then the
+fetcher has moved on -- possibly to another sprite.
+
+Measured on hardware, starvation against ACTUAL work (y-hits per frame):
+
+    work/frame    before      after
+    4000-4399        2.7        0.0
+    4400-4799        7.1        0.0
+    4800-5199        8.8        0.3
+    5600-5999       18.6        0.0
+    6000-6399       38.5        0.0
+    7600-7999       36.8        0.0
+    8400-8799       42.0        0.0
+
+Gone across the whole range, including scenes twice as heavy as the one that
+first showed the fault.
+
+### Two measurement lessons, both learned the hard way here
+
+**`codes != 0` is list population, not work.** Comparing builds against it gave
+a meaningless result -- some buckets better, some worse, several with n < 5 --
+and an early partial sample of it made culling look like a clean win when a
+longer sweep showed nothing of the kind. Sprite counts say nothing about how
+many pass the y test or how wide they are. Use `spr y-hit` or `spr tiles`.
+Both sweeps must also cover the same load range: the first culling comparison
+sampled to 184 sprites against 358 and I read the gap as a trend.
+
+**The golden test can go blind without failing.** Splitting the sequencer
+changed the state encoding, and `sim/tb_video`'s per-pixel sprite check keys on
+`dbg_state == 9`. It reported "0 match, 0 differ (of 0 emits)" and PASSED. Then
+when the tap was restored it reported 275 of 640 differing -- also wrong, because
+the debug taps were fetch-side (`tile_code`, `ry`) while `half`/`pcnt` are
+emit-side, and those are now different columns. `dbg_state` now reports 9
+whenever the emitter is running whatever the encoding, and `dbg_tile_code` /
+`dbg_ry` come from the emitting bank. A check reporting zero items is a failing
+check, not a passing one.
+
+### Restarting the JTAG server leaves jtagd wedged
+
+Killing `jtag_server.tcl` mid-operation leaves `jtagd` in a state where
+`get_insystem_source_probe_instance_info` returns "No In-System Sources and
+Probes instance was found" even though `jtagconfig` enumerates the chain
+happily and the core is plainly running. `pkill -f jtagd` and re-run
+`jtagconfig`. Half an hour went into suspecting the build before checking the
+host. Also: the server must not be started until the FPGA has finished
+reconfiguring after a `load_core`, or it fails the same way.
+
 ## 14. Sound (T5) — design notes and what is deliberately missing
 
 **The single fact that shapes the whole thing:** on SXX2E the YMF271 is the

@@ -108,13 +108,22 @@ module spi_sprite
 `include "spi_defs.vh"
 
 	assign dbg_we    = lb_we;
-	assign dbg_state = state;
-	assign dbg_index = index;
+	// Not `state` alone: the golden test keys its per-pixel sprite check on
+	// dbg_state == 9 (the old S_EMIT), and when the sequencer was split that
+	// check quietly matched nothing and reported 0 of 0 pixels rather than
+	// failing. Keep 9 meaning "emitting a pixel" whatever the encoding is.
+	assign dbg_state = (state == S_DRAW && estate == E_RUN) ? 4'd9 :
+	                   (state == S_DRAW)                    ? {1'b0, fstate} : state;
+	assign dbg_index = sidx;
 	assign dbg_pix   = pix_sel;
 	assign dbg_emitx = emit_x;
 	assign dbg_code  = code;
-	assign dbg_tile_code = tile_code;
-	assign dbg_ry    = ry;
+	// Emit-side, not fetch-side. The fetcher is a column ahead, so tapping its
+	// tile_code/ry against the emitter's half/pcnt compares two different
+	// columns -- which made the golden per-pixel check report 275 of 640
+	// differing while the frame itself got BETTER.
+	assign dbg_tile_code = r_tcode[eb];
+	assign dbg_ry    = r_ry[eb];
 	assign dbg_px    = {half, pcnt};
 	assign dbg_sx    = sx_raw;
 	assign dbg_sy    = sy_raw;
@@ -139,7 +148,6 @@ module spi_sprite
 	// ------------------------------------------------------------------
 	// Sprite attributes, latched as the list is walked
 	// ------------------------------------------------------------------
-	reg  [8:0] index;        // 511 .. 0
 	reg [15:0] attr, code;
 	reg  [8:0] sx_raw, sy_raw;
 
@@ -155,13 +163,8 @@ module spi_sprite
 	wire signed [10:0] spr_y = (sy_raw >= 9'h180) ? {2'b11, sy_raw} : {2'b00, sy_raw};
 
 	// Which vertical vcell of this sprite covers the line being rendered?
-	// During S_START the Y position is still on spr_data; the registered copy
-	// only becomes valid the cycle after, which is fine for the drawing phase.
-	wire  [8:0] sy_now  = spr_data[24:16];
-	wire signed [10:0] spr_y_now = (sy_now >= 9'h180) ? {2'b11, sy_now} : {2'b00, sy_now};
-	wire signed [10:0] dy_now = $signed({2'b00, render_line}) - spr_y_now;
-	wire        y_hit_now = (dy_now >= 0) && (dy_now[10:4] <= {4'd0, attr[14:12]});
-
+	// The scanner does its own y test on the streaming data (sc_yhit); this is
+	// the drawer's view, from the registered copy it popped off the FIFO.
 	// Only the low 7 bits matter: a sprite is at most 8 tiles tall, and the
 	// hit test above has already established the line falls inside it.
 	/* verilator lint_off UNUSEDSIGNAL */
@@ -186,6 +189,9 @@ module spi_sprite
 	wire [15:0] tile_code = code + ({12'd0, ax} * {12'd0, rows_per_col}) + {13'd0, ay};
 
 	wire signed [10:0] col_x = 11'(spr_x + $signed({4'd0, axc, 4'd0}));  // + axc*16
+	// This 16-pixel column has at least one pixel on screen. Skipping an
+	// off-screen column costs one cycle instead of about forty.
+	wire col_visible = ((col_x + 11'sd16) > 11'sd0) && (col_x < 11'sd320);
 
 	// ------------------------------------------------------------------
 	// Graphics address: chunk k at + k*4 MB, tile*64 + row*4
@@ -204,19 +210,38 @@ module spi_sprite
 	// One 64-bit read per chunk already covers the whole 16-pixel row: the four
 	// row bytes hold word i (pixels 0-7) and word i+1 (pixels 8-15). Both are
 	// latched, so a row costs three reads rather than six.
-	reg [15:0] y1a, y1b, y2a, y2b, y3a, y3b;
+	// Double buffered, so the fetcher can pull the next column's three chunks
+	// while the emitter is still walking this one's sixteen pixels. Those two
+	// used to be strictly sequential -- three SDRAM round trips (~21 cycles)
+	// and THEN 16 emit cycles -- which is most of the per-column cost and the
+	// dominant term once the list walk stopped being one. They use different
+	// resources (SDRAM vs the line buffer), so they overlap for free.
+	//
+	// Everything the emitter needs about a column is captured with the data,
+	// because by the time it runs the fetcher has moved on to another column
+	// and possibly another sprite.
+	reg [15:0] r_y1a[0:1], r_y1b[0:1], r_y2a[0:1], r_y2b[0:1], r_y3a[0:1], r_y3b[0:1];
+	reg [15:0] r_tcode[0:1];
+	reg signed [10:0] r_colx[0:1];
+	reg        r_flipx[0:1];
+	reg  [5:0] r_colr[0:1];
+	reg  [1:0] r_pri[0:1];
+	reg  [3:0] r_ry[0:1];      // only for the debug tap, but it has to match
+	reg  [1:0] rv;                        // which banks hold a row ready to emit
+	reg        fb, eb;                    // fetch bank, emit bank
+
 	reg        half;                      // which 8 pixels of the row
 
-	wire [15:0] y1 = half ? y1b : y1a;
-	wire [15:0] y2 = half ? y2b : y2a;
-	wire [15:0] y3 = half ? y3b : y3a;
+	wire [15:0] y1 = half ? r_y1b[eb] : r_y1a[eb];
+	wire [15:0] y2 = half ? r_y2b[eb] : r_y2a[eb];
+	wire [15:0] y3 = half ? r_y3b[eb] : r_y3a[eb];
 
 	wire [5:0] p0, p1, p2, p3, p4, p5, p6, p7;
 
 	spi_spr_decrypt dec
 	(
 		.y1(y1), .y2(y2), .y3(y3),
-		.addr(tile_code[14:3]),           // addr = code >> 3
+		.addr(r_tcode[eb][14:3]),         // addr = code >> 3, for the emitting bank
 		.pix0(p0), .pix1(p1), .pix2(p2), .pix3(p3),
 		.pix4(p4), .pix5(p5), .pix6(p6), .pix7(p7)
 	);
@@ -245,36 +270,96 @@ module spi_sprite
 	// Screen x of the pixel being emitted. Within a tile the pixel order is
 	// reversed when flipx is set.
 	wire [3:0] tile_px = {half, pcnt};
-	wire signed [10:0] emit_x = col_x + (flipx ? $signed({7'd0, 4'd15 - tile_px})
-	                                           : $signed({7'd0, tile_px}));
+	wire signed [10:0] emit_x = r_colx[eb] + (r_flipx[eb] ? $signed({7'd0, 4'd15 - tile_px})
+	                                                     : $signed({7'd0, tile_px}));
 
 	// ------------------------------------------------------------------
 	// Sequencer
 	// ------------------------------------------------------------------
+	// Line phase.
 	localparam [3:0] S_IDLE  = 4'd0,
 	                 S_CLR   = 4'd1,
-	                 S_ATTR  = 4'd2,   // read dword 2n
-	                 S_ATTR2 = 4'd3,
-	                 S_TEST  = 4'd6,
-	                 S_REQ   = 4'd7,   // fetch chunk `chunk`
-	                 S_WAIT  = 4'd8,
-	                 S_EMIT  = 4'd9,
-	                 S_NEXTC = 4'd10,  // next column
-	                 S_NEXTS = 4'd11,  // next sprite
-	                 S_START = 4'd12;  // Y test, once position has settled
+	                 S_DRAW  = 4'd2;
+	// Fetch machine, inside S_DRAW.
+	localparam [2:0] F_POP  = 3'd0,   // take the next sprite the scanner queued
+	                 F_COL  = 3'd1,   // is this column on screen, and is a bank free?
+	                 F_REQ  = 3'd2,   // request chunk `chunk`
+	                 F_WAIT = 3'd3,
+	                 F_DONE = 3'd4;
+	// Emit machine, inside S_DRAW, running a column behind the fetcher.
+	localparam       E_IDLE = 1'b0,
+	                 E_RUN  = 1'b1;
 
 	reg [3:0]  state;
+	reg [2:0]  fstate;
+	reg        estate;
 	reg [8:0]  clr;
 	reg [11:0] budget;                 // hard per-line cap on fetch work
 	reg        restart_req;
-	reg [63:0] fetched;
 
 	reg [15:0] nz_cnt;    // non-zero codes seen on the line in progress
 	reg [31:0] or_acc;    // OR of every sprite-RAM dword seen on that line
 
-	// A line is 448 * 8 = 3584 cycles. The clear takes 320 and a full scan
-	// 4 * 512 = 2048, so this leaves around 1100 for actual pixel fetches.
+	// A line is 448 * 8 = 3584 cycles. The clear takes 320, and the list walk
+	// now overlaps the drawing instead of preceding it, so essentially all of
+	// this is available for pixel fetches.
 	localparam [11:0] BUDGET = 12'd3200;
+
+	// ------------------------------------------------------------------
+	// Scanner / drawer split
+	//
+	// The list walk and the drawing use DIFFERENT resources -- the walk only
+	// reads sprite RAM, the drawing only reads SDRAM -- but the old state
+	// machine ran them one after the other, so the 512-entry walk was pure
+	// dead time in front of every fetch. At 3 cycles a sprite that is 1536 of
+	// the 3200-cycle budget spent before a single pixel is drawn, and on a busy
+	// scene the budget ran out mid-list: measured on hardware at ~30 lines a
+	// frame losing sprites, against the ~0.25% recorded for a quiet scene.
+	//
+	// They are two independent state machines now, with a FIFO between them.
+	// The scanner streams the list at 2 cycles a sprite -- the floor for a
+	// single-port RAM that needs two reads per entry -- and pushes the sprites
+	// that pass the y test. The drawer pops and draws. The walk is hidden
+	// behind the drawing, and what is left is bounded by fetch bandwidth, which
+	// is the real limit.
+	//
+	// FIFO order is list order, so MAME's "later entry drawn on top" still
+	// falls out of the write order exactly as before.
+	// ------------------------------------------------------------------
+	localparam FIFO_N = 8;
+	reg [49:0] fifo [0:FIFO_N-1];         // {attr, code, sx, sy}
+	reg  [3:0] fifo_wp, fifo_rp;          // one spare bit for full vs empty
+	wire [3:0] fifo_cnt   = fifo_wp - fifo_rp;
+	wire       fifo_empty = (fifo_wp == fifo_rp);
+	// Stall with room to spare: two reads are already in flight when the
+	// scanner stalls, and both may still push.
+	wire       fifo_full  = (fifo_cnt >= 4'd6);
+
+	// Scanner
+	reg  [8:0] sidx;                      // entry being issued
+	reg        shalf;                     // which dword of it
+	reg        scan_run, scan_done;
+	reg [15:0] s_attr, s_code;
+	// Two-cycle read pipeline: sprite RAM answers two cycles after the address
+	// is registered, so track what each in-flight read belongs to.
+	reg        p1_v, p2_v;
+	reg        p1_h, p2_h;
+	reg  [8:0] p1_i, p2_i;
+
+	wire [8:0] sc_sy = spr_data[24:16];
+	wire signed [10:0] sc_spr_y = (sc_sy >= 9'h180) ? {2'b11, sc_sy} : {2'b00, sc_sy};
+	wire signed [10:0] sc_dy    = $signed({2'b00, render_line}) - sc_spr_y;
+	wire sc_yhit = (sc_dy >= 0) && (sc_dy[10:4] <= {4'd0, s_attr[14:12]});
+
+	// ... and the same test on X, which nothing used to do. The y test alone
+	// queues sprites parked entirely off the sides, and every one of their
+	// columns then costs three SDRAM reads and sixteen emit cycles for pixels
+	// that S_EMIT throws away at the write. On a busy scene that is where the
+	// budget goes. A sprite spans (sizex+1)*16 pixels from its x.
+	wire [8:0] sc_sx = spr_data[8:0];
+	wire signed [10:0] sc_spr_x = (sc_sx >= 9'h180) ? {2'b11, sc_sx} : {2'b00, sc_sx};
+	wire signed [10:0] sc_width = 11'sd16 + $signed({4'd0, s_attr[10:8], 4'd0});
+	wire sc_xhit = ((sc_spr_x + sc_width) > 11'sd0) && (sc_spr_x < 11'sd320);
 
 	always @(posedge clk) begin
 		lb_we <= 1'b0;
@@ -294,6 +379,19 @@ module spi_sprite
 			sdr_req     <= 1'b0;
 			restart_req <= 1'b0;
 			render_bank <= 1'b0;
+			sidx        <= 9'd511;
+			shalf       <= 1'b0;
+			scan_run    <= 1'b0;
+			scan_done   <= 1'b0;
+			fifo_wp     <= 4'd0;
+			fifo_rp     <= 4'd0;
+			p1_v        <= 1'b0;
+			p2_v        <= 1'b0;
+			fstate      <= F_POP;
+			estate      <= E_IDLE;
+			rv          <= 2'b00;
+			fb          <= 1'b0;
+			eb          <= 1'b0;
 		end
 		else begin
 			if (line_start) begin
@@ -307,9 +405,58 @@ module spi_sprite
 			if (budget != 12'd0 && state != S_IDLE && state != S_CLR)
 				budget <= budget - 12'd1;
 
+			// ---- scanner, concurrent with everything below ----------------
+			// Runs during the clear as well, so the first sprites are already
+			// queued by the time the drawer is ready for them.
+			p1_v <= 1'b0;
+			p2_v <= p1_v; p2_h <= p1_h; p2_i <= p1_i;
+
+			if (scan_run && !fifo_full && budget != 12'd0) begin
+				spr_addr <= {sidx, shalf};
+				p1_v  <= 1'b1;
+				p1_h  <= shalf;
+				p1_i  <= sidx;
+				shalf <= ~shalf;
+				if (shalf) begin
+					if (sidx == 9'd0) scan_run <= 1'b0;
+					else              sidx <= sidx - 9'd1;
+				end
+			end
+
+			if (p2_v) begin
+				if (!p2_h) begin
+					// dword 2n: attributes and code
+					s_attr <= spr_data[15:0];
+					s_code <= spr_data[31:16];
+					or_acc <= or_acc | spr_data;
+				end
+				else begin
+					// dword 2n+1: position. s_attr / s_code were latched last
+					// cycle, so the y test can be done here.
+					or_acc      <= or_acc | spr_data;
+					dbg_scanned <= dbg_scanned + 16'd1;
+					if (s_code != 16'd0) nz_cnt <= nz_cnt + 16'd1;
+					// MAME skips code 0 (`code % elements == 0`).
+					if (sc_yhit && sc_xhit && s_code != 16'd0) begin
+						dbg_yhit <= dbg_yhit + 16'd1;
+						fifo[fifo_wp[2:0]] <= {s_attr, s_code,
+						                       spr_data[8:0], spr_data[24:16]};
+						fifo_wp <= fifo_wp + 4'd1;
+					end
+					if (p2_i == 9'd0) scan_done <= 1'b1;
+				end
+			end
+
 			// Restart only at a sprite boundary, so an SDRAM request is never
 			// abandoned with its ack outstanding.
-			if (restart_req && (state == S_IDLE || state == S_NEXTS)) begin
+			// Safe only where no SDRAM request is outstanding: F_REQ/F_WAIT
+			// have one in flight and must not be abandoned with its ack
+			// pending. Interrupting the emitter mid-column is fine -- the line
+			// is being abandoned anyway and S_CLR wipes the buffer.
+			if (restart_req && (state == S_IDLE ||
+			                    (state == S_DRAW && (fstate == F_POP ||
+			                                         fstate == F_COL ||
+			                                         fstate == F_DONE)))) begin
 				restart_req <= 1'b0;
 				render_line <= (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
 				render_bank <= ~render_bank;
@@ -317,6 +464,21 @@ module spi_sprite
 				budget      <= BUDGET;
 				busy        <= 1'b1;
 				state       <= S_CLR;
+				// Both machines restart together, on the same line. Anything
+				// still queued belongs to the line just finished and must go.
+				sidx      <= 9'd511;
+				shalf     <= 1'b0;
+				scan_run  <= enable;
+				scan_done <= 1'b0;
+				fifo_wp   <= 4'd0;
+				fifo_rp   <= 4'd0;
+				p1_v      <= 1'b0;
+				p2_v      <= 1'b0;
+				fstate    <= F_POP;
+				estate    <= E_IDLE;
+				rv        <= 2'b00;
+				fb        <= 1'b0;
+				eb        <= 1'b0;
 			end
 			else case (state)
 
@@ -334,140 +496,127 @@ module spi_sprite
 				lb_wr_data <= 15'd0;          // valid = 0
 				lb_we      <= 1'b1;
 				if (clr == 9'd319) begin
-					index <= 9'd511;
-					state <= enable ? S_ATTR : S_IDLE;
+					state <= enable ? S_DRAW : S_IDLE;
 					if (!enable) busy <= 1'b0;
 				end
 				else clr <= clr + 9'd1;
 			end
 
-			// Four cycles per sprite, not seven: the two dword reads are
-			// overlapped, and the Y test uses spr_data directly rather than
-			// waiting for sy_raw to settle. At seven cycles a 512-entry scan
-			// consumed the entire 3584-cycle line and never reached a fetch.
-			S_ATTR: begin
-				spr_addr <= {index, 1'b0};
-				state    <= S_ATTR2;
-			end
-			S_ATTR2: begin
-				spr_addr <= {index, 1'b1};    // issue the second read back to back
-				state    <= S_TEST;
-			end
-			S_TEST: begin                     // dword 2n is on spr_data now
-				or_acc <= or_acc | spr_data;
-				attr  <= spr_data[15:0];
-				code  <= spr_data[31:16];
-				state <= S_START;
-			end
-
-			S_START: begin                    // dword 2n+1 is on spr_data now
-				sx_raw <= spr_data[8:0];
-				sy_raw <= spr_data[24:16];
-				// MAME skips code 0 (`code % elements == 0`, elements = 0x10000).
-				dbg_scanned <= dbg_scanned + 16'd1;
-				or_acc      <= or_acc | spr_data;
-				if (code != 16'd0) nz_cnt <= nz_cnt + 16'd1;
-				if (y_hit_now && code != 16'd0) begin
-					dbg_yhit <= dbg_yhit + 16'd1;
-					axc   <= 3'd0;
-					chunk <= 2'd0;
-					half  <= 1'b0;
-					dbg_tiles <= dbg_tiles + 16'd1;
-					state <= S_REQ;
+			S_DRAW: begin
+				// ---- fetch: runs ahead, filling whichever bank is free -------
+				case (fstate)
+				F_POP: begin
+					if (!fifo_empty && budget != 12'd0) begin
+						{attr, code, sx_raw, sy_raw} <= fifo[fifo_rp[2:0]];
+						fifo_rp <= fifo_rp + 4'd1;
+						axc    <= 3'd0;
+						fstate <= F_COL;
+					end
+					else if ((scan_done && fifo_empty) || budget == 12'd0)
+						fstate <= F_DONE;
 				end
-				else if (index == 9'd0 || budget == 12'd0) begin
-					if (index != 9'd0) dbg_starved <= dbg_starved + 16'd1;
-					busy  <= 1'b0;
-					state <= S_IDLE;
-				end
-				else begin
-					// Walking the 512-entry list dominates the line: at five
-					// cycles a sprite it burned 2560 of the 3584 cycles and left
-					// 96 for actual drawing, so most sprites simply never got
-					// fetched. The RAM answers two cycles after an address is
-					// presented, so the next sprite's first read is issued here
-					// and S_ATTR/S_NEXTS drop out of the miss path -- three
-					// cycles a sprite instead of five.
-					index    <= index - 9'd1;
-					spr_addr <= {index - 9'd1, 1'b0};
-					state    <= S_ATTR2;
-				end
-			end
 
-			S_NEXTC: begin
-				if (axc == sizex) state <= S_NEXTS;
-				else begin
-					axc   <= axc + 3'd1;
-					chunk <= 2'd0;
-					half  <= 1'b0;
-					dbg_tiles <= dbg_tiles + 16'd1;
-					state <= S_REQ;
+				// Off-screen columns cost a cycle instead of forty. A bank has to
+				// be free before a fetch starts, which is the only place the
+				// fetcher ever waits for the emitter.
+				F_COL: begin
+					if (!col_visible) begin
+						if (axc == sizex) fstate <= F_POP;
+						else              axc <= axc + 3'd1;
+					end
+					else if (!rv[fb]) begin
+						chunk     <= 2'd0;
+						dbg_tiles <= dbg_tiles + 16'd1;
+						fstate    <= F_REQ;
+					end
 				end
-			end
 
-			S_REQ: begin
-				sdr_addr <= {row_addr[24:3], 3'b000};
-				sdr_req  <= ~sdr_req;
-				state    <= S_WAIT;
-			end
+				F_REQ: begin
+					sdr_addr <= {row_addr[24:3], 3'b000};
+					sdr_req  <= ~sdr_req;
+					fstate   <= F_WAIT;
+				end
 
-			S_WAIT: if (sdr_ack == sdr_req) begin
-				// 4 bytes of the row, selected by bit 2 of the address
-				fetched <= sdr_dout;
-				case (chunk)
+				F_WAIT: if (sdr_ack == sdr_req) begin
+					// 4 bytes of the row, selected by bit 2 of the address
+					case (chunk)
 					2'd0: begin
-						y1a <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-						y1b <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+						r_y1a[fb] <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+						r_y1b[fb] <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
 					end
 					2'd1: begin
-						y2a <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-						y2b <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+						r_y2a[fb] <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+						r_y2b[fb] <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
 					end
 					default: begin
-						y3a <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-						y3b <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+						r_y3a[fb] <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
+						r_y3b[fb] <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
 					end
-				endcase
-				if (chunk == 2'd2) begin
-					pcnt  <= 3'd0;
-					state <= S_EMIT;
-				end
-				else begin
-					chunk <= chunk + 2'd1;
-					state <= S_REQ;
-				end
-			end
-
-			S_EMIT: begin
-				if (pix_sel != 6'd63 && emit_x >= 0 && emit_x < 11'sd320) begin
-					dbg_emitted <= dbg_emitted + 16'd1;
-					lb_wr_addr <= {render_bank, emit_x[8:0]};
-					lb_wr_data <= {1'b1, pri, colr, pix_sel};
-					lb_we      <= 1'b1;
-				end
-				pcnt <= pcnt + 3'd1;
-				if (pcnt == 3'd7) begin
-					// Both halves are already latched, so the second 8 pixels
-					// need no further fetch. `half` is cleared when a new
-					// column starts, NOT here -- clearing it in S_WAIT was what
-					// made the engine loop forever on one tile.
-					if (half) state <= S_NEXTC;
+					endcase
+					if (chunk == 2'd2) begin
+						// Hand the column over with everything the emitter needs.
+						r_tcode[fb] <= tile_code;
+						r_colx[fb]  <= col_x;
+						r_flipx[fb] <= flipx;
+						r_colr[fb]  <= colr;
+						r_pri[fb]   <= pri;
+						r_ry[fb]    <= ry;
+						rv[fb]      <= 1'b1;
+						fb          <= ~fb;
+						if (axc == sizex) fstate <= F_POP;
+						else begin
+							axc    <= axc + 3'd1;
+							fstate <= F_COL;
+						end
+					end
 					else begin
-						half <= 1'b1;
-						pcnt <= 3'd0;
+						chunk  <= chunk + 2'd1;
+						fstate <= F_REQ;
 					end
 				end
-			end
 
-			S_NEXTS: begin
-				if (index == 9'd0 || budget == 12'd0) begin
-					if (index != 9'd0) dbg_starved <= dbg_starved + 16'd1;
+				default: ;   // F_DONE: nothing left to fetch
+				endcase
+
+				// ---- emit: drains the other bank, concurrently ---------------
+				case (estate)
+				E_IDLE: if (rv[eb]) begin
+					pcnt   <= 3'd0;
+					half   <= 1'b0;
+					estate <= E_RUN;
+				end
+
+				E_RUN: begin
+					if (pix_sel != 6'd63 && emit_x >= 0 && emit_x < 11'sd320) begin
+						dbg_emitted <= dbg_emitted + 16'd1;
+						lb_wr_addr <= {render_bank, emit_x[8:0]};
+						lb_wr_data <= {1'b1, r_pri[eb], r_colr[eb], pix_sel};
+						lb_we      <= 1'b1;
+					end
+					pcnt <= pcnt + 3'd1;
+					if (pcnt == 3'd7) begin
+						// Both halves were latched by one pass of three reads, so
+						// the second 8 pixels need no further fetch.
+						if (half) begin
+							rv[eb] <= 1'b0;
+							eb     <= ~eb;
+							estate <= E_IDLE;
+						end
+						else begin
+							half <= 1'b1;
+							pcnt <= 3'd0;
+						end
+					end
+				end
+				endcase
+
+				// The line is over once nothing is left to fetch and both banks
+				// have drained.
+				if (fstate == F_DONE && estate == E_IDLE && rv == 2'b00) begin
+					if (!scan_done || !fifo_empty)
+						dbg_starved <= dbg_starved + 16'd1;
 					busy  <= 1'b0;
 					state <= S_IDLE;
-				end
-				else begin
-					index <= index - 9'd1;
-					state <= S_ATTR;
 				end
 			end
 
@@ -476,6 +625,5 @@ module spi_sprite
 		end
 	end
 
-	wire _unused = &{1'b0, fetched};
 
 endmodule
