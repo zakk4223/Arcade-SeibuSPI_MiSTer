@@ -633,7 +633,124 @@ sim/                      Verilator testbenches for the decrypt units
 
 ---
 
+## 9b. Debug workflow: freeze the scene, then instrument it
+
+Do not identify an attract scene by timing or by counting non-black pixels.
+Both were tried and both put measurements on the wrong scene, which was then
+reported as a hardware fault that did not exist. `quartus_stp` needs ~5 s just
+to claim the JTAG chain, and the ROM download shifts the whole attract sequence
+by seconds between runs, so a guessed delay cannot be aimed.
+
+Instead:
+
+1. **Freeze the hardware with any controller button.** `SeibuSPI.sv` toggles the
+   CPU freeze on any button of either pad. Only `spi_cpu`'s `cpu_en` is gated,
+   so the video engines keep running and the frozen frame stays on screen.
+2. **Instrument it** with the persistent JTAG console, which holds the chain
+   open so commands cost milliseconds:
+
+       quartus_stp -t tools/jtag_server.tcl      # leave running in a terminal
+       tools/slop vitals                          # from anywhere else
+
+   ENTER in the console also toggles the freeze. `vitals` reports `state` from
+   probe bit 366, which is the *effective* freeze, so a button-triggered freeze
+   is visible too -- reading the CTRL source register alone would miss it.
+3. **Pause MAME on the same scene** and dump its state:
+
+       SLOP_OUT=/tmp/mame_state mame rdfts -autoboot_script tools/mame_probe.lua
+
+   Press P; each pause writes `mainram/tilemap_ram/palette_ram/sprite_ram.bin`,
+   `frame.bin` and a decoded `sprites.txt` into `/tmp/mame_state/NNN/`.
+4. **Confirm both sides are on the same scene before concluding anything.**
+   `sprites.txt`'s `codes_nonzero` and the hardware's `codes!=0` are directly
+   comparable and identify a scene far more reliably than appearance does. This
+   is what exposed the wrong-scene error: hardware read 5 exactly when MAME's
+   frame 901 had 5, which placed the measurements ten seconds earlier in the
+   attract than assumed.
+
+Worth knowing: MAME itself has a **10.2 s stretch of the attract with zero
+sprites** (frames 351-900). A screen with no sprites is not evidence of a fault.
+
 ## 10. Gotchas found the hard way
+
+**The Seibu CRTC register window (0x400-0x44F) must be READABLE.** MAME backs
+the whole window with `map(0x0000, 0x004f).ram()` and overlays the register
+handlers on top, and `reg_1a` additionally has an explicit `reg_1a_r()`. Reads
+therefore return whatever was last written.
+
+Returning zero instead broke the game's read-modify-write of `reg_1a`: it read
+0, ORed in the fore-layer bit and wrote the result back, destroying **bit 15,
+rowscroll enable**, in the process. On the board `rowscroll` came up 1 and then
+dropped to 0 at the exact instant `fore_d13` went to 1 -- that sequence is the
+RMW.
+
+The damage is out of all proportion to one bit, because it selects the tilemap
+DMA's source layout:
+
+    rowscroll on : back, back_rs, fore, fore_rs, midl, midl_rs, text  (4096 dw)
+    rowscroll off: back, fore, midl, text                             (2560 dw)
+
+Parsing a rowscroll-on buffer as rowscroll-off puts the game's FORE tiles in the
+midl region, where they are drawn with the **midl palette**; back receives the
+back rowscroll values as if they were tile codes; and fore and text get nothing.
+The board showed exactly that: one layer of content in the wrong colours over an
+all-black screen, with a black band wherever the misplaced layer had no tiles.
+
+Related, and fixed at the same time: **every CRTC register is merged per byte**,
+as MAME's `COMBINE_DATA` does. `reg_1a`'s bit 15 and bit 11 both live in its
+*high* byte (0x41B, `be[3]`); gating them on `be[2]|be[3]` let a write touching
+only 0x41A latch bit 15 from a byte the game never drove. `layer_enable` is the
+low byte of 0x41C (`be[0]`) for the same reason.
+
+**The three video DMAs each need their own pending slot, and their parameters
+must be latched when the trigger fires.** MAME performs each DMA instantly
+inside the trigger write, so it always uses the `video_dma_address` current at
+that instant. Here the transfer waits for the CPU to release the shared main RAM
+port, which opened two holes:
+
+* A single `start_pending` flag meant a trigger arriving while another transfer
+  was pending or running simply overwrote `pend_mode` and was **dropped**. The
+  game fires all three DMAs back to back every frame, so the sprite request --
+  last of the three -- was the one routinely lost. Sprite RAM then kept its
+  power-on zeros, every list entry failed the `code != 0` gate, and no sprite was
+  ever emitted in that scene.
+* `ram_addr <= dma_src` sampled the source at *grant* time, so a late-starting
+  transfer could read from an address belonging to a later request.
+
+That these are different addresses is not hypothetical -- one captured frame has
+`sprite_dma 0x37000`, `tilemap_dma 0x38000`, `palette_dma 0x3C000`.
+
+`sim/tb_dma.cpp` originally ran one DMA at a time and waited for each to finish,
+which cannot reach either bug; it now also fires two triggers a cycle apart with
+the source changing in between, and fails if any destination is left untouched.
+
+**Telemetry counters must be latched per line/frame, not left free-running.**
+The 16-bit sprite counters tick at ~10^5/s, so sampling them 500 ms apart
+overflows more than once and the deltas alias into nonsense -- the giveaway was
+`y-hit` reading higher than `scanned`, which is impossible. Sample at 40 ms, or
+latch a per-line value (`dbg_codes_nz`) and read that.
+
+**`quartus_stp` Tcl: `[index_of \"CTRL\"]` inside a `"..."` string does not
+work.** Tcl parses a bracket body as a script, where `\"CTRL\"` is a malformed
+word, so the whole `elseif` branch failed to *parse* -- at runtime, only when
+that branch was taken. Every `mask` call was therefore a silent no-op: the
+layer-isolation sweep changed nothing and `mask 0` never released the CPU
+freeze. Resolve the index into a variable first.
+
+**Masking a layer off does not blank it.** Each layer owns its own line buffer
+and `S_LSTART` skips a disabled layer entirely, so its buffer keeps stale
+content. This is harmless in normal operation -- `spi_mixer` also gates on
+`layer_enable`, so a disabled layer is never mixed -- but it makes
+"show one layer at a time" useless as a diagnostic, because what you see
+accumulates across steps. Judge layer isolation from the mixer's output, not
+from non-black pixel counts.
+
+**The Elgato drops off the bus if it is opened and closed repeatedly.** A sweep
+that reopens it per step will produce a run of all-black frames that look exactly
+like a dead core. Do one long capture and cut it up afterwards, and always set
+`--set-fmt-video=width=1920,height=1080,pixelformat=MJPG` explicitly -- after a
+replug it renegotiates to 640x480.
+
 
 **The core PLL must keep the `pll -> pll_inst -> altera_pll_i` hierarchy.**
 `sys/sys_top.sdc` puts the core clocks into a clock group by *name*:
@@ -691,6 +808,60 @@ the change, rewrites the QSF with `sys.tcl` and a stale snapshot of `files.qip`
 expanded inline, and then dies with "quartus_map ended unexpectedly". The
 template's "do not add files in the Quartus IDE" warning covers this case too.
 Recovery is to regenerate the QSF from `Template_MiSTer/mycore.qsf`.
+
+- **Two sprite bugs, both found by building a pixel-level golden check.**
+
+  1. *The 6-bit sprite pen was bit reversed.* spi_spr_decrypt emits the pen with
+     bit p carrying MAME plane(5-p) -- bit 0 is plane5, the pen's MSB. That is
+     the convention tb_spr_decrypt asserts, so the decrypt unit is correct and
+     the reversal belongs in spi_sprite, which consumed it raw. Near invisible
+     because the common values are palindromes: 3F (transparent) and 00 survive
+     reversal unchanged, so most pixels looked right while solid areas took
+     wildly wrong colours. Frame error against MAME went 7.21% -> 1.68%.
+
+  2. *sizey + 3'd1 overflowed 3 bits.* tile_code = code + ax*(sizey+1) + ay, but
+     `sizey + 3'd1` is evaluated at 3 bits inside a concatenation, so a
+     full-height sprite (sizey == 7) wrapped the multiplier to ZERO and every
+     tile column reused the same codes -- a grid of repeated blocks over large
+     sprites, most obviously the title logo. Widen before multiplying. The
+     golden capture has no full-height sprite, so this was invisible to the
+     frame test and only showed on hardware.
+
+  Lesson: the frame-level diff said "7.21% wrong, mostly sprite-ish colours",
+  far too vague to act on -- and its "matches a sprite pen" heuristic is weak,
+  since pens 0..4095 cover most colours by coincidence. What cracked it was
+  decoding the same tile row straight out of the ROM with MAME's own decryptor
+  and diffing pixel by pixel (the sprite pixel check in tb_video). Build the
+  narrow check that names the wrong bit, not the broad one that counts wrong
+  pixels.
+
+- **The alpha blend is a 127/129 mix, not 50/50.** MAME composites with
+  alpha_blend_r32(dest, pen, 0x7f) = (src*127 + dst*129) >> 8. A plain
+  (a+b)>>1 differs by one unit per channel on about half of all blended pixels.
+  Invisible to the eye, but it was 24,975 of the 29,815 differing pixels on the
+  frame-2400 capture -- it buried every real fault under rounding noise.
+  Both exact forms cost far too much timing: the literal 128*(d+s)+(d-s)>>8 blew
+  clk_sys setup by 6 ns and the average-plus-correction form by 21 ns, because
+  several blends sit in series in one combinational chain. The mixer keeps the
+  cheap average; sim/tb_video now scores frames with a +-1 per channel tolerance
+  and reports REAL mismatches separately. Only exact-form work would justify
+  pipelining the mixer across its eight cycles per pixel.
+
+- **spi_io's outputs cross clk_cpu to clk_sys unsynchronised.** layer_enable,
+  rowscroll_enable, fore_layer_d13 and rf2_layer_bank are all written on clk_cpu
+  and consumed by the clk_sys video logic. layer_enable in particular reaches
+  deep into the mixer's blend chain, and once that chain grew it failed setup by
+  6.4 ns. They are slow control registers, rewritten about once a frame, so a
+  two-flop synchroniser in spi_top is both correct and sufficient.
+
+- **tb_video's per-layer reference models are skewed one pixel.** text_line(),
+  back_line() and fore_line() disagree with MAME's real output by one pixel.
+  Making the RTL match them makes the FRAME worse: forcing the text layer to
+  300/300 against text_line() took the frame from 6.3% to 14.5%. This cost real
+  time -- it produced a confident but wrong "the back layer is shifted one pixel"
+  conclusion. The frame diff against MAME's captured bitmap is the ground truth.
+  Treat the layer scores as a hint about WHICH layer is involved, never as proof
+  of alignment.
 
 ## 12. Golden-reference testing against MAME
 
@@ -854,7 +1025,819 @@ Of those, only the first would ever have produced an obvious symptom.
       and the same class of bug in the render path is invisible without
       comparing actual pixels. Drive the Verilator model with a captured
       tilemap/palette RAM dump from MAME and diff the line buffers.
-- [ ] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
+- [~] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
+      - [x] `rtl/t80/` — T80 vendored from Arcade-IremM72_MiSTer. VHDL, so
+            Verilator cannot read it; `sim/T80s.sv` is a port-compatible stub
+            that exists only so lint and the C++ testbenches elaborate.
+            Quartus never sees it — it is not in `files.qip`.
+      - [x] `rtl/spi_sound.sv` — Z80 at clk_sys/8 (7.1590909 MHz, exact), 8 KB
+            RAM, the 386→Z80 FIFO, the coin latch, the bank register, and the
+            program fetch out of SDRAM ch3 behind an 8-byte line buffer.
+      - [x] `rtl/ymf271.sv` — the 0x6000 register file, the four FM banks' sync
+            write fan-out, timers A and B, the status/end flags and the IRQ.
+      - [x] `rtl/ymf271_pcm.sv` — 48-slot PCM synthesis at 44100 Hz.
+      - [x] `rtl/spi_sdr_arb2.sv` — ch3 now has two owners after boot (the Z80
+            and the JTAG peek) and needs arbitration.
+      - [ ] **FM is not implemented.** A slot renders only when its waveform
+            field is 7 (external/PCM); every other waveform is an FM operator
+            and is skipped. Nor is the LFO — vibrato and tremolo are absent.
+      - [x] `sim/tb_ymf271.cpp` drives the chip's own register interface and
+            checks 8-bit playback, 12-bit unpacking, the loop fold and end
+            status, timer A + IRQ, and key-off release. All pass.
+            `tools/check_ymf271_math.py` checks the phase step against MAME's
+            doubles over all 600,064 (fns, block, fs, multiple) combinations.
+      - [ ] **Not yet heard on hardware.** Nothing above `ymf271` can be
+            simulated -- the Z80 is VHDL -- so the Z80 bus, the FIFO, the coin
+            latch and the ch3 arbiter have only been reasoned about and built.
+            `tools/slop sound` reports the Z80 PC, FIFO reads, YMF writes, ROM
+            stalls, sounding slots and PCM overruns; see section 14.6.
+
+      Build with the sound subsystem in: 0 errors, TNS 0.000 on every clock,
+      **77% ALMs** (was 67%), **82% RAM blocks** (was 77%), 44% DSP.
+      Setup slack clk_ram +0.705 ns, clk_sys +0.877 ns, clk_cpu +3.032 ns.
 - [ ] **T6** MRA, docs, build verification.
 
 Order matters: T4 is the visible payoff and depends only on T1–T3. T5 can lag.
+
+- **MiSTer MRA parts are matched by CRC first, not by name.** Main_MiSTer's
+  `FileOpenZip()` calls `zip_search_by_crc()` and only falls back to
+  `mz_zip_reader_locate_file()` on the name. So an MRA carrying correct `crc=`
+  attributes loads correctly even from a merged set, where a clone's files are
+  stored under the parent's names (rdfts vs rdft) or behind a path prefix.
+  I initially "found" a bug here by reasoning about the loader instead of reading
+  it, and built a whole tool to work around a problem that did not exist.
+  tools/make_rdfts_zip.py survives as a way to produce a clean non-merged
+  rdfts.zip, but it is not required.
+  Lesson: when the diagnosis depends on what another component does, go read that
+  component. Main_MiSTer is checked out at ~/proj/Main_MiSTer.
+
+- **Active-low FIFO flags at 0x684.** MAME's `fifo7200_device` exposes `ef_r()`
+  and `ff_r()` as `!m_ef` / `!m_ff` -- they model the _EF and _FF *pins*, which
+  are active low, not the internal flags. So d0 reads 1 when the 386->Z80 FIFO
+  has room and d1 reads 0 while the Z80 has sent nothing back. I had both
+  inverted, so the 386 believed the sound FIFO was permanently full and spun in
+  the sound handshake a couple of seconds into the boot -- after it had already
+  set up the CRTC and run a dozen palette DMAs, which is why the screen showed a
+  few stray coloured pixels rather than nothing at all.
+  Lesson: when a MAME accessor negates something, that negation is usually the
+  hardware pin polarity and belongs in the RTL too. Also: a "hang" that leaves
+  the free-running raster alive is a *poll loop*, not a stall -- probing the CPU
+  address bus named the culprit in one run, where staring at the RTL had not.
+
+- **Never duplicate sdram.sv's dq_reg.** It sits directly on the DQ input path
+  and belongs in the I/O cell. I split it into per-channel copies with
+  `preserve` to chase a reported -0.054 ns *fabric* slack, and that let the
+  fitter drag copies out towards their consumers and destroyed the *input*
+  timing: the first 16-bit word of every burst read came back as unstable
+  garbage that changed on every read of the same address. Symptoms looked exactly
+  like an SDRAM too fast for the module, and I wrongly concluded 114.545 MHz was
+  unreachable on this board and halved clk_ram to 57.272727 to work around it.
+  Reference cores run this register single at 120 MHz; restoring it single made
+  114.545 MHz byte-perfect (all four checksums exact, zero layer overruns) with
+  timing closing at +0.379 ns. The original -0.054 ns violation never came back,
+  because USE_CH5=0 had already removed enough load.
+  Lessons: chasing a tiny fabric slack broke a path the SDC does not even
+  constrain; and "it is too fast for the hardware" is a conclusion to reach only
+  after checking what a working core does differently -- IremM92 runs 120 MHz on
+  this very board, which is what finally pointed at the real cause.
+
+- **Debugging this needs hardware access, and it is available.** The MiSTer is at
+  192.168.1.125 (root/1); `echo "load_core /media/fat/_Arcade/rdfts.mra" >
+  /dev/MiSTer_cmd` loads the core, so deploy-and-measure is fully scriptable. An
+  an Elgato 4K X captures the output for automated frame analysis -- ALWAYS find
+  it with `v4l2-ctl --list-devices`, never by assuming a node. This file said
+  /dev/video0 for months; that is the built-in webcam, and the Elgato came up on
+  /dev/video2. Capturing from the wrong node photographs the room and looks like
+  a core rendering garbage,
+  and the USB-Blaster gives In-System Sources & Probes via tools/jtag_peek.tcl
+  (PEEK reads any SDRAM address, SUMS reports checksums and download telemetry,
+  VITL reports CPU counters plus CS:EIP, GDTS snoops the GDT the boot code
+  builds). Use them before theorising -- three wrong diagnoses in this session
+  came from reasoning where a measurement was available.
+
+
+## 13. Current state (end of the hardware debugging session)
+
+The core boots into Raiden Fighters attract mode on real hardware: the 386 runs
+in protected mode (CS=0018), services vblank interrupts, and drives one tilemap
+and one palette DMA per frame, in lockstep with vblank. The back, midl and fore
+layers are pixel correct -- masking the text layer off shows the attract artwork
+rendering perfectly.
+
+PARTLY RESOLVED: the TEXT layer used to paint a solid opaque block over the top
+two thirds of the rotated screen. That was bandwidth, and the shortfall was
+itself caused by the dq_reg mistake above forcing clk_ram down to 57 MHz. At
+114.545 MHz the renderer reports ZERO overruns, the block is gone and the text
+layer is now correctly transparent over most of the screen.
+
+SPRITES FIXED TOO. spi_sprite wrote its line buffer at {~render_bank, x} while
+spi_layers writes {render_bank, x}, and the mixer reads {lb_wrap ? render_bank :
+~render_bank, x}. So the tile layers rendered into the back buffer (correct
+double buffering) but the sprite engine rendered into the buffer being displayed
+and then cleared it at the next line start, so the mixer only ever saw valid=0.
+Sprites now render recognisably -- aircraft, bullets, shot trails, explosions.
+
+Telemetry added to spi_sprite (dbg_scanned / dbg_yhit / dbg_emitted, on the VITL
+probe) is what proved the engine itself was fine: it was scanning, passing the y
+test and emitting tens of thousands of pixels into a buffer nobody read.
+
+BOTH OF THE FAULTS BELOW WERE ONE BUG IN THE MIXER, found 2026-08-08 and fixed.
+Kept because the wrong diagnoses are instructive:
+
+  1. On hardware, a band of striped garbage over source lines 128..208 in the
+     demo gameplay. Isolated properly (CPU frozen via mask bit 5, same scene,
+     text on vs off): the right band reads 31 with text enabled and 7 with text
+     disabled, identical to the good left band. It IS the text layer. Do not
+     read too much into the 128 boundary -- rows 0..15 may simply have no text
+     in that scene, so the layer could be wrong everywhere and only visible
+     where the game draws.
+  2. sim/tb_video (golden reference against a MAME capture) reports 7.21% of
+     frame pixels differing, and 5210 of the 5537 mismatches match a SPRITE pen.
+     So sprites are still substantially wrong even after the bank fix.
+
+Fault 2 was NOT sprites. "Matches a sprite pen" only ever meant "some pen below
+4096 happens to have this colour", and in a 6144-entry palette that is weak
+evidence. It survived three separate sessions as a conclusion. Both faults were
+the mixer pairing one pixel's colours with the next pixel's draw decisions --
+see section 13a.
+
+The bank fix is confirmed good by measurement, not assumption: old bank scores
+8.03% on the golden test, fixed bank 7.21%, and only the fixed one puts sprites
+on screen at all.
+
+Ruled out for the text layer by inspection against MAME (do not redo):
+pix8 plane extraction, char_off = code*48 + fine_y*6, the row_bytes window
+(char offsets are only 0/2/4/6), both 64-bit gfx reads happening for text,
+emit_grp = emit_i[3:2] selecting group 0 for pixels 0-3 and 1 for 4-7,
+tcode/tcolor split, tile_index = row*64 + col with SCAN_ROWS, the DMA
+destination offsets, and the text DMA moving the full 1024 dwords (measured on
+hardware via the dma_text_dw probe).
+
+CAPTURE YOUR OWN GOLDEN FRAMES. The original capture was a quiet scene and hid
+two sprite bugs and the tile-layer offset. Making a new one takes a minute:
+
+  cd ~/proj/mame && SLOP_OUT=<dir> SLOP_FRAME=2400 ./mame rdfts \
+    -rompath "<roms>" -autoboot_script ~/proj/SlopperPI/tools/mame_capture.lua \
+    -video none -sound none -seconds_to_run 45 -nothrottle
+
+SLOP_FRAME picks the frame; 600 is the early attract screen, 2400 is the title
+with the jungle background and heavy sprite traffic. Then point tb_video at it.
+
+USE sim/tb_video AS THE ITERATION LOOP. It runs in seconds, needs no hardware,
+and localises errors per layer. The rotation mapping is calibrated: source vcnt
+maps directly to display X (panel bar N sits at display x ~= 555 + N*50), and
+source hcnt maps to display Y inverted. Force the panel on over JTAG with
+mask bit 6 to re-calibrate.
+
+Isolate on hardware with the JTAG masks and the CPU frozen:
+    quartus_stp -t tools/jtag_peek.tcl mask 32   # freeze, all layers
+    quartus_stp -t tools/jtag_peek.tcl mask 47   # freeze, sprites only
+    quartus_stp -t tools/jtag_peek.tcl mask 55   # freeze, text only
+Note the earlier "the text layer draws garbled blocks" conclusion was NOT sound:
+those captures were taken at different points in the attract cycle, so the
+comparison was confounded. Always freeze the CPU (bit 5) before comparing.
+
+Ruled out for the text garbage: the 5bpp pixel extraction. MAME's readbit is
+MSB-first within a byte, so MAME bit N is w[23-N]; pixel 0's five planes land on
+v[16], v[12], v[8], v[4], v[0], which is exactly what pix8() does. The
+row_bytes window selection also covers every offset chars can produce
+(code*48 + fine_y*6 gives offsets 0, 2, 4, 6 only). And most text tiles ARE
+correctly transparent, which they could not be if the decode were broken. Look
+instead at the tile codes reaching the layer and at the colour field / palette
+base (pen_text = 5632 + colour*32 + pen).
+
+The diagnosis chain for the original block, kept because the telemetry is worth
+reusing:
+
+  * Masking layers one at a time (JTAG-driven, with the CPU frozen so the
+    attract mode stops moving) shows only the text layer contributes to it.
+  * spi_layers renders back, midl, fore, text in that order and abandons a line
+    at the next line_start if it has not finished. Telemetry says the overrun
+    layer is ALWAYS 3 (text) and the text layer only reaches column 12 of 41.
+  * Columns 13..40 are therefore never written, lb_text keeps its reset value of
+    0, and pen 0 is not the transparent pen -- MAME uses
+    set_transparent_pen(31) for the 5bpp text layer -- so it composites opaque.
+  * Those unrendered columns map to the top of the rotated screen, which is
+    exactly where the block appears.
+
+The 10%-of-lines overrun rate never did square with a solid block on every
+line, and that discrepancy is still unexplained -- but with overruns at zero the
+block is gone, so it is moot unless it resurfaces.
+
+On clock ratios, since it cost a lot of time: clk_ram does NOT need to be a
+multiple of clk_sys for the *logic* -- every crossing is a toggle handshake.
+But sys/sys_top.sdc puts all PLL outputs in one clock group, so Quartus analyses
+clk_ram <-> clk_sys paths, and at a non-integer ratio the closest launch/capture
+edge pair is a sliver. 96.923077 MHz (1260/13) built at clk_sys -4.7 ns, TNS
+-999. Integer ratios are what make it close; IremM92 pairs 120 MHz SDRAM with a
+40 MHz sys clock, exactly 3:1. To use an arbitrary rate, declare the domains
+asynchronous and widen sdram.sv's request samplers from one flop to two.
+
+Still worth doing for headroom regardless: spi_layers renders all four layers
+even when the game has disabled some, and issues two 64-bit reads per text
+column when an 8x8 char row is only 6 bytes.
+
+Sprite engine throughput: the 512-entry list walk used to cost five cycles a
+sprite = 2560 of the 3584 cycles in a line, leaving 96 for actual drawing. The
+RAM answers two cycles after an address is presented, so the next sprite's first
+read is now issued from S_START and S_ATTR/S_NEXTS drop out of the miss path --
+three cycles a sprite, 1536 cycles, and roughly 2.6x the drawing time. Two
+cycles a sprite is reachable with a proper pipeline if more is needed. There is
+a dbg_starved counter on the VITL probe: it fires when a line ends with sprites
+still unscanned. Measured at ~0.25% of lines, so starvation is NOT currently the
+main cause of missing sprites.
+
+WITHDRAWN: "the BACK tile layer is shifted one pixel horizontally" was NOT a
+bug. It was the probe skew of section 11 recurring, and it fooled me the same
+way it fooled the fore investigation before it.
+
+The reasoning was: back's offset profile peaks at -1 while fore's peaks at 0,
+therefore back is shifted relative to fore. The flaw is that **fore is uniform**
+on the probed rows -- it is fully transparent (0x3F) across the whole line in
+this scene, one distinct value -- so it ties at every offset from -1 to +3 and
+its "best offset 0" is an artefact of argmax picking the first maximum. Only
+layers with real content can be compared at all.
+
+Measured properly, on five rows (40, 80, 112, 160, 200) with the per-layer
+profile that now prints the reference's distinct-value count:
+
+    back  (20-26 distinct values):  best -1, 299/300, every row
+    midl  (27-32 distinct values):  best -1, 299/300, every row
+    fore  (1 distinct value):       tied everywhere, meaningless
+
+Both layers that carry content agree at -1, which is exactly what a correct
+layer looks like through a readback that leads by one. There is no relative
+shift and nothing to fix.
+
+The 38.82% (40.25% on a fresh capture) was also misattributed. It is dominated
+by the mixer's **deliberate** blend approximation: MAME does
+`alpha_blend_r32(dest, pen, 0x7f)` = `(src*127 + dst*129) >> 8`, the mixer does
+a plain 50/50 average, and rtl/spi_mixer.sv:157 records the choice and why
+(both exact forms blew clk_sys setup, by 6 ns and 21 ns). That is worth at most
+one unit per channel and only on blended pixels, and it accounts for 24854 of
+the 30915 differing pixels. Confirmed rather than assumed: for every channel of
+the sampled mismatches there are real palette-value pairs (d,s) that produce
+our value under the average and MAME's under 127/129 -- e.g. d=66,s=74 gives 70
+and 69.
+
+So the frame-2400 score is **7.89% real mismatches**, not 40%, and the diff
+"blanketing the jungle background" was the blend approximation blanketing the
+blended background, not a shifted layer.
+
+Two things changed in sim/tb_video.cpp so this cannot recur:
+  * the offset profile now runs for every layer and prints how many distinct
+    values the reference has, flagging `[UNIFORM - offset meaningless]`;
+  * the raw percentage is labelled "NOT the score to quote" and REAL mismatches
+    is the last line printed.
+`SLOP_PROBE_Y=<row>` picks the probe row -- a conclusion from a single scanline
+is worth very little here.
+
+Lesson, and it is the third time in this project: before comparing two
+measurements, check that both are capable of distinguishing the thing being
+compared. A uniform reference matches everything.
+
+NEXT THING TO CHASE: the 7.89%. The sprite-pen classification was also being
+computed over the raw set, where the blend pixels outnumber it four to one; it
+now runs over REAL mismatches only and reports **3933 match a sprite pen, 2086
+do not**. So roughly two thirds of the genuine error is sprites, which agrees
+with section 13's other reading, and there is a residual third that is not
+sprite-coloured and has never been accounted for. Note the test still exits
+non-zero on any difference at all, so a green run is not the goal until the
+mixer is exact.
+
+Fixed and verified on real hardware:
+  * SDRAM read corruption -- clk_ram now 57.272727 MHz, checksums exact.
+  * Sound FIFO status polarity at 0x684 (_FF/_EF are active low).
+  * clk_ram setup timing -- USE_CH5=0 and per-channel DQ capture registers.
+
+Verified good, so not worth re-investigating:
+  * ioctl download delivers all 23,396,352 bytes, all 14 parts (bytes_in probe).
+  * Microcode: ucode.mif and ucode.hex agree on all 2560 entries.
+  * Timing closes on every clock, no violations.
+  * SDRAM contents match the reference byte for byte, including under load.
+  * All 14 MRA part CRCs are present in the MiSTer's rdft.zip.
+
+FIXED, and the game now boots and renders: SeibuSPI.sv declared
+
+    wire [31:0] sdr_prg_dout;    // "ch1 386 program ROM (32 bit)"
+
+for a bus that sdram.sv drives 64 bits wide and spi_top consumes 64 bits wide.
+Quartus truncated the controller's output to 32 bits and zero-extended it back,
+so rom_data[63:32] was permanently zero and *every odd dword the 386 fetched
+from ROM read as 0x00000000* -- half the instruction stream was blank. It got
+far enough to build a GDT with two corrupt entries, then died on the far jump.
+
+Why nothing caught it: Quartus only warns on width mismatches, the testbenches
+declare their own ports correctly so simulation was structurally blind, and
+`make -C sim lint` lints spi_top -- never SeibuSPI.sv. The integration file was
+the one source in the project that nothing checked. There is now a `lint-top`
+target that lints it for WIDTHTRUNC/WIDTHEXPAND/IMPLICIT/PINMISSING; run it.
+
+Lesson: when simulation and hardware disagree and every shared component has
+been cleared, suspect the code that only exists on one side of the divide.
+
+## 13a. The mixer bug that was three different bug reports (2026-08-08)
+
+Two RTL faults, found by capturing the SXX2E **test menu** instead of a game
+scene. The screen is worth knowing about: it sets `layer_enable = 0x17`, which
+disables back, midl, fore **and** sprites, so the frame is the text layer alone
+on a flat background. Every previous capture had all layers on, and that is why
+this hid for so long -- there was nothing to isolate the text layer against.
+
+Capturing it needed `tools/mame_capture.lua` to trigger on demand rather than at
+a fixed frame number, which is what `SLOP_TRIGGER=<path>` now does: MAME runs
+normally until that file appears, then captures the next frame. That makes any
+hand-driven scene capturable -- a menu, a boss, a particular moment.
+
+### Bug 1: disabled back layer filled with palette pen 0, not black
+
+`screen_update_spi` (seibuspi_v.cpp:452) does:
+
+    if (m_layer_enable & 1)
+        bitmap.fill(0, cliprect);
+
+`bitmap.fill(0)` on a `bitmap_rgb32` writes the raw RGB value 0 -- **hard
+black**. It is not a draw of palette pen 0, and the two coincide only when pen 0
+happens to be black. The mixer read the palette. In the test menu pen 0 is
+0x7FFF, so the entire screen came out **white** with the (correctly rendered)
+text sitting on it. 98.56% of pixels wrong, and it reads as "the text is
+broken" because the text is the only thing on screen.
+
+### Bug 2: colours from pixel N, draw decisions from pixel N+1
+
+After bug 1 the frame was 2.28% wrong, in a very specific pattern: every run of
+opaque text pixels sat **one pixel left** of MAME's, and the first pixel of each
+run was 0x080808 instead of 0xEFEFEF. Decomposed by shifting our frame right one
+pixel: 1510 mismatches -> 755, and *all* 755 survivors were that same colour
+pair, every one of them at the start of an opaque run and none mid-run.
+
+That is one bug, not two. The mixer latches each layer's colour during the
+pixel (`rgb_back` at step 3, `rgb_text` at step 6 ...) but read `trans_*`,
+`spr_valid` and `spr_pri` **combinationally** off `lb_*`. The composite is
+sampled at step 1 of the *following* pixel, by which point `lb_x` has advanced,
+so the transparency test described pixel N+1 while the colour described pixel N.
+Consequences, both observed:
+
+  * the opaque run follows pixel N+1's mask at pixel N's position -- shifted
+    one pixel left;
+  * at the first position of a run the latched colour is the *previous* pixel's,
+    which is the transparent pen. Text transparent pen = 5632+31, whose palette
+    entry is 0x080808 -- exactly the dim leading pixel.
+
+Fix: latch `t_back/t_midl/t_fore/t_text/v_spr/p_spr` alongside the colour they
+belong to, and use only the latched copies in the composite. The alpha flags
+`a_*` were already latched at the right step, which is why blending never showed
+this.
+
+### What it scored
+
+    test menu   98.56% -> 0.00%   PASS, exact match, all 76800 pixels
+    attract      7.89% -> 1.78%   (REAL mismatches, blend-tolerant score)
+
+Confirmed on real hardware 2026-08-08: built with timing met (clk_ram +0.885,
+clk_sys +1.175, clk_cpu +3.827, TNS 0.000 everywhere -- all three better than
+the previous build), deployed, and the test menu now renders black background
+with clean white text, captured off the Elgato and matching MAME.
+
+The attract residual is now 1369 pixels, 1210 of which "match a sprite pen" --
+but that phrase means very little (see the note above), and the same statistic
+pointed at sprites when the real fault was the mixer. Treat it as unexplained,
+not as a sprite finding.
+
+### The lesson, which is the same one twice
+
+Both faults were invisible in every capture taken so far because those scenes
+could not isolate anything: every layer was on, so a text fault was buried under
+three other layers, and a background fault was hidden behind an opaque back
+layer. **The register state is part of the test case.** When a layer is
+suspect, find a scene where the hardware itself turns the others off -- the
+game's own test menu did in one capture what a year of attract-mode frames
+could not.
+
+And "matches a sprite pen" is not evidence. With 4096 candidate pens, most
+colours match one. It survived as a conclusion across three sessions and was
+wrong every time.
+
+## 14. Sound (T5) — design notes and what is deliberately missing
+
+**The single fact that shapes the whole thing:** on SXX2E the YMF271 is the
+sound driver's heartbeat as well as its voice. `ymf.irq_handler()` goes to the
+Z80's INT and `audio_vector_r` returns **0xD7 — RST 10h, IM0**, so with the
+timers dead the driver never sequences anything. Timers A and B were therefore
+implemented before a single sample was played, and both periods are whole
+multiples of 384 master clocks, i.e. whole 44100 Hz sample periods, so they
+count sample ticks instead of needing a clock of their own.
+
+**Only ONE FIFO exists on this board.** `m_soundfifo[1]` is a nullptr in the
+`sxx2e` machine config, which is why the Z80→386 direction is not implemented
+and why both of the corresponding status bits read back as zero rather than
+being wired to something.
+
+**The 386→Z80 handshake, end to end.** 386 writes 0x680 → `spi_io` (clk_cpu)
+raises a one-cycle pulse → `spi_sound` (clk_sys) edge-detects it, since a
+clk_cpu cycle is exactly two clk_sys cycles from the same PLL → 512-deep FIFO →
+Z80 reads 0x4008. The 386 polls `~full` at 0x684 d0. Coins go the other way:
+the Z80 writes 0x4004, the chip latches `0xA0 | data`, and the 386's read of
+0x680 clears it.
+
+**Z80 code runs out of SDRAM, not block RAM.** 128 KB would have cost a quarter
+of the device's memory blocks, so ch3 is shared and a miss on the 8-byte line
+buffer stalls the CPU with WAIT_n. Code is overwhelmingly sequential, so one
+SDRAM read serves about eight fetches. `dbg_stall` counts the misses.
+
+### 14.1 The bus-strobe bug that would have been invisible
+
+T80s clears MREQ_n, RD_n and WR_n **on the same clock edge**, so a strobe
+written as "RD_n rose while MREQ_n is still low" never fires at all — and by
+then the address register is already moving toward the next machine cycle. The
+first version of `spi_sound` did exactly that, which would have meant the FIFO
+never popped, the bank register never changed and no coin ever latched, with no
+error anywhere to point at it. The working form latches the address and write
+data while an access is live and triggers on the falling edge of "access in
+progress".
+
+Reads take effect at the END of the cycle on purpose: the Z80 samples DI there,
+so popping the FIFO any earlier hands it the next byte instead of the one it
+asked for.
+
+### 14.2 YMF271 PCM engine
+
+MAME's `update_pcm` / `update_envelope` / `calculate_slot_volume`, re-expressed
+as one serial pass over 48 slots per sample. clk_sys/44100 = 1298 cycles per
+sample, so the budget is ~27 cycles a slot; an active slot that hits its sample
+cache costs about 20 and an idle one about 8. `dbg_overrun` counts samples the
+pass could not finish, so that budget is measured rather than assumed.
+
+Everything MAME computes in doubles collapses to integers:
+
+* `calculate_step` — `pow_table` is a power of two, `fs_frequency` is a shift
+  and `multiple_table` is a half-integer, so the whole product is one 12x5
+  multiply and a signed shift.
+* the envelope rates come from two generated tables (attack and decay sweeps of
+  the full 255 units, pre-multiplied by 65536) plus one reciprocal table for
+  decay1, which is the only step whose sweep is not 255.
+* `tools/gen_ymf271_tables.py` emits all of them from `ymf271.cpp` itself, the
+  same arrangement the sprite decrypt tables use.
+
+Per-slot state (stepptr, volume, envelope state, active) lives in a 48-entry
+RAM, the slot parameters in a 256x64 RAM, and each slot keeps an 8-byte line of
+its sample stream so a slot stepping at roughly 1.0 hits SDRAM once every eight
+samples instead of every one.
+
+**Not implemented, and both are audible omissions:** the 4-operator FM half of
+the chip, and the LFO. Slots whose waveform is not 7 are silently skipped;
+vibrato and tremolo are absent rather than wrong. Seibu's driver leans heavily
+on PCM, so this should carry most of the soundtrack, but anything voiced on FM
+is missing.
+
+One knowing divergence: MAME latches the four envelope rates at key-on and
+keeps them for the note's life. Storing them would cost 96 bits a slot, so they
+are recomputed from the LUTs every sample. It only shows if the game retunes a
+slot mid-note, and then only in how fast that envelope runs.
+
+### 14.3 Two synthesis traps this hit
+
+**A variable part-select write does not infer a byte-enabled RAM.** The slot
+parameter store was written as
+
+    par_mem[addr][{byte, 3'b000} +: 8] <= data
+
+which Quartus turned into **16k flip-flops plus a 256-to-1 mux on 64 bits —
+23,229 ALUTs**, a third of the device, for 16 Kbit of storage. Eight separate
+byte-wide arrays with their own write enables infer cleanly. Check
+`Analysis & Synthesis Resource Utilization by Entity` for any new RAM; a
+failure to infer looks like nothing at all until the fitter runs out of room.
+
+**`altsource_probe` caps `probe_width` at 511.** VITL was already at 478, so
+appending the six sound counters overflowed it and elaboration failed with a
+VHDL assertion out of `altsource_probe_body.vhd`. They live on their own SNDV
+probe instead. The "append new fields on the LSB side" rule in §9b still holds,
+but it has a ceiling — VITL has 33 bits left.
+
+### 14.4 Controls
+
+Joystick bits 4 and up are the MRA's `<buttons names="..."/>` list **in order**,
+and `SeibuSPI.sv` decodes them at exactly those positions. They had drifted
+apart: the MRA named eight entries with two `-` placeholders in the middle,
+putting Start on bit 9 and Coin on bit 10, while the core read bit 7 as coin and
+bit 8 as start. Coin and start were mapped to buttons nobody could press. The
+layout is now bit 4 Shot, 5 Bomb, 6 Button 3, 7 Start, 8 Coin, 9 Service Coin,
+10 Test, and the two files have to be changed together.
+
+**The debug freeze used to fire on ANY button of either pad**, which made the
+game unplayable the moment anyone pressed shot. It now requires the Vital Signs
+Panel option to be on, and only Button 3 triggers it.
+
+**DIP polarity here is the opposite of the usual arcade MRA.** MAME's
+`PORT_SPECIAL_ONOFF_DIPLOC(0x8000, 0x0000, Flip_Screen, "SW1:1")` makes Off the
+bit CLEAR, and a DIPSWITCH field does not take the port's `IP_ACTIVE_LOW`
+inversion the way the buttons do. So `<switches default="00">`, not the usual
+`ff`, and INPUTS bit 15 passes straight through while bits 14:0 are inverted.
+
+The DIP transfer arrives as ioctl index 254 on the same bus as the ROM
+download, so the core's reset had to stop keying on `ioctl_download` alone or
+changing a DIP would restart the game.
+
+### 14.5 Known divergences from MAME, beyond FM and the LFO
+
+* **`fns` / `block` update immediately.** MAME's `write_register` case 0x9 does
+  `fns = (fns_hi << 8 & 0x0f00) | data` and `block = fns_hi >> 4`, so writing
+  register 0xA alone changes nothing until register 9 is written. Here both
+  fields are decoded straight out of the stored bytes, so a lone 0xA write takes
+  effect at once. Drivers write A then 9 together, which gives the same result.
+* **Timer A and B free-run once started.** That is MAME's behaviour too: the
+  "stop" branch in `ymf271_write_timer` case 0x13 is only reachable when the
+  enable bit is already set, so it can never be taken.
+* **The external memory port (registers 0x14-0x17) is not implemented.** It is
+  the cartridge flash path on SXX2C; SXX2E has a plain mask ROM on the YMF bus.
+
+### 14.6 What to check first when this is put on hardware
+
+`tools/slop sound` (or `quartus_stp -t tools/jtag_peek.tcl sound`), in order:
+
+1. **Z80 PC changing at all.** If it is stuck the sound CPU never started, and
+   the most likely cause is the ch3 arbiter or the ROM line buffer, not the
+   YMF271.
+2. **fifo reads > 0.** The 386 writes commands whether or not anything listens;
+   this is the first evidence the Z80 is executing the driver.
+3. **ymf writes > 0**, then **pcm slots > 0**. Slots sounding but no audio
+   points at the sample fetch or the volume chain; no slots points at the
+   driver or the key-on path.
+4. **pcm overruns.** Should be 0. If not, the 27-cycle-a-slot budget is wrong
+   and the sample rate is being stretched.
+
+New failure mode to be aware of: 0x684 d0 is now a real FIFO-full flag rather
+than the constant "there is room" it used to be. A Z80 that never runs will let
+the 512-entry FIFO fill and then the 386 will spin in the sound handshake --
+the same symptom as the polarity bug in section 12, from a different cause.
+
+### 14.7 The Z80 sits at the bottom of the SDRAM priority list
+
+`sdram.sv` serves ch2 (tiles) > ch1 (386) > ch4 (sprites) > ch5 (PCM) > ch3,
+and ch3 is where the Z80's program fetch now lives. It is the right order --
+starving the video shows on screen, starving the Z80 only makes the sound CPU
+run slower, and the YMF271 timers keep their own time regardless. But it does
+mean a stalled fetch waits behind everything, so if the sound driver ever
+misses its tick under heavy sprite load, this is where to look. `dbg_stall`
+counts the misses; it does not measure how long each one waited.
+
+### 14.8 What the simulation does and does not cover
+
+`make -C sim run-ymf271` drives `ymf271` through its own register interface --
+the same writes a sound driver makes -- and requires the mixer output to be the
+sample ROM contents verbatim. That works because with total level 0, all four
+channel attenuations at 0 dB and the envelope saturated, MAME's arithmetic
+collapses to `out == sample`, so a ramp in the ROM has to come back as that same
+ramp. It covers the register decode, key on and off, the phase step, address
+generation, the line cache, 8- and 12-bit unpacking, the loop fold, the end
+status flag, the envelope reaching maximum and releasing to silence, and timer A
+with its interrupt.
+
+Only the phase pointer is modelled in C, straight out of `update_pcm`. A second
+fixed-point model of the volume chain would only prove the two agree with each
+other -- the `tb_rom_loader` mistake in section 12.
+
+**Two testbench bugs worth remembering**, because both produced confident wrong
+answers about the RTL:
+
+* The 44100 Hz accumulator was only advanced on the clocks the sample loop
+  looked at, not on the ones inside `run()`. It therefore skipped every other
+  tick and reported the voice playing at exactly twice the correct rate --
+  indistinguishable from a phase step that is one bit off.
+* `endaddr` and `loopaddr` are offsets from `startaddr`, not absolute
+  addresses: MAME compares them against `stepptr>>16` and reads at
+  `startaddr + (stepptr>>16)`. Setting them to absolute addresses read at twice
+  the intended offset.
+
+**Not simulated at all: everything above `ymf271`.** The Z80 is VHDL, so
+`spi_sound` -- the bus strobes, the FIFO, the coin latch, the bank register, the
+ROM line buffer -- and the ch3 arbiter have been built and reasoned about but
+never executed. That is where to look first if the board comes up silent.
+
+### 14.9 First hardware run — sound works
+
+Deployed to the MiSTer at 192.168.1.125 and measured, 2026-08-04.
+
+Telemetry over `tools/slop sound`, sampled repeatedly:
+
+| reading | value | meaning |
+|---|---|---|
+| Z80 PC | changes every read (009D, 0143, 0168, 0286, 012A…) | the sound CPU is executing |
+| fifo reads | climbing, ~45/s | the Z80 is taking commands from the 386 |
+| ymf writes | climbing steadily | the driver is programming the chip |
+| pcm slots | 7 - 12, dropping to 0 between tracks | voices sounding, tracking the music |
+| **pcm overruns** | **0, every reading** | the 27-cycle-a-slot budget holds under load |
+
+Audio captured off the HDMI through the Elgato and measured: peak 27% of full
+scale, RMS ~1200, sustained over 35 seconds, strongest components at 105-250 Hz
+and a zero-crossing rate that moves between seconds -- music, not a stuck tone.
+**L and R are bit-identical**, which is correct: SXX2E sums all four YMF outputs
+onto one speaker.
+
+The clincher is that the audio and the telemetry agree about the *silence*. The
+attract sequence has a gap between tracks; across it the per-second RMS went
+`2297 2024 1527 399 1 1 1 460 575 838` while the slot count read 10, then 2,
+then 0, then climbed again. The core is playing the game's music, not an
+artefact of the measurement.
+
+**`dbg_stall` cannot be read as a rate.** It is a free-running 16-bit counter
+and it wraps faster than it can be sampled -- four readings 0.4 s apart gave
+61278, 63214, 56093, 50728, which implies two different rates depending on which
+interval is used. This is the same trap as the sprite counters in section 9b and
+it was not fixed for this one. All it establishes is that the ROM fetch path is
+busy. Latch it per frame if the actual number ever matters.
+
+Also confirmed on the same run: the picture is unaffected (title screen renders
+upright, so the flip-screen DIP defaults correctly), CS=0018 with EIP advancing,
+all layers enabled, vblank counting.
+
+The first capture-card frame after opening the device is black. That is the
+artefact section 9b describes, not a dead core -- check the JTAG vitals before
+believing a black frame.
+
+## 15. FM and the LFO (finishing the audio)
+
+`ymf271_pcm.sv` is now `ymf271_synth.sv`. The engine walks **12 groups x 4
+slots** instead of 48 flat slots, because everything about FM is per group.
+
+### 15.1 The structural insight that made this small
+
+MAME writes out 16 + 4 + 8 algorithm cases as 28 blocks of straight-line code,
+and they look like 28 different machines. They are not. In **every** algorithm
+of **every** sync mode the operators are evaluated in the same order --
+slot1, slot3, slot2, slot4, i.e. banks 0, 2, 1, 3 -- and only three things
+change:
+
+* which earlier results feed each operator (a 3-bit mask over r1, r3, r2),
+* whether `set_feedback()` takes operator 1's result or operator 3's,
+* which operators reach the mixer (a 4-bit mask).
+
+So the whole thing is a 28-entry table and one sequencer, not 28 datapaths.
+The bank order being invariant is what collapses it.
+
+### 15.2 Fixed-point notes
+
+* An FM operator's output already has its envelope folded in and MAME applies
+  no channel clamp to it, so its mix is a plain sum of the four attenuations --
+  one multiply, where PCM needs four clamped ones.
+* `calculate_op`'s phase index is `((stepptr + slot_input) >> 16) & 1023`.
+  MAME does that in 64 bits; 32 is exact here, because only bits 25:16 survive
+  and carries never propagate downward.
+* The waveform ROM stores only waveforms 0-5. Waveform 6 is the constant 32767
+  and 7 is silence, both cheaper in logic than in memory.
+* The pitch LFO would be a 4 x 8 x 256 table of doubles. Split into the shape
+  (4 x 256, quantised to 128ths) and the exponential (7 x 257, since pms 0 is
+  exactly unity) it is 5 M10K instead of 14, and the quantisation error is
+  1/256 of the modulation depth -- 0.0003 semitones at the deepest setting.
+
+### 15.3 Three bugs, and what caught each
+
+**The pitch LFO was applied a sample late, using another slot's value.**
+`step_calc` multiplied by the *registered* `plfo`, but `step_r <= step_calc`
+happens in the same cycle as `plfo <= plfo_c`. So every note's first sample
+used whatever the previously processed slot had left in that register. Caught
+by the LFO pitch test, which parks the LFO at a fixed depth and predicts the
+phase step exactly. The fix is to read `plfo_c` combinationally.
+
+**FM operators ignored total level.** `op_mul` scaled the waveform by
+`env_gain`, which is only the envelope-times-LFO half; `calculate_slot_volume`
+folds total level in as well, and that is `slot_gain`. Every FM voice would
+have played at full volume regardless of what the driver asked for. This one
+was NOT caught by a test -- every test used total level 0, where the two are
+equal. It was found by writing the reference model for the chain test and
+noticing the model needed a term the RTL did not have. The carrier test now
+uses a real attenuation so it cannot come back.
+
+**Two roundings went the wrong way.** MAME's `/2` in the feedback average and
+`/16` in `set_feedback` are C integer division, which truncates toward zero;
+an arithmetic shift floors. Negatives came out one too low. Only reachable
+with feedback enabled, which is exactly what the chain test turns on.
+
+### 15.4 The testbench
+
+`make -C sim run-ymf271` now runs ten checks. The FM ones work the same way as
+the PCM ones -- predict the exact output from MAME's formulas, not from a
+second copy of the RTL's arithmetic:
+
+* **carrier** -- algorithm 15 is four independent oscillators; silence three
+  and the output is one bare waveform, recomputed from `sin()` rather than read
+  back out of the generated table, scaled by a real total level.
+* **modulation** -- sync 1 algorithm 0 is one operator modulating another's
+  phase, the heart of FM.
+* **chain + feedback** -- algorithm 0 in 4-operator mode: 1 feeds back into
+  itself, then modulates 3, then 2, then 4. The feedback state depends on every
+  previous sample including the ones where the envelope was still attacking, so
+  the model carries the envelope too and matches from the note's first sample.
+* **LFO amplitude and pitch** -- with the LFO frequency at 0 the phase never
+  moves, so a square wave parks at a fixed depth and both the gain and the
+  phase step become constants the test can predict.
+
+**A one-sample match is not an alignment.** The first version located the
+phase by finding any table index whose value equalled the first sample. The
+sine takes most values twice a period, so it frequently locked onto the wrong
+one and every subsequent sample read as a one-sample lag -- which is also
+exactly what a wrong phase step looks like. All the searches now require four
+consecutive samples to agree.
+
+### 15.5 PCM voices live only at slots that are multiples of four
+
+`pcm_tab` maps the PCM bank's select to `12*(sel>>2) + 4*(sel&3)`, so it
+reaches twelve slots -- 0, 4, 8, 12 ... 44 -- and every fourth select is
+invalid. Since slot = bank*12 + group, that means **only groups 0, 4 and 8 can
+hold PCM voices**, four each. This is not a curiosity: the hardware telemetry
+had already shown the sounding-slot count peaking at exactly 12 and never
+higher, which is the same fact seen from the other end.
+
+It also cost a debugging cycle. The FM tests park a spare slot-4 PCM voice on
+silence, and doing that through select 3 writes nothing at all -- `sel & 3 == 3`
+is the invalid entry. The untouched voice then played from address 0 and buried
+the operator under a constant offset. Slot 4 of group 0 is slot 36, which is
+select 12.
+
+### 15.6 The FM engine missed clk_sys setup by 2.2 ns, and how it was found
+
+The first FM build produced an RBF and reported "Full Compilation successful",
+but `clk_sys` was at **-2.212 ns setup, TNS -77.9**. A successful compile is not
+a passing compile -- always read the Setup Summary.
+
+The Setup Summary names the clock and the slack but not the endpoints, and the
+STA report as written contains no path listing. To get one:
+
+    quartus_sta -t paths.tcl        # project_open, create_timing_netlist,
+                                    # read_sdc, update_timing_netlist, then
+                                    # get_timing_paths -setup -npaths 25
+
+Every one of the worst 25 paths was the same: `w1[4]` to `op_out[*]`. `w1[4]` is
+the low bit of the operator's `feedback` field, and the chain from there was
+
+    feedback -> MODLVL lookup -> 18x8 multiply -> add to stepptr
+             -> waveform ROM lookup -> 16x19 multiply -> op_out
+
+two multiplies with an asynchronous ROM read between them, all in one cycle.
+
+The fix is entirely pipelining -- no logic changed, and all ten testbench
+checks still pass bit for bit:
+
+* the waveform ROM now has a registered address and a registered output, so it
+  is a real M10K read rather than an asynchronous lookup buried mid-chain
+  (`S_FMPH` / `S_FMWT` / `S_FMOP`);
+* the LFO's three serial ROM reads -- frequency, pitch shape, exponential --
+  get a cycle each (`S_LFO0` / `S_LFO1` / `S_LFO2`);
+* `calculate_step`'s multiply, power-of-two shift and LFO scaling get a cycle
+  each (`S_STEP0` / `S_STEP1` / `S_STEP2`);
+* the volume chain's two ROM reads and two multiplies are spread over four
+  cycles instead of two.
+
+The gate that decides whether a slot is sounding also moved **before** the LFO
+work, which is both faster and more faithful: MAME only reaches `update_lfo()`
+and `calculate_step()` from inside `calculate_op()` / `update_pcm()`, and both
+return early on an idle slot.
+
+Rule of thumb this leaves behind: in this engine no state may contain more than
+one ROM read or one multiply. Two of either, or one of each in series, does not
+fit in 17.46 ns.
+
+### 15.7 What the algorithm sweep caught, and one thing it cannot
+
+`test_all_algorithms` sets up all four operators, walks every algorithm of
+sync 0 and sync 2 -- 24 networks -- and compares against a transcription of
+MAME's `switch` statements rather than against the RTL's own `in_mask` /
+`out_mask` table. That is the point: the table is 28 wiring diagrams read by
+eye, the same transcription risk as the sprite decrypt tables in section 5.4,
+and a self-consistent check would prove nothing.
+
+It immediately failed on **algorithms 1, 5, 7 and 11 of sync 0 and 1 and 5 of
+sync 2** -- exactly the six whose `set_feedback()` takes operator 3's result
+rather than operator 1's. Those run a step later, by which point `p_feedback`
+holds a different operator's field, so the feedback depth was read from the
+wrong operator. Operator 1's value is now latched into `net_fbk` at the start
+of the network. Nothing else in the table was wrong.
+
+**What the sweep cannot check: the first few samples of a note.** The
+alignment search can only pin the phase, which is periodic; the envelope is
+monotonic and there is no way to observe which output sample the device treated
+as the note's first. Comparison therefore starts once the envelope has
+saturated. Those early samples were the only place the two ever differed --
+by a couple of counts, at -60 dB -- while the following 120 match exactly.
+
+### 15.8 clk_ram, and a path that is not allowed to be touched
+
+With clk_sys fixed, `clk_ram` came out at **-0.104 ns, TNS -0.154**: two paths,
+both `sdram|dq_reg -> sdram|ch5_dout`. That is the SDRAM's PCM read capture,
+and section 10 already records what happens if it is "optimised" --
+restructuring `dq_reg` destroyed the SDRAM input timing and produced garbage on
+the first word of every burst, a fault that looked exactly like a module too
+slow for the clock. It is pure routing, 0.1 ns, on the channel the sound engine
+made real. Rebuilding cleared it -- the netlist had changed anyway for the
+`net_fbk` fix, and the fitter placed it differently -- so `dq_reg` was never
+touched. If it comes back, a fitter seed is the next lever, not that register.
+
+Final state with FM, the LFO and the pipelining: **0 errors, TNS 0.000 on every
+clock**, setup slack clk_ram +0.641 ns, clk_sys +0.919 ns, clk_cpu +3.044 ns,
+78% ALMs, 86% RAM blocks, 53% DSP. RAM blocks are now the tightest resource;
+the waveform ROM is 13 of them and the two LFO tables 5.
+
+`make timing` runs `tools/timing_paths.tcl`, which prints the endpoints the
+Setup Summary leaves out. Worth knowing before the next timing hunt: a compile
+that says "Full Compilation was successful" has NOT necessarily met timing, and
+the .sta.rpt it writes contains no path listing at all.

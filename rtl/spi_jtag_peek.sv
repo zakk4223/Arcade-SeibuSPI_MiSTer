@@ -1,0 +1,240 @@
+//============================================================================
+//  SlopperPI - read SDRAM from the host over JTAG
+//
+//  Two In-System Sources & Probes instances:
+//
+//    PEEK  source = {go, addr[24:0]}   probe = {ack, data[63:0]}
+//          Writing an address and flipping `go` issues one 64-bit SDRAM read;
+//          `ack` flips back when `data` is valid. tools/jtag_peek.tcl drives it.
+//
+//    SUMS  probe = {ok[3:0], sum_sprites, sum_tiles, sum_chars, sum_prg}
+//          What spi_romcheck actually computed, so a checksum mismatch can be
+//          told apart from a checker that is reading through a broken path.
+//
+//  This exists because every failure so far has been ambiguous between "the
+//  hardware is wrong" and "the instrument is wrong", and reading the real SDRAM
+//  contents from the host settles that directly.
+//
+//  Simulation-only builds never see this: it lives in SeibuSPI.sv, outside the
+//  module set that sim/ lints, because altsource_probe is an Altera primitive.
+//============================================================================
+
+module spi_jtag_peek
+(
+	input             clk,
+	input             reset,
+	input             enable,        // only take the bus once the checker is done
+
+	// SDRAM read port (shared with spi_romcheck, handed over after chk_done)
+	output reg [24:0] sdr_addr,
+	input      [63:0] sdr_dout,
+	output reg        sdr_req,
+	input             sdr_ack,
+
+	input      [31:0] sum_prg,
+	input      [31:0] sum_chars,
+	input      [31:0] sum_tiles,
+	input      [31:0] sum_sprites,
+	input       [3:0] ok,
+	input      [15:0] passes,
+	input      [15:0] fails,
+	input      [24:0] bytes_in,
+	input       [3:0] part_end,
+
+	// Live counters from the board, so the vital signs can be read over JTAG
+	// instead of squinting at bars on a capture card.
+	input      [15:0] c_prg,
+	input      [15:0] c_iowr,
+	input      [15:0] c_dma_tm,
+	input      [15:0] c_dma_pal,
+	input      [15:0] c_vbl,
+	input       [3:0] why,
+	input      [31:0] eip,
+	input      [15:0] cs,
+	input             irq,
+	input      [15:0] lay_ovr,
+	input       [1:0] lay_ovr_layer,
+	input       [5:0] lay_text_col,
+	input      [15:0] spr_scanned,
+	input      [15:0] spr_yhit,
+	input      [15:0] spr_emitted,
+	input      [15:0] spr_starved,
+	input      [15:0] spr_tiles,
+	input      [15:0] c_dma_spr,     // sprite-list DMA triggers
+	input      [15:0] spr_codes_nz,  // list entries with a non-zero code
+	input      [31:0] spr_ram_or,    // OR of all sprite-RAM dwords on a line
+	input      [17:2] dma_src_spr,   // source the sprite DMA actually used
+	input      [15:0] cpu_wr_spr,    // CPU dword writes into 0x37000..0x37FFF
+	input      [15:0] cpu_wr_tm,     // ... and into 0x38000..0x38FFF (control)
+	input             frozen,        // CPU stopped (JTAG bit OR controller button)
+	input             rs_en,         // rowscroll_enable as this side sees it
+	input             fd13,
+	input      [12:0] tm_dwords,     // 4096 = rowscroll on, 2560 = off
+	input      [95:0] scrolls,       // {fy,fx,my,mx,by,bx}
+	input       [4:0] lay_en,
+	input      [11:0] dma_text_dw,
+	input     [191:0] gdt,
+
+	// Sound subsystem, on its own SNDV probe.
+	input      [15:0] snd_pc,          // last Z80 M1 address
+	input      [15:0] snd_fifo_rd,     // commands the Z80 has taken from the 386
+	input      [15:0] snd_ymf_wr,      // YMF271 register writes
+	input      [15:0] snd_stall,       // SDRAM fetches the Z80 had to wait for
+	input      [15:0] ymf_overrun,     // samples the synth could not finish
+	input      [15:0] ymf_active,      // slots sounding on the last sample
+
+	// Live layer masks driven from the host, so a rendering fault can be
+	// isolated to a layer without a rebuild for each experiment.
+	output      [7:0] ctrl
+);
+
+	wire [25:0] source;
+	wire        go   = source[25];
+	wire [24:0] addr = source[24:0];
+
+	reg        ack;
+	reg [63:0] data;
+	reg        go_d;
+	reg        busy;
+
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (0),
+		.instance_id             ("PEEK"),
+		.probe_width             (65),
+		.source_width            (26),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("YES")
+	)
+	peek_issp
+	(
+		.probe      ({ack, data}),
+		.source     (source),
+		// enable_metastability="YES" registers the source into source_clk. With
+		// no clock connected the register never advances and every write from
+		// the host is silently discarded -- the source reads back as its
+		// initial value forever.
+		.source_clk (clk),
+		.source_ena (1'b1)
+	);
+
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (1),
+		.instance_id             ("SUMS"),
+		.probe_width             (193),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	sums_issp
+	(
+		.probe  ({fails, passes, part_end, bytes_in, ok, sum_sprites, sum_tiles, sum_chars, sum_prg}),
+		.source ()
+	);
+
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (2),
+		.instance_id             ("VITL"),
+		.probe_width             (478),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	vitals_issp
+	(
+		// The Tcl reads this probe as a binary string MSB first, so index 0 is
+		// the leftmost element here. New fields therefore go at the END (the LSB
+		// side): appending leaves indices 0..253 exactly where they were, and
+		// the two new words land at 254..285. Prepending would have shifted
+		// every existing offset by 32 and silently corrupted every field.
+		.probe  ({spr_starved, spr_tiles, dma_text_dw, lay_en, spr_emitted, spr_yhit, spr_scanned,
+		          lay_text_col, lay_ovr_layer, lay_ovr, irq, cs, eip, why,
+		          c_vbl, c_dma_pal, c_dma_tm, c_iowr, c_prg,
+		          c_dma_spr, spr_codes_nz, spr_ram_or, dma_src_spr,
+		          cpu_wr_spr, cpu_wr_tm, frozen,
+		          rs_en, fd13, tm_dwords, scrolls}),
+		.source ()
+	);
+
+	// A separate instance rather than more bits on VITL: altsource_probe caps
+	// probe_width at 511 and VITL is already at 478.
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (5),
+		.instance_id             ("SNDV"),
+		.probe_width             (96),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	sound_issp
+	(
+		.probe  ({snd_pc, snd_fifo_rd, snd_ymf_wr, snd_stall,
+		          ymf_overrun, ymf_active}),
+		.source ()
+	);
+
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (3),
+		.instance_id             ("GDTS"),
+		.probe_width             (192),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	gdt_issp
+	(
+		.probe  (gdt),
+		.source ()
+	);
+
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (4),
+		.instance_id             ("CTRL"),
+		.probe_width             (8),
+		.source_width            (8),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("YES")
+	)
+	ctrl_issp
+	(
+		.probe      (ctrl),
+		.source     (ctrl),
+		.source_clk (clk),
+		.source_ena (1'b1)
+	);
+
+	always @(posedge clk) begin
+		if (reset) begin
+			sdr_req <= 1'b0;
+			ack     <= 1'b0;
+			busy    <= 1'b0;
+			go_d    <= 1'b0;
+			data    <= 64'd0;
+		end
+		else begin
+			go_d <= go;
+			if (enable && !busy && (go != go_d)) begin
+				sdr_addr <= {addr[24:3], 3'b000};
+				sdr_req  <= ~sdr_req;
+				busy     <= 1'b1;
+			end
+			else if (busy && (sdr_ack == sdr_req)) begin
+				data <= sdr_dout;
+				ack  <= go_d;
+				busy <= 1'b0;
+			end
+		end
+	end
+
+endmodule

@@ -76,6 +76,11 @@ def main():
         raise SystemExit(__doc__)
     zpath, outpath = sys.argv[1], sys.argv[2]
 
+    # --concat writes the raw concatenation of the parts in MRA order instead
+    # of the scattered image: that is exactly the byte stream MiSTer pushes over
+    # ioctl, and sim/tb_sdram.cpp feeds it to the real loader.
+    concat = "--concat" in sys.argv
+
     want_regions = None
     if "--region" in sys.argv:
         want_regions = set(sys.argv[sys.argv.index("--region") + 1].split(","))
@@ -105,6 +110,15 @@ def main():
             image[base + dest_of(mode, i)] = b
         placed += 1
         print("  %-8s %-28s %8d  %s" % (region, name, size, mode))
+
+    if concat:
+        blob = bytearray()
+        for region, crc, size, mode, off in PARTS:
+            blob += zf.read(by_crc[crc])
+        with open(outpath, "wb") as f:
+            f.write(blob)
+        print("wrote %s (concatenated stream, %d bytes)" % (outpath, len(blob)))
+        return
 
     with open(outpath, "wb") as f:
         f.write(image)

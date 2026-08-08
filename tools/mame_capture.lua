@@ -25,6 +25,15 @@
 --
 local OUT    = os.getenv("SLOP_OUT")   or "."
 local TARGET = tonumber(os.getenv("SLOP_FRAME") or "600")
+
+-- On-demand capture. With SLOP_TRIGGER=<path>, the frame number is not known in
+-- advance: MAME runs normally until that file appears, then captures the next
+-- frame. That is what lets a scene be driven by hand -- a menu, a test screen,
+-- a particular moment in a level -- instead of being reached by frame count.
+-- The frame-count path is unchanged when SLOP_TRIGGER is unset.
+local TRIGGER = os.getenv("SLOP_TRIGGER")
+local armed   = false
+if TRIGGER then TARGET = math.huge end
 -- Frames between the video-RAM snapshot and the bitmap grab. The two are not
 -- necessarily taken from the same side of the game's vblank update; see the
 -- note in the frame notifier.
@@ -154,6 +163,20 @@ end
 
 slop_frame_sub = emu.add_machine_frame_notifier(function()
     frames = frames + 1
+
+    -- Arm on the trigger file. TARGET must land at least two frames out: the
+    -- frame before it installs the main-RAM shadow, and the capture itself
+    -- depends on that shadow already tracking writes.
+    if TRIGGER and not armed then
+        local f = io.open(TRIGGER, "r")
+        if f then
+            f:close()
+            os.remove(TRIGGER)
+            armed  = true
+            TARGET = frames + 2
+            print("SLOP: triggered, capturing at frame " .. TARGET)
+        end
+    end
 
     if BIAS ~= 0 and frames == TARGET + BIAS then grab_frame() end
 

@@ -5,7 +5,7 @@
 //
 //  MAME composites in this exact order, and the odd bits matter:
 //
-//      if back disabled:  fill with pen 0
+//      if back disabled:  fill with hard black (a raw fill, NOT palette pen 0)
 //      else:              back layer, OPAQUE (transparent pens drawn too)
 //      sprite priority 0
 //      if back+fore+sprite all enabled: back layer again, TRANSPARENT
@@ -80,12 +80,23 @@ module spi_mixer
 	wire [12:0] pen_spr  = {1'b0, lb_spr[11:6], 6'd0} + {7'd0, lb_spr[5:0]};
 
 	// Transparency: pen 63 for the 6bpp layers, 31 for the 5bpp text layer.
+	//
+	// These are combinational on lb_*, so they follow the line buffers the
+	// instant lb_x advances. The composite is sampled at step 1 of the FOLLOWING
+	// pixel (see the output register below), where lb_* has already moved on --
+	// so using them directly pairs pixel N's colours with pixel N+1's draw
+	// decisions. They are latched below, alongside the colour each one belongs
+	// to, and only the latched copies may be used in the composite.
 	wire trans_back = (lb_back[5:0] == 6'd63);
 	wire trans_midl = (lb_midl[5:0] == 6'd63);
 	wire trans_fore = (lb_fore[5:0] == 6'd63);
 	wire trans_text = (lb_text[4:0] == 5'd31);
 	wire spr_valid  = lb_spr[14];
 	wire [1:0] spr_pri = lb_spr[13:12];
+
+	// Pixel-N-aligned copies, captured with the matching rgb_* below.
+	reg t_back, t_midl, t_fore, t_text, v_spr;
+	reg [1:0] p_spr;
 
 	// ------------------------------------------------------------------
 	// Palette fetch sequencer
@@ -94,11 +105,13 @@ module spi_mixer
 	// cycles a pixel lasts, using one read port.
 	// ------------------------------------------------------------------
 	reg [2:0] step;
-	reg [14:0] rgb0, rgb_back, rgb_midl, rgb_fore, rgb_text, rgb_spr;
+	reg [14:0] rgb_back, rgb_midl, rgb_fore, rgb_text, rgb_spr;
 
 	reg [12:0] pen_sel;
 	always @* begin
 		case (step)
+			// Step 0's read is unused: the disabled-back background is hard
+			// black, not pen 0. The slot stays for pipeline alignment.
 			3'd0: pen_sel = 13'd0;
 			3'd1: pen_sel = pen_back;
 			3'd2: pen_sel = pen_midl;
@@ -154,11 +167,19 @@ module spi_mixer
 		          {c[14:10], c[14:12]}}; // B
 	endfunction
 
-	// 50/50 mix, matching alpha_blend_r32(dest, pen, 0x7f). Each channel is
-	// summed in 9 bits before the shift so the carry is not lost.
+	// MAME uses alpha_blend_r32(dest, pen, 0x7f) =
+	//     (src*127 + dst*129) >> 8
+	// which is not a true 50/50: the destination gets 129/256. This is a plain
+	// average instead, which differs by at most one unit per channel and only
+	// on blended pixels. That is invisible, and both exact forms cost far too
+	// much: the literal 128*(d+s)+(d-s)>>8 blew clk_sys setup by 6 ns, and the
+	// average-plus-correction form by 21 ns, because several blends sit in
+	// series in one combinational chain. sim/tb_video therefore scores frames
+	// with a +-1 per channel tolerance; only exact-form work would need the
+	// mixer pipelined across its eight cycles per pixel.
 	/* verilator lint_off UNUSEDSIGNAL */
 	function automatic [7:0] mix8(input [7:0] a, input [7:0] b);
-		reg [8:0] sum;      // sum[0] is discarded by the >>1
+		reg [8:0] sum;
 		begin
 			sum  = {1'b0, a} + {1'b0, b};
 			mix8 = sum[8:1];
@@ -197,12 +218,12 @@ module spi_mixer
 
 			// Issued at step N, the entry lands at step N+2.
 			case (step)
-				3'd2: begin rgb0     <= pal_pen; end
-				3'd3: begin rgb_back <= pal_pen; a_back <= alpha_of(pen_back); end
-				3'd4: begin rgb_midl <= pal_pen; a_midl <= alpha_of(pen_midl); end
-				3'd5: begin rgb_fore <= pal_pen; a_fore <= alpha_of(pen_fore); end
-				3'd6: begin rgb_text <= pal_pen; a_text <= alpha_of(pen_text); end
-				3'd7: begin rgb_spr  <= pal_pen; a_spr  <= alpha_of(pen_spr);  end
+				3'd3: begin rgb_back <= pal_pen; a_back <= alpha_of(pen_back); t_back <= trans_back; end
+				3'd4: begin rgb_midl <= pal_pen; a_midl <= alpha_of(pen_midl); t_midl <= trans_midl; end
+				3'd5: begin rgb_fore <= pal_pen; a_fore <= alpha_of(pen_fore); t_fore <= trans_fore; end
+				3'd6: begin rgb_text <= pal_pen; a_text <= alpha_of(pen_text); t_text <= trans_text; end
+				3'd7: begin rgb_spr  <= pal_pen; a_spr  <= alpha_of(pen_spr);
+				            v_spr <= spr_valid; p_spr <= spr_pri; end
 				default: ;
 			endcase
 
@@ -214,28 +235,33 @@ module spi_mixer
 	// ------------------------------------------------------------------
 	// The composite chain itself, evaluated once per pixel
 	// ------------------------------------------------------------------
-	wire [23:0] c0    = expand(rgb0);
 	wire [23:0] cback = expand(rgb_back);
 	wire [23:0] cmidl = expand(rgb_midl);
 	wire [23:0] cfore = expand(rgb_fore);
 	wire [23:0] ctext = expand(rgb_text);
 	wire [23:0] cspr  = expand(rgb_spr);
 
-	wire draw_spr0 = en_spr && spr_valid && (spr_pri == 2'd0);
-	wire draw_spr1 = en_spr && spr_valid && (spr_pri == 2'd1);
-	wire draw_spr2 = en_spr && spr_valid && (spr_pri == 2'd2);
-	wire draw_spr3 = en_spr && spr_valid && (spr_pri == 2'd3);
+	wire draw_spr0 = en_spr && v_spr && (p_spr == 2'd0);
+	wire draw_spr1 = en_spr && v_spr && (p_spr == 2'd1);
+	wire draw_spr2 = en_spr && v_spr && (p_spr == 2'd2);
+	wire draw_spr3 = en_spr && v_spr && (p_spr == 2'd3);
 
-	wire [23:0] m0 = en_back ? cback : c0;                              // opaque
+	// With the back layer disabled MAME does `bitmap.fill(0, cliprect)`
+	// (seibuspi_v.cpp:452), which writes the raw RGB value 0 into a
+	// bitmap_rgb32 -- hard black. It is NOT a draw of palette pen 0, and the
+	// two are only the same when pen 0 happens to be black. In the SXX2E test
+	// menu pen 0 is 0x7FFF, so reading the palette here painted the whole
+	// screen white and left the (correctly rendered) text sitting on white.
+	wire [23:0] m0 = en_back ? cback : 24'h000000;                      // opaque
 	wire [23:0] m1 = draw_spr0                  ? blend(m0, cspr,  a_spr)  : m0;
-	wire [23:0] m2 = (back_redraw && !trans_back) ? blend(m1, cback, a_back) : m1;
+	wire [23:0] m2 = (back_redraw && !t_back) ? blend(m1, cback, a_back) : m1;
 	wire [23:0] m3 = (en_fore && draw_spr1)     ? blend(m2, cspr,  a_spr)  : m2;
-	wire [23:0] m4 = (en_midl && !trans_midl)   ? blend(m3, cmidl, a_midl) : m3;
+	wire [23:0] m4 = (en_midl && !t_midl)   ? blend(m3, cmidl, a_midl) : m3;
 	wire [23:0] m5 = (!en_fore && draw_spr1)    ? blend(m4, cspr,  a_spr)  : m4;
 	wire [23:0] m6 = draw_spr2                  ? blend(m5, cspr,  a_spr)  : m5;
-	wire [23:0] m7 = (en_fore && !trans_fore)   ? blend(m6, cfore, a_fore) : m6;
+	wire [23:0] m7 = (en_fore && !t_fore)   ? blend(m6, cfore, a_fore) : m6;
 	wire [23:0] m8 = draw_spr3                  ? blend(m7, cspr,  a_spr)  : m7;
-	wire [23:0] m9 = (en_text && !trans_text)   ? blend(m8, ctext, a_text) : m8;
+	wire [23:0] m9 = (en_text && !t_text)   ? blend(m8, ctext, a_text) : m8;
 
 	// rgb_spr is latched on the same edge as ce_pix, so the composite is only
 	// stable afterwards. Take it at step 1 of the following pixel and hold it;

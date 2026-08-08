@@ -41,7 +41,14 @@ module rom_loader
 	output reg        sdr_rnw,
 	input             sdr_ack,
 
-	output reg        rom_ready
+	output reg        rom_ready,
+
+	// Telemetry. The ioctl download is the one path that cannot be simulated,
+	// so count what actually arrived: bytes_in should end at 23,396,352 for
+	// rdfts, and part_end at the last part index. Anything less means the HPS
+	// flow control dropped data and every part after the gap is misplaced.
+	output reg [24:0] bytes_in,
+	output reg  [3:0] part_end
 );
 
 `include "spi_defs.vh"
@@ -148,8 +155,10 @@ module rom_loader
 			if (download) begin
 				seen_download <= 1'b1;
 				rom_ready     <= 1'b0;
+				part_end      <= part;
 
 				if (ioctl_wr && !busy) begin
+					bytes_in   <= bytes_in + 25'd1;
 					sdr_addr   <= {dest[24:1], 1'b0};
 					sdr_din    <= {ioctl_dout, ioctl_dout};
 					sdr_be     <= dest[0] ? 2'b10 : 2'b01;

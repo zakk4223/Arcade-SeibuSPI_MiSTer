@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <set>
 #include <map>
 #include <array>
 #include "spi_ref.h"
@@ -135,35 +136,60 @@ int main(int argc, char **argv)
            (int)dut->scroll_bx, (int)dut->scroll_by, (int)dut->scroll_mx,
            (int)dut->scroll_my, (int)dut->scroll_fx, (int)dut->scroll_fy);
 
-    // ---- SDRAM model: fixed latency, 64-bit aligned reads ------------------
-    int      sdr_delay = -1;
-    uint8_t  sdr_req_d = 0;
-    uint64_t sdr_data  = 0;
+    // ---- SDRAM model -------------------------------------------------------
+    // The graphics and sprite engines share ONE SDRAM bus in the real core:
+    // sdram.sv serves a single transaction at a time from STATE_IDLE, with ch2
+    // (gfx) ahead of ch4 (sprites). Modelling them as independent servers -- as
+    // this testbench used to -- gives the video path unlimited bandwidth and
+    // hides every contention failure. The attract scene with the yellow plane
+    // renders perfectly here and badly on hardware for exactly that reason.
+    //
+    // A transaction occupies the bus for about 12 clk_ram cycles (ACTIVE, CAS,
+    // a 4-beat burst and turnaround). clk_ram is twice clk_sys, which is the
+    // clock this testbench runs at, so that is ~6 cycles here. SLOP_BUS_FREE=1
+    // restores the old unlimited behaviour for comparison.
+    const bool bus_free = getenv("SLOP_BUS_FREE") != nullptr;
+    const int  BUS_OCC  = 6;
 
-    long long sdr_count = 0;
-    int      spr_delay = -1;
-    uint8_t  spr_req_d  = 0;
-    uint64_t spr_data64 = 0;
+    uint64_t sdr_data  = 0, spr_data64 = 0;
+    uint8_t  sdr_req_d = 0, spr_req_d = 0;
+    bool     sdr_pend  = false, spr_pend = false;
+    int      bus_busy  = 0;
+    int      bus_owner = 0;          // 1 = gfx, 2 = sprite
+    long long sdr_count = 0, spr_stall = 0, gfx_stall = 0;
+
+    auto fetch64 = [&](uint32_t addr) -> uint64_t {
+        uint64_t a = addr & ~7u, v = 0;
+        for (int i = 0; i < 8; i++)
+            if (a + i < sdram.size()) v |= (uint64_t)sdram[a + i] << (8 * i);
+        return v;
+    };
 
     auto tick = [&]() {
-        if (dut->spr_sdr_req != spr_req_d) { spr_req_d = dut->spr_sdr_req; spr_delay = 4; }
-        if (spr_delay > 0 && --spr_delay == 0) {
-            uint64_t a = (uint64_t)dut->spr_sdr_addr & ~7ull;
-            spr_data64 = 0;
-            for (int i = 0; i < 8; i++)
-                if (a + i < sdram.size()) spr_data64 |= (uint64_t)sdram[a + i] << (8 * i);
-            dut->spr_sdr_ack = spr_req_d;
+        // latch new requests
+        if (dut->sdr_req     != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_pend = true; sdr_count++; }
+        if (dut->spr_sdr_req != spr_req_d) { spr_req_d = dut->spr_sdr_req; spr_pend = true; }
+
+        if (bus_free) {
+            if (sdr_pend) { sdr_data   = fetch64(dut->sdr_addr);     dut->sdr_ack     = sdr_req_d; sdr_pend = false; }
+            if (spr_pend) { spr_data64 = fetch64(dut->spr_sdr_addr); dut->spr_sdr_ack = spr_req_d; spr_pend = false; }
         }
+        else {
+            if (bus_busy > 0) {
+                if (--bus_busy == 0) {
+                    if (bus_owner == 1) { sdr_data   = fetch64(dut->sdr_addr);     dut->sdr_ack     = sdr_req_d; sdr_pend = false; }
+                    else                { spr_data64 = fetch64(dut->spr_sdr_addr); dut->spr_sdr_ack = spr_req_d; spr_pend = false; }
+                    bus_owner = 0;
+                }
+            }
+            else if (sdr_pend) { bus_owner = 1; bus_busy = BUS_OCC; }
+            else if (spr_pend) { bus_owner = 2; bus_busy = BUS_OCC; }
+            if (sdr_pend && bus_owner != 1) gfx_stall++;
+            if (spr_pend && bus_owner != 2) spr_stall++;
+        }
+
+        dut->sdr_dout     = sdr_data;
         dut->spr_sdr_dout = spr_data64;
-        if (dut->sdr_req != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_delay = 4; sdr_count++; }
-        if (sdr_delay > 0 && --sdr_delay == 0) {
-            uint64_t a = (uint64_t)dut->sdr_addr & ~7ull;
-            sdr_data = 0;
-            for (int i = 0; i < 8; i++)
-                if (a + i < sdram.size()) sdr_data |= (uint64_t)sdram[a + i] << (8 * i);
-            dut->sdr_ack = sdr_req_d;
-        }
-        dut->sdr_dout = sdr_data;
         dut->clk = 0; dut->eval();
         dut->clk = 1; dut->eval();
     };
@@ -292,7 +318,10 @@ int main(int argc, char **argv)
     long long guard = 0;
     int prev_v = -1;
 
-    const int PROBE_Y = 112;
+    // Overridable, because a conclusion drawn from one scanline is worth very
+    // little here: a layer that happens to be uniform on the probed row ties at
+    // every offset and will happily fake a one-pixel shift.
+    const int PROBE_Y = getenv("SLOP_PROBE_Y") ? atoi(getenv("SLOP_PROBE_Y")) : 112;
     std::vector<uint16_t> lb_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_text_seen(512, 0xFFFF);
     std::vector<uint16_t> lb_fore_seen(512, 0xFFFF);
@@ -304,7 +333,7 @@ int main(int argc, char **argv)
     int emit_lo[4] = {9999,9999,9999,9999}, emit_hi[4] = {-9999,-9999,-9999,-9999};
     long emit_cnt[4] = {};
     std::vector<std::array<int,4>> fore_emits;
-    std::vector<std::array<int,5>> spr_emits;
+    std::vector<std::array<int,8>> spr_emits;   // code,x,pix,sx,sy,tile,ry,px
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
     long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
@@ -316,10 +345,12 @@ int main(int argc, char **argv)
         // Record the back-layer line buffer across one scanline of frame 2.
         if (frame == 2 && dut->vcnt == PROBE_Y - 1) {
             if (dut->dbg_spr_we) spr_writes++;
-            if (dut->dbg_spr_state == 9 && spr_emits.size() < 24) {   // S_EMIT
+            if (dut->dbg_spr_state == 9 && spr_emits.size() < 2000) {   // S_EMIT
                 int ex = (int)dut->dbg_spr_emitx; if (ex > 1023) ex -= 2048;
                 spr_emits.push_back({(int)dut->dbg_spr_code, ex, (int)dut->dbg_spr_pix,
-                                     (int)dut->dbg_spr_sx, (int)dut->dbg_spr_sy});
+                                     (int)dut->dbg_spr_sx, (int)dut->dbg_spr_sy,
+                                     (int)dut->dbg_spr_tile, (int)dut->dbg_spr_ry,
+                                     (int)dut->dbg_spr_px});
             }
             spr_state_hist[dut->dbg_spr_state]++;
             if (dut->dbg_spr_index < spr_min_index) spr_min_index = dut->dbg_spr_index;
@@ -459,6 +490,32 @@ int main(int argc, char **argv)
                     }
                     printf("\n");
                 }
+
+                // Offset profile for EVERY layer against its own reference, plus
+                // a count of how much content the line actually has. A layer that
+                // is uniform across the line ties at every offset, so its
+                // "best offset" means nothing -- that is exactly how the fore
+                // layer once faked a one-pixel bug. Only compare best offsets
+                // between layers that are non-uniform here.
+                for (int c = 0; c < 3; c++) {
+                    if (!caps[c]) continue;
+                    std::set<uint16_t> distinct;
+                    for (int x = 0; x < 300; x++) distinct.insert((*refs[c])[x]);
+                    printf("  %s profile (ref has %zu distinct values):", rn[c], distinct.size());
+                    int bo = 0; size_t bm = 0;
+                    for (int off = -3; off <= 3; off++) {
+                        size_t m = 0;
+                        for (int x = 0; x < 300; x++) {
+                            int sx = x + off;
+                            if (sx < 0 || sx >= 512) continue;
+                            if (caps[c][sx] == (*refs[c])[x]) m++;
+                        }
+                        printf(" %d:%zu", off, m);
+                        if (m > bm) { bm = m; bo = off; }
+                    }
+                    printf("   best %d (%zu/300)%s\n", bo, bm,
+                           distinct.size() < 2 ? "  [UNIFORM - offset meaningless]" : "");
+                }
             }
 
             {   // what rowscroll does the reference see?
@@ -487,8 +544,61 @@ int main(int argc, char **argv)
                 printf(" emit_x %d..%d over %ld cycles", emit_lo[L], emit_hi[L], emit_cnt[L]);
                 printf("\n");
             }
-            printf("  sprite emits (code, emit_x, pix, sx, sy):\n   ");
-            for (size_t i = 0; i < spr_emits.size(); i++) {
+            
+    // ---- sprite pixel reference ------------------------------------------
+    // Decode the same tile row straight out of the sprite ROM using MAME's own
+    // decryptor, and compare against what the RTL emitted. This is the only
+    // check that covers the sprite graphics path end to end: tb_spr_decrypt
+    // proves the decrypt unit alone, and the frame diff cannot say whether a
+    // wrong pixel came from the fetch, the decrypt or the plane assembly.
+    //
+    // MAME's spi_spritelayout: 16x16, 6bpp, RGN_FRAC(1,3) so each 4 MB chunk
+    // carries two planes; planeoffset {0,8, F+0,F+8, 2F+0,2F+8} MSB first,
+    // xoffset STEP8(7,-1) then STEP8(8*2+7,-1), yoffset STEP16(0,8*4),
+    // 16*32 bits per tile per chunk.
+    static std::vector<uint8_t> sprrom;
+    if (sprrom.empty()) {
+        const size_t SPR_BASE = 0x0A80000;   // see rtl/spi_defs.vh
+        sprrom.assign(sdram.begin() + SPR_BASE,
+                      sdram.begin() + SPR_BASE + 3 * 0x400000);
+        // MAME decrypts each 4 MB chunk independently.
+        seibuspi_sprite_decrypt(sprrom.data(), 0x400000);
+    }
+    auto ref_spr_pix = [&](uint32_t tile, int row, int px) -> int {
+        auto rb = [&](int chunk, uint32_t bit) -> int {
+            uint32_t byteidx = (uint32_t)chunk * 0x400000 + (bit >> 3);
+            return (sprrom[byteidx] >> (7 - (bit & 7))) & 1;
+        };
+        uint32_t base = tile * 512u + (uint32_t)row * 32u;
+        uint32_t xoff = (px < 8) ? (uint32_t)(7 - px) : (uint32_t)(23 - (px - 8));
+        int pen = 0;
+        pen |= rb(0, base + xoff + 0) << 5;
+        pen |= rb(0, base + xoff + 8) << 4;
+        pen |= rb(1, base + xoff + 0) << 3;
+        pen |= rb(1, base + xoff + 8) << 2;
+        pen |= rb(2, base + xoff + 0) << 1;
+        pen |= rb(2, base + xoff + 8) << 0;
+        return pen;
+    };
+    {
+        size_t good = 0, bad = 0;
+        for (size_t k = 0; k < spr_emits.size(); k++) {
+            const auto &e = spr_emits[k];
+            int want = ref_spr_pix((uint32_t)e[5], e[6], e[7]);
+            if (want == e[2]) good++;
+            else {
+                if (bad < 8)
+                    printf("  SPR PIX MISMATCH tile=%04X row=%2d px=%2d  rtl=%02X ref=%02X\n",
+                           e[5], e[6], e[7], e[2], want);
+                bad++;
+            }
+        }
+        printf("  sprite pixel check: %zu match, %zu differ (of %zu emits)\n",
+               good, bad, spr_emits.size());
+    }
+
+    printf("  sprite emits (code, emit_x, pix, sx, sy):\n   ");
+            for (size_t i = 0; i < spr_emits.size() && i < 24; i++) {
                 printf("(%04X,%d,%02X,%d,%d) ", spr_emits[i][0], spr_emits[i][1],
                        spr_emits[i][2], spr_emits[i][3], spr_emits[i][4]);
                 if ((i % 4) == 3) printf("\n   ");
@@ -586,7 +696,32 @@ int main(int argc, char **argv)
         text_line(PROBE_Y, dut->rowscroll_enable ? 0xC00 : 0x600, want_text);
         size_t tm_match = 0;
         for (int x = 0; x < 300; x++) if (lb_text_seen[x] == want_text[x]) tm_match++;
-        printf("text layer line %d at offset 0: %zu/300 match\n", PROBE_Y, tm_match);
+        // CAUTION: the per-layer reference models below (text_line, back_line,
+        // fore_line) are skewed one pixel relative to MAME's real output. Making
+        // the RTL match them exactly makes the FRAME comparison worse -- text
+        // goes 300/300 here but the frame goes 6.3% -> 14.5%. The frame diff
+        // against MAME's captured bitmap is the ground truth; treat these layer
+        // scores as a rough guide to which layer is involved, never as proof of
+        // alignment.
+        printf("text layer line %d at offset 0: %zu/300 match"
+               " (reference is +1 skewed, see note)\n", PROBE_Y, tm_match);
+        {   // Which pixel within each 8-wide character cell goes wrong? A spike
+            // at one position means the emit indexing is off, not the decode.
+            int bym[8] = {0};
+            int shown = 0;
+            for (int x = 0; x < 300; x++) {
+                if (lb_text_seen[x] == want_text[x]) continue;
+                bym[x & 7]++;
+                if (shown < 6) {
+                    printf("    text x=%3d (x%%8=%d) rtl=%03X want=%03X\n",
+                           x, x & 7, lb_text_seen[x], want_text[x]);
+                    shown++;
+                }
+            }
+            printf("    text mismatches by x%%8:");
+            for (int i = 0; i < 8; i++) printf(" %d:%d", i, bym[i]);
+            printf("\n");
+        }
         printf("  rtl text : ");
         for (int x = 0; x < 10; x++) printf("%03X ", lb_text_seen[x]);
         printf("\n  want text: ");
@@ -687,10 +822,18 @@ int main(int argc, char **argv)
 
     {   // Are the mismatches simply the sprites we do not draw yet? Sprite pens
         // are 0..4095; every tile layer pen is 4096 or above.
+        // Counted over REAL mismatches only. Including the +-1 blend pixels
+        // dilutes this to the point of meaninglessness -- they are four fifths
+        // of the raw set and have nothing to do with sprites.
         size_t spr_like = 0, other = 0;
         for (int y = 0; y < H; y++) for (int x = 2; x < W; x++) {
             size_t i = (size_t)y*W+x;
             if (got[i] == want[i]) continue;
+            int dr = int((got[i] >> 16) & 0xFF) - int((want[i] >> 16) & 0xFF);
+            int dg = int((got[i] >>  8) & 0xFF) - int((want[i] >>  8) & 0xFF);
+            int db = int( got[i]        & 0xFF) - int( want[i]        & 0xFF);
+            if (dr >= -1 && dr <= 1 && dg >= -1 && dg <= 1 && db >= -1 && db <= 1)
+                continue;
             bool found = false;
             for (int pen = 0; pen < 4096 && !found; pen++) {
                 size_t e = (size_t)(pen >> 1) * 4;
@@ -702,7 +845,7 @@ int main(int argc, char **argv)
             }
             if (found) spr_like++; else other++;
         }
-        printf("mismatches (x>=2): %zu match a sprite pen, %zu do not\n", spr_like, other);
+        printf("REAL mismatches (x>=2): %zu match a sprite pen, %zu do not\n", spr_like, other);
     }
 
     {   // where are the errors?
@@ -723,7 +866,26 @@ int main(int argc, char **argv)
     write_png((outdir + "/got.png").c_str(),  got,  W, H);
     write_png((outdir + "/want.png").c_str(), want, W, H);
 
-    printf("pixels differing: %zu / %d  (%.2f%%)\n", bad, W * H, 100.0 * bad / (W * H));
+    {   // The mixer averages where MAME does a 127/129 alpha blend, so blended
+        // pixels can sit one unit out per channel. Score that separately: an
+        // exact count buries real faults under tens of thousands of +-1s.
+        size_t near = 0;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+            size_t i = (size_t)y*W+x;
+            if (got[i] == want[i]) continue;
+            int dr = int((got[i] >> 16) & 0xFF) - int((want[i] >> 16) & 0xFF);
+            int dg = int((got[i] >>  8) & 0xFF) - int((want[i] >>  8) & 0xFF);
+            int db = int( got[i]        & 0xFF) - int( want[i]        & 0xFF);
+            if (dr >= -1 && dr <= 1 && dg >= -1 && dg <= 1 && db >= -1 && db <= 1)
+                near++;
+        }
+        printf("raw pixels differing: %zu / %d  (%.2f%%)"
+               " -- NOT the score to quote\n", bad, W * H, 100.0 * bad / (W * H));
+        printf("of those, %zu are within +-1 per channel: the mixer's deliberate"
+               " 50/50 average where MAME blends 127/129 (rtl/spi_mixer.sv:157)\n", near);
+        printf("REAL mismatches: %zu / %d  (%.2f%%)\n",
+               bad - near, W * H, 100.0 * (bad - near) / (W * H));
+    }
     if (bad) {
         size_t i = (size_t)first_y * W + first_x;
         printf("first at (%d,%d): got %06X want %06X\n", first_x, first_y, got[i], want[i]);

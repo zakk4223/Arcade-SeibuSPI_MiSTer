@@ -47,6 +47,13 @@
 // ---------------------------------------------------------------------------
 
 module sdram
+#(
+    // ch5 (YMF271 PCM) is unused until the sound core lands. Synthesising it
+    // costs a level in the STATE_IDLE priority mux that feeds SDRAM_A and 64
+    // more registers fanning off dq_reg, which is exactly where clk_ram was
+    // failing setup. Set to 1 when T5 needs it.
+    parameter USE_CH5 = 0
+)
 (
     input             init,        // reset to initialize RAM
     input             clk,         // clock 114.545455 MHz (clk_ram)
@@ -146,6 +153,12 @@ always @(posedge clk) begin
     reg        saved_wr;
     reg [12:0] cas_addr;
     reg [15:0] saved_data;
+    // ONE capture register, shared by every channel -- do not duplicate it.
+    // It sits directly on the DQ input path and belongs in the I/O cell. Splitting
+    // it per channel (to chase a reported -0.054 ns fabric slack) let the fitter
+    // drag copies out towards their consumers, which destroyed the input timing:
+    // the first 16-bit word of every burst read came back as unstable garbage.
+    // Reference cores run this same register single at 120 MHz.
     reg [15:0] dq_reg;
     reg  [3:0] state = STATE_STARTUP;
 
@@ -183,7 +196,7 @@ always @(posedge clk) begin
     if (ch2_req != ch2_req_1) ch2_rq <= 1;
     if (ch3_req != ch3_req_1) ch3_rq <= 1;
     if (ch4_req != ch4_req_1) ch4_rq <= 1;
-    if (ch5_req != ch5_req_1) ch5_rq <= 1;
+    if (USE_CH5 && (ch5_req != ch5_req_1)) ch5_rq <= 1;
 
     refresh_count <= refresh_count+1'b1;
 

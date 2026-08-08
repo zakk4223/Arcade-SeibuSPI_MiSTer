@@ -57,8 +57,35 @@ module spi_cpu
 	// memory cycle, which is what the real board's DMA does too.
 	input             dma_req,
 	output            dma_gnt,
+
+	// How many dwords the CPU has written into the sprite-list buffer and into
+	// the tilemap buffer. The sprite DMA reads 0x37000 and finds zeros while the
+	// tilemap DMA reads 0x38000 and finds valid data, so the question is whether
+	// the 386 ever wrote the sprite region at all. The tilemap count is the
+	// control: it must move.
+	output reg [15:0] dbg_wr_spr,
+	output reg [15:0] dbg_wr_tm,
 	input      [15:0] dma_addr,
 	output     [31:0] dma_dout,
+
+	// Why the CPU is or is not making progress, for the on-screen panel:
+	//   [0] a program-ROM read is outstanding (req toggled, ack not back yet)
+	//   [1] the bus state machine is not idle
+	//   [2] the CPU is asserting valid and we are not accepting it
+	//   [3] an interrupt acknowledge cycle is in progress
+	output      [3:0] dbg_why,
+	output     [31:0] dbg_eip,
+	output     [15:0] dbg_cs,
+	output            dbg_irq,
+	// Mirror of what the CPU writes to main RAM at 0x800, where the boot code
+	// builds the GDT it then LGDTs. If protected-mode entry fails, the first
+	// question is whether the GDT actually landed in RAM intact.
+	output reg [31:0] dbg_gdt0,
+	output reg [31:0] dbg_gdt1,
+	output reg [31:0] dbg_gdt2,
+	output reg [31:0] dbg_gdt3,
+	output reg [31:0] dbg_gdt4,
+	output reg [31:0] dbg_gdt5,
 
 	// Vertical blanking interrupt. Crosses from clk_sys as a toggle: a one-cycle
 	// clk_sys pulse would be invisible to a clock running at half the rate.
@@ -120,8 +147,8 @@ module spi_cpu
 		.a20_enable         (1'b1),
 		.single_step        (1'b0),
 
-		.dbg_CS             (),
-		.dbg_EIP            (),
+		.dbg_CS             (dbg_cs),
+		.dbg_EIP            (dbg_eip),
 		.dbg_CS_base        (),
 		.dbg_pe             (),
 		.dbg_vm             (),
@@ -191,6 +218,12 @@ module spi_cpu
 	// Bits 1:0 are constant zero by construction; kept so the region tests below
 	// read as the byte addresses quoted in the memory map.
 	/* verilator lint_off UNUSEDSIGNAL */
+	assign dbg_irq = irq_pending;
+	assign dbg_why = {cpu_inta,
+	                  cpu_valid && !cpu_ready,
+	                  state != S_IDLE,
+	                  sdr_req ^ sdr_ack};
+
 	wire [31:0] byte_addr = {cpu_addr, 2'b00};
 	/* verilator lint_on UNUSEDSIGNAL */
 
@@ -215,6 +248,19 @@ module spi_cpu
 	assign dma_gnt = dma_own;
 
 	wire [15:0] ram_addr_mux = dma_own ? dma_addr : ram_addr;
+
+	// dword 0xDC00..0xDFFF is byte 0x37000..0x37FFF (the sprite list),
+	// dword 0xE000..0xE3FF is byte 0x38000..0x38FFF (the tilemap source).
+	always @(posedge clk) begin
+		if (reset) begin
+			dbg_wr_spr <= 16'd0;
+			dbg_wr_tm  <= 16'd0;
+		end
+		else if (ram_we && !dma_own) begin
+			if (ram_addr[15:10] == 6'h37) dbg_wr_spr <= dbg_wr_spr + 16'd1;
+			if (ram_addr[15:10] == 6'h38) dbg_wr_tm  <= dbg_wr_tm  + 16'd1;
+		end
+	end
 
 	spi_mainram mainram
 	(
@@ -267,7 +313,22 @@ module spi_cpu
 	// drives valid, and holds valid until it sees ready. `valid` is also
 	// asserted during INTA cycles, which the INTA state machine answers
 	// instead, so they are excluded here.
-	wire mem_accept = cpu_valid && !cpu_inta && cpu_en && !dma_own && (state == S_IDLE);
+	// !dma_req, not just !dma_own: the CPU must stop the moment a DMA is asked
+	// for, not merely once the port has been handed over.
+	//
+	// MAME performs each video DMA atomically inside the trigger write, so no
+	// instruction can run between the trigger and the copy. Here the transfer
+	// waits for a quiescent state, which leaves a window in which the CPU can
+	// keep writing the very buffer being copied -- the source is read over
+	// thousands of cycles, so a write landing mid-transfer yields a list that is
+	// half this frame and half the next. The real board steals the bus from the
+	// 386 for these transfers, so halting it is also closer to the hardware.
+	//
+	// This is a correctness fix for tearing, NOT the cause of the empty sprite
+	// list: MAME's capture shows the game does not clear the buffer after
+	// triggering (main RAM at 0x37000 still holds the list at end of frame).
+	wire mem_accept = cpu_valid && !cpu_inta && cpu_en && !dma_own && !dma_req
+	                  && (state == S_IDLE);
 	assign cpu_ready = cpu_inta ? inta_ready : mem_accept;
 
 	// Guard against a zero burstcount, which would underflow the counter.
@@ -278,6 +339,66 @@ module spi_cpu
 	// SDRAM 64-bit reads must be 8-byte aligned, so this is the address of the
 	// aligned group containing cur_dw, i.e. (cur_dw & ~1) * 4.
 	wire [24:0] rom_grp_addr = SDR_PRG_BASE + {4'd0, cur_dw[18:1], 3'b000};
+
+	// Snoop the GDT the boot code builds at byte 0x800 (dword index 0x200).
+	//
+	// The copy loop is 24 16-bit STOS writes over 48 bytes; the 8 dwords watched
+	// here (0x800..0x81F) take exactly 16 of them. The snoop honours the byte
+	// enables rather than latching ram_din whole, and stops dead after those 16
+	// writes -- if the CPU later runs away and scribbles over low memory, which
+	// is the failure being investigated, anything looser shows the wreckage
+	// instead of the GDT.
+	reg [5:0] gdt_writes;
+	wire      gdt_hit = ram_we && (ram_addr[15:3] == 13'h040) && (gdt_writes < 6'd16);
+
+	always @(posedge clk) begin
+		if (reset) begin
+			gdt_writes <= 6'd0;
+			dbg_gdt0 <= 32'd0; dbg_gdt1 <= 32'd0; dbg_gdt2 <= 32'd0;
+			dbg_gdt3 <= 32'd0; dbg_gdt4 <= 32'd0; dbg_gdt5 <= 32'd0;
+		end
+		else if (gdt_hit) begin
+			gdt_writes <= gdt_writes + 6'd1;
+			case (ram_addr[2:0])
+			3'd0: begin
+				if (ram_be[0]) dbg_gdt0[ 7: 0] <= ram_din[ 7: 0];
+				if (ram_be[1]) dbg_gdt0[15: 8] <= ram_din[15: 8];
+				if (ram_be[2]) dbg_gdt0[23:16] <= ram_din[23:16];
+				if (ram_be[3]) dbg_gdt0[31:24] <= ram_din[31:24];
+			end
+			3'd1: begin
+				if (ram_be[0]) dbg_gdt1[ 7: 0] <= ram_din[ 7: 0];
+				if (ram_be[1]) dbg_gdt1[15: 8] <= ram_din[15: 8];
+				if (ram_be[2]) dbg_gdt1[23:16] <= ram_din[23:16];
+				if (ram_be[3]) dbg_gdt1[31:24] <= ram_din[31:24];
+			end
+			3'd2: begin
+				if (ram_be[0]) dbg_gdt2[ 7: 0] <= ram_din[ 7: 0];
+				if (ram_be[1]) dbg_gdt2[15: 8] <= ram_din[15: 8];
+				if (ram_be[2]) dbg_gdt2[23:16] <= ram_din[23:16];
+				if (ram_be[3]) dbg_gdt2[31:24] <= ram_din[31:24];
+			end
+			3'd3: begin
+				if (ram_be[0]) dbg_gdt3[ 7: 0] <= ram_din[ 7: 0];
+				if (ram_be[1]) dbg_gdt3[15: 8] <= ram_din[15: 8];
+				if (ram_be[2]) dbg_gdt3[23:16] <= ram_din[23:16];
+				if (ram_be[3]) dbg_gdt3[31:24] <= ram_din[31:24];
+			end
+			3'd4: begin
+				if (ram_be[0]) dbg_gdt4[ 7: 0] <= ram_din[ 7: 0];
+				if (ram_be[1]) dbg_gdt4[15: 8] <= ram_din[15: 8];
+				if (ram_be[2]) dbg_gdt4[23:16] <= ram_din[23:16];
+				if (ram_be[3]) dbg_gdt4[31:24] <= ram_din[31:24];
+			end
+			default: begin
+				if (ram_be[0]) dbg_gdt5[ 7: 0] <= ram_din[ 7: 0];
+				if (ram_be[1]) dbg_gdt5[15: 8] <= ram_din[15: 8];
+				if (ram_be[2]) dbg_gdt5[23:16] <= ram_din[23:16];
+				if (ram_be[3]) dbg_gdt5[31:24] <= ram_din[31:24];
+			end
+			endcase
+		end
+	end
 
 	always @(posedge clk) begin
 		mem_resp_valid <= 1'b0;

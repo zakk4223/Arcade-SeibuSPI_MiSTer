@@ -1,0 +1,37 @@
+#!/bin/bash
+# Send a command to the running tools/jtag_server.tcl and print what it says.
+#
+#   tools/slop freeze
+#   tools/slop vitals
+#   tools/slop dump 0x200000 8
+#
+# The server holds the JTAG chain open, so this costs milliseconds instead of
+# the ~5 s a fresh quartus_stp needs. It is also the only way to touch the JTAG
+# while the server is up -- two processes cannot claim the chain at once.
+
+CMD=/tmp/slop_cmd
+OUT=/tmp/slop_out.txt
+
+if [ ! -f "$OUT" ]; then
+    echo "jtag_server is not running." >&2
+    echo "Start it in another terminal with:" >&2
+    echo "    quartus_stp -t tools/jtag_server.tcl" >&2
+    exit 1
+fi
+
+# Remember where the log ended so we only print this command's output.
+before=$(wc -l < "$OUT")
+
+printf '%s\n' "$*" > "$CMD"
+
+# Wait for the server to finish the batch.
+for _ in $(seq 1 400); do
+    if tail -n +$((before + 1)) "$OUT" 2>/dev/null | grep -q '<<<DONE>>>'; then
+        tail -n +$((before + 1)) "$OUT" | grep -v '<<<DONE>>>'
+        exit 0
+    fi
+    sleep 0.05
+done
+
+echo "timed out waiting for jtag_server (is it still running?)" >&2
+exit 1

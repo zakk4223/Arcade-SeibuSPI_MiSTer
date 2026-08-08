@@ -15,3 +15,14 @@ hc_output/
 *.pin
 *.done
 sim/obj_dir/
+
+# Debugging debris, not sources.
+# compile*.log: ~14 MB of Quartus transcripts from the hardware sessions.
+# sim/*.ppm:    ~22 MB of rendered frames from tb_video / tb_boot.
+# *.114:        side-by-side copies kept during the clk_ram experiment.
+compile*.log
+sim/*.ppm
+sim/*.png
+tools/__pycache__/
+releases/
+*.114

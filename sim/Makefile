@@ -5,12 +5,31 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint run-rom_loader run-tile_decrypt run-spr_decrypt
+.PHONY: all clean lint lint-top lint-sound run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-boot run-sdram
+
+# The sound subsystem on its own, which is quicker to iterate on than the top.
+lint-sound:
+	$(VERILATOR) --lint-only -Wall -I$(RTL) lint.vlt --top-module spi_sound $(SOUND_SRCS)
 
 SLOP_BIAS ?= 1
 CAP ?= /tmp/claude-1000/-home-zakk-proj-SlopperPI/efc84222-a8fe-4ba8-9ca2-3a1f50422bb8/scratchpad/cap
 
-all: run-rom_loader run-tile_decrypt run-spr_decrypt
+all: run-rom_loader run-tile_decrypt run-spr_decrypt run-ymf271-math run-ymf271
+
+# The YMF271 step and envelope arithmetic against MAME's doubles, exhaustively.
+# No RTL involved -- it checks the algebra ymf271_pcm.sv is built on.
+# The PCM engine driven through the chip's own register interface. The Z80 is
+# VHDL and cannot be simulated here, so this stands in for the sound driver.
+run-ymf271: obj_dir/Vymf271
+	@./obj_dir/Vymf271
+
+obj_dir/Vymf271: $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/ymf271_tables.vh \
+                 $(RTL)/spi_defs.vh tb_ymf271.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module ymf271 $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv \
+	    tb_ymf271.cpp
+
+run-ymf271-math: $(RTL)/ymf271_tables.vh
+	@python3 $(TOOLS)/check_ymf271_math.py $(MAME)
 
 # Reference implementation copied verbatim out of MAME.
 spi_ref.h: $(TOOLS)/gen_ref_c.py
@@ -18,6 +37,10 @@ spi_ref.h: $(TOOLS)/gen_ref_c.py
 
 # Sprite decrypt tables parsed out of MAME.
 $(RTL)/spi_spr_tables.vh: $(TOOLS)/gen_spi_tables.py
+	python3 $< $(MAME) > $@
+
+# YMF271 fixed-point tables, likewise.
+$(RTL)/ymf271_tables.vh: $(TOOLS)/gen_ymf271_tables.py
 	python3 $< $(MAME) > $@
 
 run-rom_loader: obj_dir/Vrom_loader
@@ -73,15 +96,70 @@ Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv
              $(RTL)/z386/protection.sv $(RTL)/z386/segmentation_unit.sv \
              $(RTL)/z386/ucode_rom.sv
 
+# T80s.sv here is the Verilator stand-in; Quartus builds the VHDL core instead.
+SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv T80s.sv
+
 CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv \
              $(RTL)/spi_io.sv $(RTL)/spi_mainram.sv $(RTL)/spi_reset_sync.sv \
              $(RTL)/spi_dpram.sv $(RTL)/spi_dma.sv $(RTL)/spi_layers.sv \
              $(RTL)/spi_mixer.sv $(RTL)/spi_tile_decrypt.sv \
-             $(RTL)/seibu_partial_add.sv
+             $(RTL)/seibu_partial_add.sv $(SOUND_SRCS)
 
 lint:
 	$(VERILATOR) --lint-only -Wall -I$(RTL) -I$(RTL)/z386 lint.vlt --top-module spi_top \
 	    $(CORE_SRCS) $(Z386_SRCS)
+
+# SeibuSPI.sv was never linted, and that is where a 32-bit declaration of a
+# 64-bit SDRAM data bus went unnoticed: Quartus only warns on width mismatches,
+# and the testbenches declare their own ports correctly so simulation was blind
+# to it. WIDTHTRUNC/WIDTHEXPAND are the checks that matter here.
+# -DMISTER_FB must match the QSF's VERILOG_MACRO settings. Without it this
+# lints a DIFFERENT configuration than Quartus builds -- the framebuffer ports
+# vanish and their drivers become implicit wires -- which defeats the whole
+# point of a target that exists to check the integration file.
+lint-top:
+	$(VERILATOR) --lint-only -Wall -DMISTER_FB -I$(RTL) -I$(RTL)/z386 -I.. lint.vlt \
+	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
+	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
+	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
+	    $(RTL)/spi_sdr_arb2.sv 2>&1 | \
+	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
+
+
+# Boots the real 386 against the real SDRAM image. STEPS is clk_ram half-steps.
+STEPS ?= 40000000
+run-boot: obj_dir/Vtb_boot_top
+	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS)
+
+obj_dir/Vtb_boot_top: tb_boot_top.sv tb_boot.cpp lint.vlt $(CORE_SRCS) $(Z386_SRCS) \
+                      $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
+                      $(RTL)/spi_spr_tables.vh
+	$(VERILATOR) $(VFLAGS) -I$(RTL)/z386 --top-module tb_boot_top \
+	    tb_boot_top.sv $(CORE_SRCS) $(Z386_SRCS) \
+	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv tb_boot.cpp
+
+
+# Streams the real ROM image through rom_loader -> rtl/sdram.sv -> a behavioural
+# SDRAM chip, then reads it all back. The download path is the one thing that
+# runs on hardware before the 386 starts and that nothing else here covers.
+CONCAT ?= $(CAP)/../rom_concat.bin
+run-sdram: obj_dir/Vtb_sdram_top
+	@./obj_dir/Vtb_sdram_top $(SDRAM) $(CONCAT)
+
+obj_dir/Vtb_sdram_top: tb_sdram_top.sv tb_sdram.cpp sdram_model.sv altddio_out.sv \
+                       $(RTL)/sdram.sv $(RTL)/rom_loader.sv $(RTL)/spi_defs.vh lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module tb_sdram_top \
+	    tb_sdram_top.sv sdram_model.sv altddio_out.sv \
+	    $(RTL)/sdram.sv $(RTL)/rom_loader.sv tb_sdram.cpp
+
+
+# spi_romcheck is the instrument that reports whether the hardware download
+# worked, so it gets its own test.
+run-romcheck: obj_dir/Vspi_romcheck
+	@./obj_dir/Vspi_romcheck $(SDRAM)
+
+obj_dir/Vspi_romcheck: $(RTL)/spi_romcheck.sv $(RTL)/spi_defs.vh tb_romcheck.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_romcheck $(RTL)/spi_romcheck.sv tb_romcheck.cpp
 
 clean:
 	rm -rf obj_dir spi_ref.h

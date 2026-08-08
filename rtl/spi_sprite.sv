@@ -69,8 +69,40 @@ module spi_sprite
 	output      [8:0] dbg_index,
 	output      [5:0] dbg_pix,
 	output signed [10:0] dbg_emitx,
+
+	// Telemetry: how far the engine gets. Nothing on screen could mean the scan
+	// never runs, no sprite passes the y test, or pixels are all rejected as
+	// transparent / off-screen -- these tell them apart.
+	output reg [15:0] dbg_scanned,
+	output reg [15:0] dbg_yhit,
+	output reg [15:0] dbg_emitted,
+	// How often a line ran out of budget with sprites still unscanned, and how
+	// many tile columns were actually drawn on the last line. If the first is
+	// high the engine is simply too slow and sprites are being dropped.
+	output reg [15:0] dbg_starved,
+	output reg [15:0] dbg_tiles,
 	output     [15:0] dbg_code,
-	output      [8:0] dbg_sx, dbg_sy
+	output      [8:0] dbg_sx, dbg_sy,
+	// Exposed so the golden test can decode the same tile row straight out of
+	// the sprite ROM with MAME's decryptor and compare pixel for pixel.
+	output     [15:0] dbg_tile_code,
+	output      [3:0] dbg_ry,
+	output      [3:0] dbg_px,
+
+	// How many of the 512 list entries carry a non-zero code, sampled over one
+	// scanline and latched. The y-test is gated on `code != 0`, so an empty or
+	// un-DMAed list and a list whose sprites all fail the y compare look
+	// identical from dbg_yhit alone -- this separates them. Counted per line
+	// rather than per frame because every line walks the whole list, so the
+	// per-line figure IS the list population.
+	output reg [15:0] dbg_codes_nz,
+
+	// Bitwise OR of every dword read out of sprite RAM during one scanline.
+	// dbg_codes_nz == 0 has two very different causes: sprite RAM genuinely
+	// holds nothing, or it holds data whose code field is not where this module
+	// looks. Zero here means the RAM is empty and the fault is upstream in the
+	// DMA or the CPU; non-zero means the data arrived and the decode is wrong.
+	output reg [31:0] dbg_spr_or
 );
 
 `include "spi_defs.vh"
@@ -81,6 +113,9 @@ module spi_sprite
 	assign dbg_pix   = pix_sel;
 	assign dbg_emitx = emit_x;
 	assign dbg_code  = code;
+	assign dbg_tile_code = tile_code;
+	assign dbg_ry    = ry;
+	assign dbg_px    = {half, pcnt};
 	assign dbg_sx    = sx_raw;
 	assign dbg_sy    = sy_raw;
 
@@ -142,7 +177,13 @@ module spi_sprite
 	wire [2:0] ax  = flipx ? (sizex - axc) : axc;
 
 	// code + ax*sizey_count + ay, where sizey_count = sizey + 1
-	wire [15:0] tile_code = code + {8'd0, ax} * {13'd0, sizey + 3'd1} + {13'd0, ay};
+	// sizey is 3 bits, so `sizey + 3'd1` is evaluated at 3 bits inside a
+	// concatenation and WRAPS TO ZERO for a full-height sprite (sizey == 7).
+	// That made every tile column reuse the same codes, which showed up as a
+	// grid of repeated blocks over large sprites like the title logo. Widen it
+	// first, then multiply.
+	wire  [3:0] rows_per_col = {1'b0, sizey} + 4'd1;
+	wire [15:0] tile_code = code + ({12'd0, ax} * {12'd0, rows_per_col}) + {13'd0, ay};
 
 	wire signed [10:0] col_x = 11'(spr_x + $signed({4'd0, axc, 4'd0}));  // + axc*16
 
@@ -181,15 +222,25 @@ module spi_sprite
 	);
 
 	reg [2:0] pcnt;
-	reg [5:0] pix_sel;
+	reg [5:0] pix_raw;
 	always @* begin
 		case (pcnt)
-			3'd0: pix_sel = p0;  3'd1: pix_sel = p1;
-			3'd2: pix_sel = p2;  3'd3: pix_sel = p3;
-			3'd4: pix_sel = p4;  3'd5: pix_sel = p5;
-			3'd6: pix_sel = p6;  default: pix_sel = p7;
+			3'd0: pix_raw = p0;  3'd1: pix_raw = p1;
+			3'd2: pix_raw = p2;  3'd3: pix_raw = p3;
+			3'd4: pix_raw = p4;  3'd5: pix_raw = p5;
+			3'd6: pix_raw = p6;  default: pix_raw = p7;
 		endcase
 	end
+
+	// spi_spr_decrypt emits the pen BIT REVERSED: its bit p is MAME's
+	// plane(5-p), i.e. bit 0 carries plane5 which is the pen's MSB. That is the
+	// convention tb_spr_decrypt checks, so the decrypt unit is right and the
+	// reversal belongs here. Consuming it raw swapped every pen with its mirror,
+	// which is invisible for palindromes like 3F (transparent) and 00 -- and
+	// those are most pixels, so sprites looked almost right while solid areas
+	// came out as the wrong colour entirely.
+	wire [5:0] pix_sel = {pix_raw[0], pix_raw[1], pix_raw[2],
+	                      pix_raw[3], pix_raw[4], pix_raw[5]};
 
 	// Screen x of the pixel being emitted. Within a tile the pixel order is
 	// reversed when flipx is set.
@@ -218,6 +269,9 @@ module spi_sprite
 	reg        restart_req;
 	reg [63:0] fetched;
 
+	reg [15:0] nz_cnt;    // non-zero codes seen on the line in progress
+	reg [31:0] or_acc;    // OR of every sprite-RAM dword seen on that line
+
 	// A line is 448 * 8 = 3584 cycles. The clear takes 320 and a full scan
 	// 4 * 512 = 2048, so this leaves around 1100 for actual pixel fetches.
 	localparam [11:0] BUDGET = 12'd3200;
@@ -226,6 +280,15 @@ module spi_sprite
 		lb_we <= 1'b0;
 
 		if (reset) begin
+			dbg_scanned <= 16'd0;
+			dbg_yhit    <= 16'd0;
+			dbg_emitted <= 16'd0;
+			dbg_starved <= 16'd0;
+			dbg_tiles   <= 16'd0;
+			nz_cnt      <= 16'd0;
+			dbg_codes_nz <= 16'd0;
+			or_acc      <= 32'd0;
+			dbg_spr_or  <= 32'd0;
 			state       <= S_IDLE;
 			busy        <= 1'b0;
 			sdr_req     <= 1'b0;
@@ -233,7 +296,14 @@ module spi_sprite
 			render_bank <= 1'b0;
 		end
 		else begin
-			if (line_start) restart_req <= 1'b1;
+			if (line_start) begin
+				restart_req  <= 1'b1;
+				// Latch the previous line's tally and start a fresh one.
+				dbg_codes_nz <= nz_cnt;
+				nz_cnt       <= 16'd0;
+				dbg_spr_or   <= or_acc;
+				or_acc       <= 32'd0;
+			end
 			if (budget != 12'd0 && state != S_IDLE && state != S_CLR)
 				budget <= budget - 12'd1;
 
@@ -254,7 +324,13 @@ module spi_sprite
 
 			// Blank the buffer we are about to draw into.
 			S_CLR: begin
-				lb_wr_addr <= {~render_bank, clr};
+				// render_bank, NOT ~render_bank: spi_layers writes
+				// {render_bank, x} and the mixer reads {~render_bank, x} while a
+				// line is on screen. Writing the inverted bank here meant the
+				// sprite engine rendered into the buffer being displayed and
+				// then cleared it at the next line start, so the mixer only ever
+				// saw valid=0 and no sprite reached the screen.
+				lb_wr_addr <= {render_bank, clr};
 				lb_wr_data <= 15'd0;          // valid = 0
 				lb_we      <= 1'b1;
 				if (clr == 9'd319) begin
@@ -278,6 +354,7 @@ module spi_sprite
 				state    <= S_TEST;
 			end
 			S_TEST: begin                     // dword 2n is on spr_data now
+				or_acc <= or_acc | spr_data;
 				attr  <= spr_data[15:0];
 				code  <= spr_data[31:16];
 				state <= S_START;
@@ -287,13 +364,34 @@ module spi_sprite
 				sx_raw <= spr_data[8:0];
 				sy_raw <= spr_data[24:16];
 				// MAME skips code 0 (`code % elements == 0`, elements = 0x10000).
+				dbg_scanned <= dbg_scanned + 16'd1;
+				or_acc      <= or_acc | spr_data;
+				if (code != 16'd0) nz_cnt <= nz_cnt + 16'd1;
 				if (y_hit_now && code != 16'd0) begin
+					dbg_yhit <= dbg_yhit + 16'd1;
 					axc   <= 3'd0;
 					chunk <= 2'd0;
 					half  <= 1'b0;
+					dbg_tiles <= dbg_tiles + 16'd1;
 					state <= S_REQ;
 				end
-				else state <= S_NEXTS;
+				else if (index == 9'd0 || budget == 12'd0) begin
+					if (index != 9'd0) dbg_starved <= dbg_starved + 16'd1;
+					busy  <= 1'b0;
+					state <= S_IDLE;
+				end
+				else begin
+					// Walking the 512-entry list dominates the line: at five
+					// cycles a sprite it burned 2560 of the 3584 cycles and left
+					// 96 for actual drawing, so most sprites simply never got
+					// fetched. The RAM answers two cycles after an address is
+					// presented, so the next sprite's first read is issued here
+					// and S_ATTR/S_NEXTS drop out of the miss path -- three
+					// cycles a sprite instead of five.
+					index    <= index - 9'd1;
+					spr_addr <= {index - 9'd1, 1'b0};
+					state    <= S_ATTR2;
+				end
 			end
 
 			S_NEXTC: begin
@@ -302,6 +400,7 @@ module spi_sprite
 					axc   <= axc + 3'd1;
 					chunk <= 2'd0;
 					half  <= 1'b0;
+					dbg_tiles <= dbg_tiles + 16'd1;
 					state <= S_REQ;
 				end
 			end
@@ -341,7 +440,8 @@ module spi_sprite
 
 			S_EMIT: begin
 				if (pix_sel != 6'd63 && emit_x >= 0 && emit_x < 11'sd320) begin
-					lb_wr_addr <= {~render_bank, emit_x[8:0]};
+					dbg_emitted <= dbg_emitted + 16'd1;
+					lb_wr_addr <= {render_bank, emit_x[8:0]};
 					lb_wr_data <= {1'b1, pri, colr, pix_sel};
 					lb_we      <= 1'b1;
 				end
@@ -361,6 +461,7 @@ module spi_sprite
 
 			S_NEXTS: begin
 				if (index == 9'd0 || budget == 12'd0) begin
+					if (index != 9'd0) dbg_starved <= dbg_starved + 16'd1;
 					busy  <= 1'b0;
 					state <= S_IDLE;
 				end

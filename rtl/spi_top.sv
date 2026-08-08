@@ -14,6 +14,50 @@ module spi_top
 	input             clk_ram,     // 114.545455 MHz - SDRAM
 	input             reset,
 	input             rom_ready,
+	input             dbg_en,
+	input       [3:0] chk_ok,
+	input             chk_done,
+	// [4:0] force a layer off (back, midl, fore, text, sprites)
+	// [5]   freeze the CPU, so the picture stops changing and layers can be
+	//       compared against each other without the attract mode moving on
+	// [6]   force the vital signs panel on
+	input       [7:0] dbg_mask,
+	output     [15:0] c_prg,
+	output     [15:0] c_iowr,
+	output     [15:0] c_dma_tm,
+	output     [15:0] c_dma_pal,
+	output     [15:0] c_vbl,
+	output     [15:0] c_dma_spr,
+	output     [15:0] spr_codes_nz,
+	output     [31:0] spr_ram_or,
+	output     [17:2] dma_src_spr,
+	output     [15:0] cpu_wr_spr,
+	output     [15:0] cpu_wr_tm,
+	output            rs_out,
+	output            fd13_out,
+	output     [12:0] tm_dwords_out,
+	output     [95:0] scroll_out,
+	output      [3:0] why,
+	output     [15:0] lay_ovr,
+	output      [1:0] lay_ovr_layer,
+	output      [5:0] lay_text_col,
+	output     [15:0] spr_scanned,
+	output     [15:0] spr_yhit,
+	output     [15:0] spr_emitted,
+	output     [15:0] spr_starved,
+	output     [15:0] spr_tiles,
+	output      [4:0] lay_en_out,
+	output     [11:0] dma_text_dw,
+	output     [15:0] snd_pc,
+	output     [15:0] snd_fifo_rd,
+	output     [15:0] snd_ymf_wr,
+	output     [15:0] snd_stall,
+	output     [15:0] ymf_overrun,
+	output     [15:0] ymf_active,
+	output     [31:0] eip,
+	output     [15:0] cs,
+	output            irq,
+	output    [191:0] gdt,
 
 	// SDRAM ch1: 386 program ROM
 	output     [24:0] sdr_prg_addr,
@@ -32,6 +76,12 @@ module spi_top
 	input      [63:0] sdr_spr_dout,
 	output            sdr_spr_req,
 	input             sdr_spr_ack,
+
+	// SDRAM ch3 (share): Z80 program fetch
+	output     [24:0] sdr_z80_addr,
+	input      [63:0] sdr_z80_dout,
+	output            sdr_z80_req,
+	input             sdr_z80_ack,
 
 	// SDRAM ch5: YMF271 PCM samples
 	output     [24:0] sdr_pcm_addr,
@@ -101,6 +151,11 @@ module spi_top
 	spi_reset_sync rst_vid (.clk(clk_sys), .rst_in(raw_reset), .rst_out(vid_reset));
 
 	// ------------------------------------------------------------------
+	// dbg_mask[5] freezes the CPU; synchronise it into clk_cpu separately.
+	reg [1:0] freeze_s;
+	always @(posedge clk_cpu) freeze_s <= {freeze_s[0], dbg_mask[5]};
+	wire cpu_freeze = freeze_s[1];
+
 	// 386 subsystem
 	// ------------------------------------------------------------------
 
@@ -126,7 +181,7 @@ module spi_top
 	(
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
-		.cpu_en    (1'b1),
+		.cpu_en    (~cpu_freeze),
 
 		.sdr_addr  (sdr_prg_addr),
 		.sdr_dout  (sdr_prg_dout),
@@ -140,10 +195,20 @@ module spi_top
 		.io_rd     (io_rd),
 		.io_rdata  (io_rdata),
 
+		.dbg_wr_spr(cpu_wr_spr),
+		.dbg_wr_tm (cpu_wr_tm),
 		.dma_req   (dma_req),
 		.dma_gnt   (dma_gnt),
 		.dma_addr  (dma_addr),
 		.dma_dout  (dma_dout),
+
+		.dbg_why   (cpu_dbg_why),
+		.dbg_eip   (eip),
+		.dbg_cs    (cs),
+		.dbg_irq   (irq),
+		.dbg_gdt0(gdt[31:0]),   .dbg_gdt1(gdt[63:32]),
+		.dbg_gdt2(gdt[95:64]),  .dbg_gdt3(gdt[127:96]),
+		.dbg_gdt4(gdt[159:128]),.dbg_gdt5(gdt[191:160]),
 
 		.vbl_toggle (vbl_toggle)
 	);
@@ -152,12 +217,46 @@ module spi_top
 	// I/O registers
 	// ------------------------------------------------------------------
 	wire  [4:0] layer_enable;
+	// layer_enable is active LOW per MAME (0 = layer shown). dbg_mask[4:0] force
+	// a layer off from the host over JTAG so a rendering fault can be pinned to
+	// one layer without rebuilding for each experiment.
+	// dbg_mask is driven by a JTAG source register in the clk_ram domain, so it
+	// has to be synchronised before it is used here. Left unsynchronised it is
+	// also a huge fanout into clk_sys logic (the mixer's layer enables and the
+	// RGB mux), which at a non-integer clk_ram:clk_sys ratio failed timing by
+	// 11 ns across hundreds of paths.
+	reg [7:0] mask_s1, mask_s2;
+	always @(posedge clk_sys) begin
+		mask_s1 <= dbg_mask;
+		mask_s2 <= mask_s1;
+	end
+
+	// spi_io runs on clk_cpu and every one of these feeds the clk_sys video
+	// logic, so they all cross domains. Left raw, layer_enable reached deep into
+	// the mixer's combinational blend chain and failed setup by 6.4 ns. They are
+	// slow control registers -- the game rewrites them once a frame -- so a two
+	// flop synchroniser is both correct and enough. Register them once here
+	// rather than at each consumer.
+	reg  [4:0] lay_en_s1, lay_en_s2;
+	reg  [1:0] rs_en_s, fd13_s;
+	reg  [2:0] bank_s1, bank_s2;
+	always @(posedge clk_sys) begin
+		lay_en_s1 <= layer_enable;  lay_en_s2 <= lay_en_s1;
+		rs_en_s   <= {rs_en_s[0], rowscroll_enable};
+		fd13_s    <= {fd13_s[0],  fore_layer_d13};
+		bank_s1   <= rf2_layer_bank; bank_s2 <= bank_s1;
+	end
+	wire       rowscroll_en_s = rs_en_s[1];
+	wire       fore_d13_s     = fd13_s[1];
+
+	wire  [4:0] layer_en_dbg = lay_en_s2 | mask_s2[4:0];
 	wire        rowscroll_enable, fore_layer_d13;
 	wire  [2:0] rf2_layer_bank;
 	wire [15:0] scroll_bx, scroll_by, scroll_mx, scroll_my, scroll_fx, scroll_fy;
 	wire [17:0] dma_src;
 	wire [15:0] dma_len;
 	wire        dma_tilemap, dma_palette, dma_sprite;
+	wire  [3:0] cpu_dbg_why;
 	wire  [7:0] sndfifo_din;
 	wire        sndfifo_wr, coin_latch_rd;
 
@@ -199,27 +298,54 @@ module spi_top
 
 		.sndfifo_din      (sndfifo_din),
 		.sndfifo_wr       (sndfifo_wr),
-		.sndfifo_full     (1'b0),
-		.coin_latch       (coin_sr),
+		.sndfifo_full     (sndfifo_full),
+		.coin_latch       (coin_latch),
 		.coin_latch_rd    (coin_latch_rd)
 	);
 
-	// The Z80 latches coin inputs and the 386 reads them back at 0x680. Until
-	// the sound CPU lands (T5), latch them here so coins still register.
-	reg [7:0] coin_sr;
-	reg [7:0] coin_prev;
-	always @(posedge clk_cpu) begin
-		if (cpu_reset) begin
-			coin_sr   <= 8'd0;
-			coin_prev <= 8'hFF;
-		end
-		else begin
-			coin_prev <= coin;
-			// inputs are active low, so a press is a falling edge
-			coin_sr <= (coin_sr | (coin_prev & ~coin));
-			if (coin_latch_rd) coin_sr <= (coin_prev & ~coin);
-		end
-	end
+	// ------------------------------------------------------------------
+	// Sound: Z80 + YMF271
+	//
+	// It runs on clk_sys while spi_io runs on clk_cpu, so the two signals
+	// crossing into it are handled inside spi_sound: sndfifo_wr is a one-cycle
+	// clk_cpu pulse (two clk_sys cycles, edge detected there) and coin_latch_rd
+	// the same. coin_latch itself is a settled register read the other way.
+	// ------------------------------------------------------------------
+	wire [7:0]  coin_latch;
+	wire        sndfifo_full;
+	wire [15:0] snd_audio;
+
+	spi_sound sound
+	(
+		.clk        (clk_sys),
+		.reset      (vid_reset),
+
+		.snd_din    (sndfifo_din),
+		.snd_wr     (sndfifo_wr),
+		.snd_full   (sndfifo_full),
+		.coin_rd    (coin_latch_rd),
+		.coin_latch (coin_latch),
+		.coin       (coin),
+
+		.sdr_addr   (sdr_z80_addr),
+		.sdr_dout   (sdr_z80_dout),
+		.sdr_req    (sdr_z80_req),
+		.sdr_ack    (sdr_z80_ack),
+
+		.pcm_addr   (sdr_pcm_addr),
+		.pcm_dout   (sdr_pcm_dout),
+		.pcm_req    (sdr_pcm_req),
+		.pcm_ack    (sdr_pcm_ack),
+
+		.audio      (snd_audio),
+
+		.dbg_z80_pc      (snd_pc),
+		.dbg_fifo_rd     (snd_fifo_rd),
+		.dbg_ymf_wr      (snd_ymf_wr),
+		.dbg_stall       (snd_stall),
+		.dbg_ymf_overrun (ymf_overrun),
+		.dbg_ymf_active  (ymf_active)
+	);
 
 	// ------------------------------------------------------------------
 	// Video RAMs
@@ -270,7 +396,10 @@ module spi_top
 		.tm_addr          (tm_wa),  .tm_data (tm_wd),  .tm_we (tm_we),
 		.pal_addr         (pal_wa), .pal_data(pal_wd), .pal_we(pal_we),
 		.spr_addr         (spr_wa), .spr_data(spr_wd), .spr_we(spr_we),
-		.busy             (dma_busy)
+		.busy             (dma_busy),
+		.dbg_text_dwords  (dma_text_dw),
+		.dbg_src_spr      (dma_src_spr),
+		.dbg_tm_dwords    (tm_dwords_out)
 	);
 
 	// ------------------------------------------------------------------
@@ -302,9 +431,10 @@ module spi_top
 		.scroll_bx        (scroll_bx), .scroll_by(scroll_by),
 		.scroll_mx        (scroll_mx), .scroll_my(scroll_my),
 		.scroll_fx        (scroll_fx), .scroll_fy(scroll_fy),
-		.rowscroll_enable (rowscroll_enable),
-		.fore_layer_d13   (fore_layer_d13),
-		.rf2_layer_bank   (rf2_layer_bank),
+		.rowscroll_enable (rowscroll_en_s),
+		.layer_off        (layer_en_dbg[3:0]),
+		.fore_layer_d13   (fore_d13_s),
+		.rf2_layer_bank   (bank_s2),
 		.bg_fore_pos      (15'h4000),
 
 		.tm_addr          (tm_ra),
@@ -338,7 +468,10 @@ module spi_top
 		.dbg_col          (),
 		.dbg_emitx        (),
 		.dbg_pix          (),
-		.dbg_emiti        ()
+		.dbg_emiti        (),
+		.dbg_overruns     (lay_ovr),
+		.dbg_ovr_layer    (lay_ovr_layer),
+		.dbg_text_col     (lay_text_col)
 	);
 
 	// ------------------------------------------------------------------
@@ -354,7 +487,7 @@ module spi_top
 		.reset      (vid_reset),
 		.vcnt       (vcnt),
 		.line_start (line_start),
-		.enable     (~layer_enable[4]),
+		.enable     (~layer_en_dbg[4]),
 		.spr_addr   (spr_ra),
 		.spr_data   (spr_rd),
 		.sdr_addr   (sdr_spr_addr),
@@ -370,6 +503,14 @@ module spi_top
 		.dbg_index  (),
 		.dbg_pix    (),
 		.dbg_emitx  (),
+		.dbg_tile_code(), .dbg_ry(), .dbg_px(),
+		.dbg_scanned(spr_scanned),
+		.dbg_yhit   (spr_yhit),
+		.dbg_emitted(spr_emitted),
+		.dbg_starved(spr_starved),
+		.dbg_codes_nz(spr_codes_nz),
+		.dbg_spr_or(spr_ram_or),
+		.dbg_tiles  (spr_tiles),
 		.dbg_code   (),
 		.dbg_sx     (),
 		.dbg_sy     ()
@@ -386,7 +527,7 @@ module spi_top
 		.clk          (clk_sys),
 		.reset        (vid_reset),
 		.ce_pix       (ce_pix),
-		.layer_enable (layer_enable),
+		.layer_enable (layer_en_dbg),
 		.lb_back      (lb_back),
 		.lb_midl      (lb_midl),
 		.lb_fore      (lb_fore),
@@ -394,24 +535,89 @@ module spi_top
 		.lb_spr       (lb_spr),
 		.pal_addr     (pal_ra),
 		.pal_data     (pal_rd),
-		.red          (red),
-		.green        (green),
-		.blue         (blue)
+		.red          (mix_r),
+		.green        (mix_g),
+		.blue         (mix_b)
 	);
 
 	// ------------------------------------------------------------------
-	// TODO(T5) Z80 + YMF271
+	// Vital signs panel (OSD selectable)
 	// ------------------------------------------------------------------
-	assign sdr_pcm_addr = 25'd0;
-	assign sdr_pcm_req  = 1'b0;
+	wire [7:0] mix_r, mix_g, mix_b;
+	wire [7:0] dbg_r, dbg_g, dbg_b;
 
-	assign audio_l = 16'd0;
-	assign audio_r = 16'd0;
+	reg prg_req_d;
+	always @(posedge clk_sys) prg_req_d <= sdr_prg_req;
+
+	spi_debug dbg
+	(
+		.clk            (clk_sys),
+		.reset          (vid_reset),
+		.hcnt           (hcnt),
+		.vcnt           (vcnt),
+		.rom_ready      (rom_ready),
+		.ev_prg_fetch   (sdr_prg_req ^ prg_req_d),
+		.ev_io_wr       (io_wr),
+		.ev_dma_tilemap (dma_tilemap),
+		.ev_dma_palette (dma_palette),
+		.ev_dma_sprite  (dma_sprite),
+		.ev_vbl         (vbl_rise),
+		.ev_line        (line_start),
+		.lvl_why        (cpu_dbg_why),
+		.chk_ok         (chk_ok),
+		.chk_done       (chk_done),
+		.red            (dbg_r),
+		.green          (dbg_g),
+		.blue           (dbg_b)
+	);
+
+	// Same events the panel counts, exported for the JTAG probe.
+	reg [15:0] n_prg, n_iowr, n_tm, n_pal, n_vbl, n_spr;
+	reg pq, iq, tq, lq, vq, sq;
+	always @(posedge clk_sys) begin
+		if (vid_reset) begin
+			n_prg <= 0; n_iowr <= 0; n_tm <= 0; n_pal <= 0; n_vbl <= 0; n_spr <= 0;
+			pq <= 0; iq <= 0; tq <= 0; lq <= 0; vq <= 0; sq <= 0;
+		end
+		else begin
+			pq <= sdr_prg_req ^ prg_req_d; iq <= io_wr;
+			tq <= dma_tilemap;  lq <= dma_palette; vq <= vbl_rise;
+			sq <= dma_sprite;
+			if ((sdr_prg_req ^ prg_req_d) && !pq) n_prg  <= n_prg  + 1'd1;
+			if (io_wr        && !iq)              n_iowr <= n_iowr + 1'd1;
+			if (dma_tilemap  && !tq)              n_tm   <= n_tm   + 1'd1;
+			if (dma_palette  && !lq)              n_pal  <= n_pal  + 1'd1;
+			if (vbl_rise     && !vq)              n_vbl  <= n_vbl  + 1'd1;
+			// The sprite list only reaches sprite RAM through this DMA. If it
+			// never fires, the list is stale or empty and every entry fails the
+			// `code != 0` gate -- indistinguishable from a y-compare fault
+			// without counting the trigger itself.
+			if (dma_sprite   && !sq)              n_spr  <= n_spr  + 1'd1;
+		end
+	end
+	assign lay_en_out = layer_enable;
+	assign c_prg = n_prg; assign c_iowr = n_iowr; assign c_dma_tm = n_tm;
+	assign c_dma_pal = n_pal; assign c_vbl = n_vbl; assign why = cpu_dbg_why;
+	assign c_dma_spr = n_spr;
+	assign rs_out    = rowscroll_enable;
+	assign fd13_out  = fore_layer_d13;
+	assign scroll_out = {scroll_fy, scroll_fx, scroll_my, scroll_mx, scroll_by, scroll_bx};
+
+	wire panel = dbg_en | mask_s2[6];
+	/* verilator lint_off UNUSEDSIGNAL */
+	wire _unused_dbg = &{1'b0, dbg_mask[7], mask_s2[7], mask_s2[5]};   // spare
+	/* verilator lint_on UNUSEDSIGNAL */
+	assign red   = panel ? dbg_r : mix_r;
+	assign green = panel ? dbg_g : mix_g;
+	assign blue  = panel ? dbg_b : mix_b;
+
+	// SXX2E is a mono board: the YMF271's four outputs are summed onto one
+	// speaker, so both sides carry the same sample.
+	assign audio_l = snd_audio;
+	assign audio_r = snd_audio;
 
 	// Signals not yet consumed; each disappears as its block lands.
 	wire _unused = &{1'b0, clk_ram, dma_busy, layers_busy, spr_busy,
-	                 hcnt[9], dma_src[1:0], lb_bank,
-	                 sndfifo_din, sndfifo_wr,
-	                 sdr_pcm_dout, sdr_pcm_ack};
+	                 hcnt[9], dma_src[1:0], lb_bank};
 
 endmodule

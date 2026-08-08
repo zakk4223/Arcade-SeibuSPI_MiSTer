@@ -3,7 +3,7 @@
 QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
-.PHONY: all build map fit asm sta clean lint test
+.PHONY: all build map fit asm sta timing clean lint test
 
 all: build
 
@@ -23,6 +23,13 @@ asm:
 
 sta:
 	$(QUARTUS_DIR)/quartus_sta $(PROJECT)
+
+# Name the worst paths. The Setup Summary gives slack but not endpoints, and
+# the .sta.rpt has no path listing, so a failing build otherwise says only how
+# badly and on which clock.
+timing:
+	@$(QUARTUS_DIR)/quartus_sta -t tools/timing_paths.tcl 2>&1 | \
+	    grep -vE "^Info|^\s+Info|^Warning"
 
 lint:
 	@$(MAKE) -C sim lint

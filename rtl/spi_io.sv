@@ -69,10 +69,39 @@ module spi_io
 
 	// A 16-bit CRTC register at byte address A lands in the upper or lower half
 	// of dword A & ~3 depending on bit 1.
-	wire [15:0] w_lo = wdata[15:0];
-	wire [15:0] w_hi = wdata[31:16];
-	wire        be_lo = be[0] | be[1];
+	// Only the sprite-DMA triggers still need a half-word enable; the CRTC
+	// registers are merged byte by byte below.
 	wire        be_hi = be[2] | be[3];
+
+	// Read/write storage behind the whole CRTC window (0x400-0x44F, 20 dwords),
+	// mirroring MAME's `map(0x0000, 0x004f).ram()`. The decoded registers below
+	// still drive the video logic; this exists so the game can read a register
+	// back and get what it wrote.
+	reg [31:0] crtc_ram [0:19];
+	wire       crtc_sel = (dw[10:7] == 4'h8) && (dw[6:2] <= 5'd19);   // 0x400-0x44F
+
+	integer ci;
+	initial for (ci = 0; ci < 20; ci = ci + 1) crtc_ram[ci] = 32'd0;
+
+	always @(posedge clk) begin
+		if (wr && crtc_sel) begin
+			if (be[0]) crtc_ram[dw[6:2]][ 7: 0] <= wdata[ 7: 0];
+			if (be[1]) crtc_ram[dw[6:2]][15: 8] <= wdata[15: 8];
+			if (be[2]) crtc_ram[dw[6:2]][23:16] <= wdata[23:16];
+			if (be[3]) crtc_ram[dw[6:2]][31:24] <= wdata[31:24];
+		end
+	end
+
+	// The whole 16-bit reg_1a is kept, and the two flags are derived from it, so
+	// a partial write can only disturb the byte it actually addresses. MAME does
+	// the same: COMBINE_DATA into m_layer_bank, then BIT(m_layer_bank, 15).
+	/* verilator lint_off UNUSEDSIGNAL */
+	reg [15:0] layer_bank;   // only bits 15 and 11 are decoded
+	/* verilator lint_on UNUSEDSIGNAL */
+	always @(posedge clk) begin
+		rowscroll_enable <= layer_bank[15];
+		fore_layer_d13   <= layer_bank[11];
+	end
 
 	always @(posedge clk) begin
 		dma_tilemap   <= 1'b0;
@@ -82,35 +111,64 @@ module spi_io
 
 		if (reset) begin
 			layer_enable     <= 5'b00000;   // MAME video_start: 0 = all layers enabled
-			rowscroll_enable <= 1'b0;
-			fore_layer_d13   <= 1'b0;
+
 			rf2_layer_bank   <= 3'd0;
 			{scroll_bx, scroll_by} <= 32'd0;
 			{scroll_mx, scroll_my} <= 32'd0;
 			{scroll_fx, scroll_fy} <= 32'd0;
 			dma_src <= 18'd0;
 			dma_len <= 16'd0;
+			layer_bank <= 16'd0;
 		end
 		else if (wr) begin
 			case (dw)
 				// ---- Seibu CRTC ----------------------------------------
 				11'h414: ;                                   // decrypt key, ignored
-				11'h418: if (be_hi) begin                    // 0x41A reg_1a
-					rowscroll_enable <= w_hi[15];
-					fore_layer_d13   <= w_hi[11];
+				// Every CRTC register is merged PER BYTE, which is what MAME's
+				// COMBINE_DATA does: bytes outside mem_mask keep their old value.
+				//
+				// reg_1a is the register that made this matter. It is 16 bits at
+				// 0x41A, so its low byte is 0x41A (be[2]) and its HIGH byte --
+				// carrying both rowscroll_enable (bit 15) and fore_layer_d13
+				// (bit 11) -- is 0x41B (be[3]). Gating both on be[2]|be[3] meant a
+				// write touching only 0x41A latched bit 15 from a byte the game
+				// never drove, clearing rowscroll_enable.
+				//
+				// That single bit decides the tilemap DMA's source layout: with
+				// rowscroll on the source is
+				//     back, back_rs, fore, fore_rs, midl, midl_rs, text  (4096 dw)
+				// and with it off
+				//     back, fore, midl, text                             (2560 dw)
+				// so losing it makes the DMA misparse the whole buffer. The game's
+				// FORE tiles land in the midl region and are drawn with the midl
+				// palette, back gets the back rowscroll values as if they were
+				// tiles, and fore and text end up empty -- which is exactly the
+				// picture the board produced: one layer of content in the wrong
+				// colours over a black screen.
+				11'h418: begin                               // 0x41A reg_1a
+					if (be[2]) layer_bank[ 7:0] <= wdata[23:16];
+					if (be[3]) layer_bank[15:8] <= wdata[31:24];
 				end
-				11'h41C: if (be_lo) layer_enable <= w_lo[4:0];
+				// layer_enable is bits 4:0 -- the LOW byte of the 16-bit register
+				// at 0x41C, so it follows be[0] alone.
+				11'h41C: if (be[0]) layer_enable <= wdata[4:0];
 				11'h420: begin
-					if (be_lo) scroll_bx <= w_lo;
-					if (be_hi) scroll_by <= w_hi;
+					if (be[0]) scroll_bx[ 7:0] <= wdata[ 7:0];
+					if (be[1]) scroll_bx[15:8] <= wdata[15:8];
+					if (be[2]) scroll_by[ 7:0] <= wdata[23:16];
+					if (be[3]) scroll_by[15:8] <= wdata[31:24];
 				end
 				11'h424: begin
-					if (be_lo) scroll_mx <= w_lo;
-					if (be_hi) scroll_my <= w_hi;
+					if (be[0]) scroll_mx[ 7:0] <= wdata[ 7:0];
+					if (be[1]) scroll_mx[15:8] <= wdata[15:8];
+					if (be[2]) scroll_my[ 7:0] <= wdata[23:16];
+					if (be[3]) scroll_my[15:8] <= wdata[31:24];
 				end
 				11'h428: begin
-					if (be_lo) scroll_fx <= w_lo;
-					if (be_hi) scroll_fy <= w_hi;
+					if (be[0]) scroll_fx[ 7:0] <= wdata[ 7:0];
+					if (be[1]) scroll_fx[15:8] <= wdata[15:8];
+					if (be[2]) scroll_fy[ 7:0] <= wdata[23:16];
+					if (be[3]) scroll_fy[15:8] <= wdata[31:24];
 				end
 
 				// ---- video DMA -----------------------------------------
@@ -147,17 +205,40 @@ module spi_io
 	// 0x600  d0 = "video/dma ready", the game spins until it is set
 	// 0x604  INPUTS   0x608 EXCH (unused, all ones)   0x60C SYSTEM
 	// 0x680  coin latch, cleared by reading
-	// 0x684  d0 = 386->Z80 FIFO full, d1 = Z80->386 FIFO empty
+	// 0x684  d0 = _FF of the 386->Z80 FIFO, d1 = _EF of the Z80->386 FIFO.
+	//        Both are the ACTIVE LOW pins: MAME's ff_r()/ef_r() return the
+	//        negated internal flags, so d0 reads 1 when there is room to send
+	//        and d1 reads 0 while nothing has come back. Getting d0 backwards
+	//        makes the 386 believe the sound FIFO is permanently full and it
+	//        spins here forever, a few frames into the boot.
 	// 0x6DC  DS2404 data      0x6DD  d0-d2 must read back clear
 	// ------------------------------------------------------------------
 	always @* begin
 		case (dw)
+			// 0x400-0x44F is READ/WRITE. MAME backs the whole Seibu CRTC window
+			// with `map(0x0000, 0x004f).ram()` and overlays the register handlers
+			// on top, so a read returns whatever was last written -- reg_1a even
+			// has an explicit reg_1a_r().
+			//
+			// Returning zero here instead breaks the game's read-modify-write of
+			// reg_1a: it reads 0, ORs in the fore-layer bit and writes back, and
+			// bit 15 (rowscroll enable) is destroyed in the process. On the board
+			// rowscroll came up 1 and then dropped to 0 at the exact moment
+			// fore_d13 went to 1, which is that sequence exactly. Losing it makes
+			// the tilemap DMA parse the source with the wrong layout, so the
+			// game's FORE tiles land in the midl region, are drawn with the midl
+			// palette, and back/fore/text render nothing.
+			11'h400, 11'h404, 11'h408, 11'h40C,
+			11'h410, 11'h414, 11'h418, 11'h41C,
+			11'h420, 11'h424, 11'h428, 11'h42C,
+			11'h430, 11'h434, 11'h438, 11'h43C,
+			11'h440, 11'h444, 11'h448, 11'h44C: rdata = crtc_ram[dw[6:2]];
 			11'h600: rdata = 32'h0000_0001;
 			11'h604: rdata = {16'hFFFF, inputs};
 			11'h608: rdata = 32'hFFFF_FFFF;
 			11'h60C: rdata = {24'hFFFFFF, system};
 			11'h680: rdata = {24'd0, coin_latch};
-			11'h684: rdata = {30'd0, 1'b1, sndfifo_full};  // Z80->386 FIFO always empty for now
+			11'h684: rdata = {30'd0, 1'b0, ~sndfifo_full}; // d1=0: nothing from the Z80 yet
 			11'h6DC: rdata = 32'h0000_0000;
 			default: rdata = 32'h0000_0000;
 		endcase

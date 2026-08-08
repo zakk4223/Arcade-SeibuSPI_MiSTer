@@ -72,7 +72,21 @@ module spi_dma
 	output reg [31:0] spr_data,
 	output reg        spr_we,
 
-	output            busy
+	output            busy,
+
+	// How many dwords the TEXT segment actually moved on the last tilemap DMA.
+	// Should be 1024 (64x32 tiles, two per dword). Half that would leave tile
+	// rows 16..31 stale, which is exactly source line 128 onwards.
+	output reg [11:0] dbg_text_dwords,
+
+	// The source address the sprite DMA actually used, latched at trigger time.
+	output     [17:2] dbg_src_spr,
+
+	// Total dwords moved by the last COMPLETE tilemap DMA. The segment sizes are
+	// derived from rowscroll_enable and dma_len is ignored, so this is 4096 when
+	// rowscroll is on and 2560 when it is off -- which makes it a direct readout
+	// of whether this side agrees with the game about the source layout.
+	output reg [12:0] dbg_tm_dwords
 );
 
 	// ------------------------------------------------------------------
@@ -91,9 +105,11 @@ module spi_dma
 	// ------------------------------------------------------------------
 	// Tilemap segments
 	// ------------------------------------------------------------------
-	wire [11:0] fore_off = rowscroll_enable ? 12'h400 : 12'h200;
-	wire [11:0] midl_off = rowscroll_enable ? 12'h800 : 12'h400;
-	wire [11:0] text_off = rowscroll_enable ? 12'hC00 : 12'h600;
+	// rs_tm, not the live signal: the segment layout must stay fixed for the
+	// whole transfer and match what was in force when the game triggered it.
+	wire [11:0] fore_off = rs_tm ? 12'h400 : 12'h200;
+	wire [11:0] midl_off = rs_tm ? 12'h800 : 12'h400;
+	wire [11:0] text_off = rs_tm ? 12'hC00 : 12'h600;
 
 	localparam [2:0] SEG_BACK = 3'd0, SEG_BACK_RS = 3'd1,
 	                 SEG_FORE = 3'd2, SEG_FORE_RS = 3'd3,
@@ -136,7 +152,7 @@ module spi_dma
 		endcase
 	endfunction
 
-	wire [2:0]  nseg  = seg_next(seg, rowscroll_enable);
+	wire [2:0]  nseg  = seg_next(seg, rs_tm);
 	wire [11:0] nbase = seg_base(nseg, fore_off, midl_off, text_off);
 	wire [11:0] nlen  = seg_len(nseg);
 
@@ -158,16 +174,32 @@ module spi_dma
 
 	assign busy    = (mode != M_IDLE) || rd_valid;
 
-	// Hold the request across the whole transfer, including the pending start.
-	// pend_mode remembers which transfer was asked for while we wait for the
-	// port; the trigger pulses are only one cycle wide.
-	reg       start_pending;
-	reg [1:0] pend_mode;
-	assign ram_req = busy || start_pending;
+	// One pending slot PER MODE, and the parameters latched when the trigger
+	// fires rather than when the port is granted.
+	//
+	// MAME performs each DMA instantaneously inside the trigger write, so it
+	// always uses the video_dma_address current at that instant. Here the
+	// transfer waits for the CPU to release the RAM port, and the game reloads
+	// 0x494 between triggers -- sampling dma_src at grant time therefore read a
+	// source address belonging to a later request.
+	//
+	// Worse, a single pending slot meant a trigger arriving while another
+	// transfer was pending or running was dropped outright. The game fires
+	// palette, tilemap and sprite DMAs back to back every frame, so the sprite
+	// request -- last of the three -- was the one routinely lost, leaving sprite
+	// RAM all zeros and every list entry failing the `code != 0` gate.
+	reg        pend_tm, pend_pal, pend_spr;
+	reg [17:2] src_tm, src_pal, src_spr;
+	reg [15:0] len_pal;
+	reg        rs_tm;             // rowscroll layout as it was at trigger time
+	reg [12:0] tm_run;            // dwords moved by the tilemap DMA in progress
+	assign ram_req = busy || pend_tm || pend_pal || pend_spr;
 
 	// Palette: (len+1)*2 bytes => (len+1)/2 source dwords. 6144 pens = 3072
 	// dwords, which needs 12 bits.
-	wire [11:0] pal_dwords = 12'((dma_len + 16'd1) >> 1);
+	wire [11:0] pal_dwords = 12'((len_pal + 16'd1) >> 1);
+
+	assign dbg_src_spr = src_spr;
 
 	always @(posedge clk) begin
 		tm_we  <= 1'b0;
@@ -177,7 +209,12 @@ module spi_dma
 		if (reset) begin
 			mode          <= M_IDLE;
 			rd_valid      <= 1'b0;
-			start_pending <= 1'b0;
+			pend_tm       <= 1'b0;
+			pend_pal      <= 1'b0;
+			pend_spr      <= 1'b0;
+			dbg_text_dwords <= 12'd0;
+			tm_run        <= 13'd0;
+			dbg_tm_dwords <= 13'd0;
 		end
 		else begin
 			// ---- write stage --------------------------------------------
@@ -204,27 +241,49 @@ module spi_dma
 				endcase
 			end
 
-			// ---- read stage ----------------------------------------------
-			// A trigger raises ram_req and records what was asked for; the
-			// transfer only begins once the CPU hands over the port.
-			if (start_tm)       begin start_pending <= 1'b1; pend_mode <= M_TILEMAP; end
-			else if (start_pal) begin start_pending <= 1'b1; pend_mode <= M_PALETTE; end
-			else if (start_spr) begin start_pending <= 1'b1; pend_mode <= M_SPRITE;  end
-
-			if (mode == M_IDLE) begin
-				if (start_pending && ram_gnt) begin
-					start_pending <= 1'b0;
-					mode          <= pend_mode;
-					dest          <= 12'h000;
-					ram_addr      <= dma_src;
-					case (pend_mode)
-						M_TILEMAP: begin seg <= SEG_BACK; cnt <= seg_len(SEG_BACK); end
-						M_PALETTE: cnt <= pal_dwords;
-						default:   cnt <= 12'd1024;
-					endcase
+			// ---- start stage ---------------------------------------------
+			// Consume first, then latch new triggers below. A trigger landing on
+			// the same cycle as its own consume therefore survives: the later
+			// non-blocking assignment wins and the slot stays raised, while
+			// ram_addr has already taken the OLD latched source.
+			if (mode == M_IDLE && ram_gnt) begin
+				dest <= 12'h000;
+				if (pend_tm) begin
+					pend_tm  <= 1'b0;
+					mode     <= M_TILEMAP;
+					ram_addr <= src_tm;
+					seg      <= SEG_BACK;
+					cnt      <= seg_len(SEG_BACK);
+					dbg_text_dwords <= 12'd0;
+					tm_run          <= 13'd0;
+				end
+				else if (pend_pal) begin
+					pend_pal <= 1'b0;
+					mode     <= M_PALETTE;
+					ram_addr <= src_pal;
+					cnt      <= pal_dwords;
+				end
+				else if (pend_spr) begin
+					pend_spr <= 1'b0;
+					mode     <= M_SPRITE;
+					ram_addr <= src_spr;
+					cnt      <= 12'd1024;
 				end
 			end
-			else begin
+
+			// ---- trigger stage -------------------------------------------
+			if (start_tm)  begin pend_tm  <= 1'b1; src_tm  <= dma_src;
+			                     rs_tm    <= rowscroll_enable; end
+			if (start_pal) begin pend_pal <= 1'b1; src_pal <= dma_src;
+			                     len_pal  <= dma_len; end
+			if (start_spr) begin pend_spr <= 1'b1; src_spr <= dma_src; end
+
+			// ---- read stage ----------------------------------------------
+			// Runs whenever a transfer is in progress. This is deliberately its
+			// own `if` on mode: it used to be the `else` arm of the start stage,
+			// which after the restructure would have bound to `if (start_spr)`
+			// and stepped the address and count on almost every cycle.
+			if (mode != M_IDLE) begin
 				// The address presented last cycle returns this cycle.
 				rd_valid <= 1'b1;
 				rd_mode  <= mode;
@@ -233,6 +292,9 @@ module spi_dma
 				ram_addr <= ram_addr + 16'd1;
 				dest     <= dest + 12'd1;
 				cnt      <= cnt - 12'd1;
+				if (mode == M_TILEMAP && seg == SEG_TEXT)
+					dbg_text_dwords <= dbg_text_dwords + 12'd1;
+				if (mode == M_TILEMAP) tm_run <= tm_run + 13'd1;
 
 				if (cnt == 12'd1) begin
 					if (mode == M_TILEMAP && seg != SEG_TEXT) begin
@@ -242,6 +304,7 @@ module spi_dma
 					end
 					else begin
 						mode <= M_IDLE;
+						if (mode == M_TILEMAP) dbg_tm_dwords <= tm_run + 13'd1;
 					end
 				end
 			end

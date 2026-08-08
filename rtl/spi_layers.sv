@@ -56,6 +56,8 @@ module spi_layers
 	input      [15:0] scroll_mx, scroll_my,
 	input      [15:0] scroll_fx, scroll_fy,
 	input             rowscroll_enable,
+	input       [3:0] layer_off,      // 1 = layer disabled, skip it entirely
+
 	input             fore_layer_d13,
 	input       [2:0] rf2_layer_bank,   // {fore d14, midl d14, back d14}
 	input      [14:0] bg_fore_pos,      // 0x4000 for a 6 MB tile region
@@ -99,7 +101,14 @@ module spi_layers
 	output      [5:0] dbg_col,
 	output signed [10:0] dbg_emitx,
 	output      [5:0] dbg_pix,
-	output      [3:0] dbg_emiti
+	output      [3:0] dbg_emiti,
+
+	// Overrun telemetry. A line that does not finish is abandoned at the next
+	// tile boundary, and since text is rendered last it is what gets truncated.
+	// These say how often that happens and how far the text layer got.
+	output reg [15:0] dbg_overruns,
+	output reg  [1:0] dbg_ovr_layer,
+	output reg  [5:0] dbg_text_col
 );
 
 `include "spi_defs.vh"
@@ -116,6 +125,10 @@ module spi_layers
 	// Per-layer parameters, selected by the phase
 	// ------------------------------------------------------------------
 	localparam [1:0] L_BACK = 2'd0, L_MIDL = 2'd1, L_FORE = 2'd2, L_TEXT = 2'd3;
+
+	// The mixer ignores a disabled layer, so fetching and emitting it is pure
+	// waste -- and with the SDRAM bus at ~90% of a line there is none to spare.
+	// S_LSTART skips one in a single cycle instead of ~800.
 
 	reg [1:0] layer;
 
@@ -231,6 +244,7 @@ module spi_layers
 	// Fetch sequencer
 	// ------------------------------------------------------------------
 	localparam [3:0] S_IDLE   = 4'd0,
+	                 S_LSTART = 4'd13,  // decide whether this layer is drawn
 	                 S_RS_REQ = 4'd1,   // rowscroll table read
 	                 S_RS_WT  = 4'd2,
 	                 S_RS_LAT = 4'd12,
@@ -388,9 +402,22 @@ module spi_layers
 			busy        <= 1'b0;
 			sdr_req     <= 1'b0;
 			restart_req <= 1'b0;
+			dbg_overruns  <= 16'd0;
+			dbg_ovr_layer <= 2'd0;
+			dbg_text_col  <= 6'd0;
 		end
 		else begin
-			if (line_start) restart_req <= 1'b1;
+			if (line_start) begin
+				restart_req <= 1'b1;
+				// Still rendering when the next line began: this line is about
+				// to be cut short.
+				if (busy) begin
+					dbg_overruns  <= dbg_overruns + 16'd1;
+					dbg_ovr_layer <= layer;
+					if (layer == L_TEXT) dbg_text_col <= col;
+					else                 dbg_text_col <= 6'd0;
+				end
+			end
 
 			// A tile boundary is the safe place to abandon the rest of a line.
 			if (restart_req && (state == S_IDLE || state == S_NEXT)) begin
@@ -401,7 +428,7 @@ module spi_layers
 				col         <= 6'd0;
 				busy        <= 1'b1;
 				rowscroll   <= 16'd0;
-				state       <= rowscroll_enable ? S_RS_REQ : S_TM_REQ;
+				state       <= S_LSTART;
 			end
 			else case (state)
 
@@ -410,6 +437,27 @@ module spi_layers
 			// line_start branch here fired the restart twice, one cycle apart,
 			// and the extra render_bank toggle put the mixer on the wrong buffer.
 			S_IDLE: ;
+
+			S_LSTART: begin
+				if (layer_off[layer]) begin
+					if (layer == L_TEXT) begin
+						busy  <= 1'b0;
+						state <= S_IDLE;
+					end
+					else layer <= layer + 2'd1;   // stay here and re-test
+				end
+				else begin
+					col   <= 6'd0;
+					// TEXT is the layer with no rowscroll table; back, midl and
+					// fore all have one (rs_base 0x200 / 0x600 / 0xA00). The old
+					// code read `layer != L_FORE` but tested it BEFORE the
+					// non-blocking layer increment landed, so it was really
+					// asking about the layer just finished -- same result, but
+					// testing the new layer here needs L_TEXT.
+					state <= (rowscroll_enable && layer != L_TEXT) ? S_RS_REQ
+					                                               : S_TM_REQ;
+				end
+			end
 
 			// -------- rowscroll table --------------------------------
 			S_RS_REQ: begin
@@ -445,7 +493,21 @@ module spi_layers
 			end
 			S_GA_WT: if (sdr_ack == sdr_req) begin
 				gfx_a <= sdr_dout;
-				state <= S_GB_REQ;
+				// An 8x8 char row is only 6 bytes. At byte offset 0 or 2 those
+				// six sit inside the first aligned 8-byte word, so the second
+				// read fetches nothing that gets used. char_off = code*48 +
+				// fine_y*6 makes the offset cycle 0,6,4,2 -- half the rows -- and
+				// skipping the read there removes about a fifth of the text
+				// layer's SDRAM traffic. With the bus at ~96% of a line that is
+				// worth having. The 16x16 layers need 12 bytes and always
+				// straddle, so they still take both reads.
+				if (is_text && gfx_base[2:0] <= 3'd2) begin
+					emit_i <= 4'd0;
+					emit_x <= ($signed({5'd0, col}) * 11'sd8)
+					          - $signed({7'd0, fine_x});
+					state  <= S_EMIT;
+				end
+				else state <= S_GB_REQ;
 			end
 
 			S_GB_REQ: begin
@@ -483,7 +545,7 @@ module spi_layers
 					else begin
 						layer <= layer + 2'd1;
 						// Only the 16x16 layers have rowscroll tables.
-						state <= (rowscroll_enable && layer != L_FORE) ? S_RS_REQ : S_TM_REQ;
+						state <= S_LSTART;
 						if (layer == L_FORE) rowscroll <= 16'd0;
 					end
 				end

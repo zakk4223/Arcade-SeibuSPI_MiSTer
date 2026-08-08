@@ -187,7 +187,6 @@ wire [2:0] scandoubler_fx  = status[5:3];
 wire [1:0] scale           = status[7:6];
 wire       orientation_vert = ~status[10];   // default 0 => vertical
 wire       rotate_cw       = status[11];
-wire       flip_screen_opt = status[12];
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -200,7 +199,9 @@ localparam CONF_STR = {
 	"P1-;",
 	"P1O[10],Orientation,Vert,Horz;",
 	"P1O[11],Rotation,CCW,CW;",
-	"P1O[12],Flip Screen,Off,On;",
+	"-;",
+	"O[20],Vital Signs Panel,Off,On;",
+	"O[21],Freeze Button (Btn 3),Off,On;",
 	"-;",
 	"DIP;",
 	"-;",
@@ -260,7 +261,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 wire clk_sys;   //  57.272727 MHz - video, I/O, sound
 wire clk_cpu;   //  28.636364 MHz - the 386
-wire clk_ram;   // 114.545455 MHz - SDRAM
+wire clk_ram;   //  96.923077 MHz - SDRAM controller
 wire pll_locked;
 
 pll pll
@@ -273,13 +274,33 @@ pll pll
 	.locked  (pll_locked)
 );
 
-wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~pll_locked;
+// Only the ROM download (index 0) holds the board in reset. The DIP transfer
+// (index 254) arrives on the same ioctl bus and must not restart the game.
+wire reset = RESET | status[0] | buttons[1] | (ioctl_download & (ioctl_index == 8'd0)) | ~pll_locked;
+
+///////////////////////////  DIP SWITCHES  ///////////////////////
+
+// MiSTer sends the MRA's <switches> block as ioctl index 254. Only one of these
+// bits is a real hardware DIP: SW1:1, flip screen, which the GAME reads out of
+// INPUTS bit 15 and acts on itself. The service switch is a panel pushbutton on
+// the real cabinet (PORT_SERVICE_NO_TOGGLE), exposed here as a DIP as well
+// because most MiSTer setups have nowhere else to put it.
+reg [7:0] dsw[2];
+always @(posedge clk_sys) begin
+	if (ioctl_wr && (ioctl_index == 8'd254) && ~|ioctl_addr[24:1]) dsw[ioctl_addr[0]] <= ioctl_dout;
+end
+
+wire flip_screen_dip  = dsw[0][0];
+wire service_mode_dip = dsw[0][1];
 
 ///////////////////////////  SDRAM  //////////////////////////////
 
-// ch1 386 program ROM (32 bit)
+// ch1 386 program ROM. The channel returns a 64-bit group and spi_cpu picks the
+// dword it wants out of it -- declaring this 32 bits wide silently truncated the
+// controller's output and zero-extended it back, so every odd dword the 386
+// fetched read as zero and half the instruction stream was blank.
 wire [24:0] sdr_prg_addr;
-wire [31:0] sdr_prg_dout;
+wire [63:0] sdr_prg_dout;
 wire        sdr_prg_req, sdr_prg_ack;
 
 // ch2 tile / char graphics (64 bit)
@@ -294,6 +315,9 @@ wire [15:0] sdr_rw_din;
 wire  [1:0] sdr_rw_be;
 wire        sdr_rw_req, sdr_rw_ack, sdr_rw_rnw;
 
+wire [24:0] sdr_z80_addr;
+wire        sdr_z80_req, sdr_z80_ack;
+
 // ch4 sprite graphics (64 bit)
 wire [24:0] sdr_spr_addr;
 wire [63:0] sdr_spr_dout;
@@ -306,7 +330,8 @@ wire        sdr_pcm_req, sdr_pcm_ack;
 
 wire        sdr_refresh;
 
-sdram sdram
+// USE_CH5 was 0 while nothing read PCM samples; the YMF271 does now.
+sdram #(.USE_CH5(1)) sdram
 (
 	.init      (~pll_locked),
 	.clk       (clk_ram),
@@ -337,6 +362,70 @@ sdram sdram
 wire        rom_ready;
 
 wire [24:0] ldr_addr;
+wire [24:0] ldr_bytes;
+wire [15:0] v_prg, v_iowr, v_tm, v_pal, v_vbl;
+wire  [3:0] v_why;
+wire [31:0] v_eip;
+wire [15:0] v_cs;
+wire        v_irq;
+wire [191:0] v_gdt;
+wire   [7:0] dbg_ctrl;
+
+// ---------------------------------------------------------------------------
+// Freeze the CPU from a controller button -- a debugging aid, NOT a game
+// control, so it is gated on the Vital Signs Panel option being on.
+//
+// Every attempt to catch a particular attract scene by timing a JTAG freeze
+// went wrong: quartus_stp needs about five seconds just to claim the chain, and
+// the ROM download shifts the whole attract sequence by seconds between runs.
+// Several measurements taken that way landed on a completely different scene
+// and were reported as faults that did not exist. A button is a zero-latency
+// trigger that a human can aim by eye, which is the one thing this debugging
+// actually needed.
+//
+// It used to fire on ANY button of either pad, which made the game
+// unplayable the moment anyone pressed shot. It needs an option enabled, and
+// only button 3 triggers it.
+//
+// The video engines keep running (only spi_cpu's cpu_en is gated), so a frozen
+// frame stays on screen and can be instrumented over JTAG at leisure.
+//
+// This has its OWN option, separate from the Vital Signs Panel. It used to be
+// gated on the panel option, which made it useless for the one job it exists
+// for: spi_top drives the output as `panel ? dbg_r : mix_r`, so turning the
+// panel on REPLACES the picture with the telemetry screen. Freezing a frame to
+// look at a rendering fault meant enabling the very thing that hid the frame.
+// The two are independent now -- freeze alone to study the picture, or both
+// together to read the counters with the CPU stopped.
+// ---------------------------------------------------------------------------
+wire dbg_freeze_en = status[21];
+wire any_btn   = dbg_freeze_en & (joystick_p1[6] | joystick_p2[6]);
+reg  any_btn_d, freeze_tgl;
+always @(posedge clk_sys) begin
+	any_btn_d <= any_btn;
+	if (any_btn && !any_btn_d) freeze_tgl <= ~freeze_tgl;
+	if (!dbg_freeze_en) freeze_tgl <= 1'b0;
+end
+
+// The JTAG freeze bit and the button are ORed, so either can stop the core and
+// tools/jtag_server.tcl still works exactly as before.
+wire [7:0] dbg_mask_eff = {dbg_ctrl[7:6], dbg_ctrl[5] | freeze_tgl, dbg_ctrl[4:0]};
+wire  [15:0] v_ovr;
+wire   [1:0] v_ovrl;
+wire   [5:0] v_tcol;
+wire  [15:0] v_ss, v_sy, v_se;
+wire   [4:0] v_len;
+wire  [11:0] v_tdw;
+wire  [15:0] v_sstv, v_stil;
+wire  [15:0] v_dspr, v_nz;
+wire  [31:0] v_sor;
+wire         v_rs, v_fd13;
+wire  [12:0] v_tmdw;
+wire  [95:0] v_scr;
+wire  [17:2] v_ssrc;
+wire  [15:0] v_wspr, v_wtm;
+wire [15:0] v_spc, v_sfr, v_syw, v_sst, v_yov, v_yac;
+wire  [3:0] ldr_part_end;
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
 wire        ldr_req, ldr_rnw;
@@ -359,16 +448,98 @@ rom_loader rom_loader
 	.sdr_rnw        (ldr_rnw),
 	.sdr_ack        (sdr_rw_ack),
 
-	.rom_ready      (rom_ready)
+	.rom_ready      (rom_ready),
+	.bytes_in       (ldr_bytes),
+	.part_end       (ldr_part_end)
 );
 
-// Channel 3 belongs to the loader while downloading and to the board after.
+// Channel 3 belongs to the loader while downloading, then to the ROM checker,
+// and to the board after that.
 // TODO(T5): drive the "after" side from the Z80 program fetcher.
-assign sdr_rw_addr = ldr_addr;
+wire [24:0] chk_addr, peek_addr;
+wire        chk_req, chk_done, peek_req, peek_ack;
+wire  [3:0] chk_ok;
+wire [15:0] chk_passes, chk_fails;
+wire [31:0] chk_sum_prg, chk_sum_chars, chk_sum_tiles, chk_sum_sprites;
+
+spi_romcheck romcheck
+(
+	.clk      (clk_ram),
+	.reset    (RESET | ~pll_locked),
+	.start    (rom_ready),
+	.sdr_addr (chk_addr),
+	.sdr_dout (sdr_rw_dout),
+	.sdr_req  (chk_req),
+	.sdr_ack  (sdr_rw_ack),
+	.done     (chk_done),
+	.ok       (chk_ok),
+	.passes   (chk_passes),
+	.fails    (chk_fails),
+	.sum_prg     (chk_sum_prg),
+	.sum_chars   (chk_sum_chars),
+	.sum_tiles   (chk_sum_tiles),
+	.sum_sprites (chk_sum_sprites)
+);
+
+// Host-driven SDRAM reads over JTAG; see tools/jtag_peek.tcl.
+spi_jtag_peek peek
+(
+	.clk      (clk_ram),
+	.reset    (RESET | ~pll_locked),
+	.enable   (chk_done),
+	.sdr_addr (peek_addr),
+	.sdr_dout (peek_dout),
+	.sdr_req  (peek_req),
+	.sdr_ack  (peek_ack),
+	.sum_prg     (chk_sum_prg),
+	.sum_chars   (chk_sum_chars),
+	.sum_tiles   (chk_sum_tiles),
+	.sum_sprites (chk_sum_sprites),
+	.ok       (chk_ok),
+	.passes   (chk_passes),
+	.fails    (chk_fails),
+	.bytes_in (ldr_bytes),
+	.part_end (ldr_part_end),
+	.c_prg(v_prg), .c_iowr(v_iowr), .c_dma_tm(v_tm),
+	.c_dma_pal(v_pal), .c_vbl(v_vbl), .why(v_why),
+	.eip(v_eip), .cs(v_cs), .irq(v_irq), .gdt(v_gdt),
+	.lay_ovr(v_ovr), .lay_ovr_layer(v_ovrl), .lay_text_col(v_tcol),
+	.spr_scanned(v_ss), .spr_yhit(v_sy), .spr_emitted(v_se), .lay_en(v_len),
+	.dma_text_dw(v_tdw), .spr_starved(v_sstv), .spr_tiles(v_stil),
+	.c_dma_spr(v_dspr), .spr_codes_nz(v_nz), .spr_ram_or(v_sor), .dma_src_spr(v_ssrc),
+	.cpu_wr_spr(v_wspr), .cpu_wr_tm(v_wtm),
+	.frozen(dbg_mask_eff[5]),
+	.rs_en(v_rs), .fd13(v_fd13), .tm_dwords(v_tmdw), .scrolls(v_scr),
+	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
+	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
+	.ctrl(dbg_ctrl)
+);
+
+// Loader owns channel 3 during the download, the checker until it is done,
+// and after that the Z80 and the JTAG peek share it through an arbiter. The
+// Z80 is served first: it stalls a running CPU, while the peek is a human.
+wire [24:0] arb_addr;
+wire        arb_req, arb_ack;
+wire [63:0] sdr_z80_dout, peek_dout;
+
+spi_sdr_arb2 ch3_arb
+(
+	.clk    (clk_ram),
+	.a_addr (sdr_z80_addr), .a_req (sdr_z80_req), .a_ack (sdr_z80_ack),
+	.b_addr (peek_addr),    .b_req (peek_req),    .b_ack (peek_ack),
+	.m_addr (arb_addr),     .m_req (arb_req),     .m_ack (arb_ack),
+	.m_dout (sdr_rw_dout),
+	.a_dout (sdr_z80_dout), .b_dout (peek_dout)
+);
+
+assign arb_ack     = sdr_rw_ack;
+assign sdr_rw_addr = chk_done  ? arb_addr
+                   : rom_ready ? chk_addr : ldr_addr;
 assign sdr_rw_din  = ldr_din;
 assign sdr_rw_be   = ldr_be;
-assign sdr_rw_req  = ldr_req;
-assign sdr_rw_rnw  = ldr_rnw;
+assign sdr_rw_req  = chk_done  ? arb_req
+                   : rom_ready ? chk_req  : ldr_req;
+assign sdr_rw_rnw  = rom_ready ? 1'b1     : ldr_rnw;
 
 // Refresh aggressively while the board is idle; the controller also has its own
 // emergency refresh, which is what covers the download.
@@ -376,28 +547,66 @@ assign sdr_refresh = ~rom_ready;
 
 ///////////////////////////  INPUTS  /////////////////////////////
 
-// Both ports are active low on hardware.
+// Keyboard, for the buttons a pad usually has nowhere sensible to put.
+reg key_1 = 0, key_2 = 0, key_5 = 0, key_6 = 0, key_9 = 0, key_f2 = 0;
+always @(posedge clk_sys) begin
+	reg old_state;
+	old_state <= ps2_key[10];
+	if (old_state != ps2_key[10]) begin
+		case (ps2_key[7:0])
+			8'h16: key_1  <= ps2_key[9];   // start 1
+			8'h1E: key_2  <= ps2_key[9];   // start 2
+			8'h2E: key_5  <= ps2_key[9];   // coin 1
+			8'h36: key_6  <= ps2_key[9];   // coin 2
+			8'h46: key_9  <= ps2_key[9];   // service coin
+			8'h06: key_f2 <= ps2_key[9];   // service mode
+			default: ;
+		endcase
+	end
+end
+
+// Joystick bit assignment. Bits 4 and up are the MRA's <buttons names="..."/>
+// list in order, so this and mra/rdfts.mra have to be changed together:
+//
+//   [3:0] right, left, down, up
+//   [4]   Shot        [5] Bomb        [6] Button 3
+//   [7]   Start       [8] Coin        [9] Service Coin   [10] Test
+//
+// This used to read [7] as coin and [8] as start, which did not line up with
+// the MRA at all -- the MRA named eight entries with two placeholders in the
+// middle, putting Start on bit 9 and Coin on bit 10. Coin and start were
+// therefore mapped to buttons nobody could press.
+wire m_start1 = joystick_p1[7] | key_1;
+wire m_start2 = joystick_p2[7] | key_2;
+wire m_coin1  = joystick_p1[8] | key_5;
+wire m_coin2  = joystick_p2[8] | key_6;
+wire m_svc    = joystick_p1[9] | joystick_p2[9] | key_9;
+wire m_test   = joystick_p1[10] | joystick_p2[10] | key_f2 | service_mode_dip;
+
+// The button half of INPUTS is active low on hardware, so it is inverted here.
+// Bit 15 is NOT: it is a DIPSWITCH field in MAME, which does not take the
+// port's IP_ACTIVE_LOW inversion, and its Off state is the bit CLEAR.
 // INPUTS: P1 u/d/l/r b1/b2/b3, P2 u/d/l/r b1/b2/b3, bit15 = flip screen dip.
-wire [15:0] spi_inputs = ~{
-	flip_screen_opt,
+wire [14:0] spi_buttons = ~{
 	joystick_p2[6], joystick_p2[5], joystick_p2[4],          // P2 b3 b2 b1
 	joystick_p2[0], joystick_p2[1], joystick_p2[2], joystick_p2[3], // P2 r l d u
 	1'b0,
 	joystick_p1[6], joystick_p1[5], joystick_p1[4],          // P1 b3 b2 b1
 	joystick_p1[0], joystick_p1[1], joystick_p1[2], joystick_p1[3]  // P1 r l d u
 };
+wire [15:0] spi_inputs = {flip_screen_dip, spi_buttons};
 
-// SYSTEM: start1, start2, service mode, service coin.
+// SYSTEM: b0 start1, b1 start2, b2 service mode, b3 service coin.
 wire [7:0] spi_system = ~{
 	4'b0000,
-	1'b0,                 // service dip handled through the DIP menu
-	joystick_p1[9] | joystick_p2[9],   // service coin
-	joystick_p2[8],       // start 2
-	joystick_p1[8]        // start 1
+	m_svc,
+	m_test,
+	m_start2,
+	m_start1
 };
 
-// COIN is read by the Z80.
-wire [7:0] spi_coin = ~{6'b000000, joystick_p2[7], joystick_p1[7]};
+// COIN is read by the Z80 at 0x4013; the Z80 latches it into 0x680 for the 386.
+wire [7:0] spi_coin = ~{6'b000000, m_coin2, m_coin1};
 
 ////////////////////////////  BOARD  /////////////////////////////
 
@@ -412,7 +621,22 @@ spi_top spi_top
 	.clk_cpu      (clk_cpu),
 	.clk_ram      (clk_ram),
 	.reset        (reset),
-	.rom_ready    (rom_ready),
+	.rom_ready    (rom_ready & chk_done),
+	.dbg_en       (status[20]),
+	.chk_ok       (chk_ok),
+	.chk_done     (chk_done),
+	.dbg_mask     (dbg_mask_eff),
+	.c_prg(v_prg), .c_iowr(v_iowr), .c_dma_tm(v_tm),
+	.c_dma_pal(v_pal), .c_vbl(v_vbl), .why(v_why),
+	.eip(v_eip), .cs(v_cs), .irq(v_irq), .gdt(v_gdt),
+	.lay_ovr(v_ovr), .lay_ovr_layer(v_ovrl), .lay_text_col(v_tcol),
+	.spr_scanned(v_ss), .spr_yhit(v_sy), .spr_emitted(v_se), .lay_en_out(v_len),
+	.c_dma_spr(v_dspr), .spr_codes_nz(v_nz), .spr_ram_or(v_sor), .dma_src_spr(v_ssrc),
+	.cpu_wr_spr(v_wspr), .cpu_wr_tm(v_wtm),
+	.dma_text_dw(v_tdw), .spr_starved(v_sstv), .spr_tiles(v_stil),
+	.rs_out(v_rs), .fd13_out(v_fd13), .tm_dwords_out(v_tmdw), .scroll_out(v_scr),
+	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
+	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 
 	.sdr_prg_addr (sdr_prg_addr),
 	.sdr_prg_dout (sdr_prg_dout),
@@ -428,6 +652,11 @@ spi_top spi_top
 	.sdr_spr_dout (sdr_spr_dout),
 	.sdr_spr_req  (sdr_spr_req),
 	.sdr_spr_ack  (sdr_spr_ack),
+
+	.sdr_z80_addr (sdr_z80_addr),
+	.sdr_z80_dout (sdr_z80_dout),
+	.sdr_z80_req  (sdr_z80_req),
+	.sdr_z80_ack  (sdr_z80_ack),
 
 	.sdr_pcm_addr (sdr_pcm_addr),
 	.sdr_pcm_dout (sdr_pcm_dout),

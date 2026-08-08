@@ -35,6 +35,14 @@
         0x0480000  6 MB   background tiles
         0x0A80000  12 MB  sprites, three 4 MB plane-pair chunks
     -->
+    <!--
+      These are MAME's rdfts filenames. rdfts is a clone of rdft, so in a merged
+      set most of these files are stored under the PARENT's names. That is fine:
+      MiSTer matches parts by the crc= attribute first (zip_search_by_crc in
+      Main_MiSTer's FileOpenZip) and only falls back to the filename, so every
+      part below resolves out of rdft.zip regardless of how it is named there.
+      Keep the CRCs correct - they are load-bearing, not documentation.
+    -->
     <rom index="0" zip="rdfts.zip|rdft.zip" md5="none">
         <!-- 386 program -->
         <part name="seibu_1.u0259"        crc="e278dddd"/>
@@ -65,8 +73,31 @@
 
     <!--
       INPUTS (0x604) and SYSTEM (0x60C) are active low on hardware; the core
-      inverts them. Bit 15 of INPUTS is the flip-screen DIP, exposed in the OSD
-      rather than here.
+      inverts them.
+
+      The names below map to joystick bits 4 upwards IN ORDER, and SeibuSPI.sv
+      decodes them at exactly those positions - bit 4 Shot ... bit 10 Test.
+      Change one and you must change the other.
+
+      Test is MAME's PORT_SERVICE_NO_TOGGLE: a momentary panel button, held
+      down rather than latched. It is also on the DIP page below for setups
+      with no spare pad button.
     -->
-    <buttons names="Shot,Bomb,Button 3,-,-,Start,Coin,Service" default="A,B,X,-,-,Start,Select,-" count="3"/>
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
+             default="A,B,X,Start,Select,R,L" count="3"/>
+
+    <!--
+      SW1:1 is the board's only DIP. The game reads it from INPUTS bit 15 and
+      flips its own rendering; the core just presents the bit.
+
+      Note the polarity: MAME's PORT_SPECIAL_ONOFF_DIPLOC(0x8000, 0x0000, ...)
+      makes Off = bit clear and On = bit set, and a DIPSWITCH field is NOT
+      subject to the port's IP_ACTIVE_LOW inversion the way the buttons are. So
+      unlike most arcade MRAs this one defaults to 00, not ff, and the core
+      passes bit 15 straight through instead of inverting it.
+    -->
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
 </misterromdescription>

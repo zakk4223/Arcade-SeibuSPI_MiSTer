@@ -196,6 +196,64 @@ int main(int argc, char **argv)
     if (have_spr) cmp32("sprite", spr, ref_spr, 1024);
     else          printf("%-12s skipped (no sprite DMA in the capture window)\n", "sprite");
 
+    // ---- back-to-back triggers -------------------------------------------
+    // run_dma() waits for each transfer to finish before starting the next, so
+    // it never exercises what the game actually does: set the source, trigger,
+    // set a new source, trigger again, all within a few cycles. With a single
+    // pending slot the second and third requests were dropped, and the source
+    // address was sampled when the RAM port was granted rather than when the
+    // trigger fired -- so a late-starting transfer read from a source belonging
+    // to a different request. Sprites were the usual casualty: last of the
+    // three triggers each frame, and sprite RAM stayed all zeros.
+    {
+        for (auto &v : spr) v = 0xDEADBEEF;
+        for (auto &v : tm)  v = 0xDEADBEEF;
+
+        // Fire tilemap and sprite one cycle apart, changing dma_src in between,
+        // and do NOT wait in between.
+        dut->dma_src = (tm_src >> 2) & 0xFFFF;
+        dut->dma_len = tm_len & 0xFFFF;
+        tick();
+        dut->trig_tilemap = 1; tick(); dut->trig_tilemap = 0;
+
+        // The tilemap transfer is still running; retarget and trigger sprites.
+        dut->dma_src = (spr_src >> 2) & 0xFFFF;
+        tick();
+        dut->trig_sprite = 1; tick(); dut->trig_sprite = 0;
+
+        int guard = 0;
+        while (dut->busy || guard < 8) {
+            tick();
+            if (++guard > 200000) { printf("FAIL: back-to-back DMAs never finished\n"); return 1; }
+        }
+
+        size_t untouched = 0;
+        for (auto v : spr) if (v == 0xDEADBEEF) untouched++;
+        if (untouched) {
+            printf("FAIL: sprite DMA dropped -- %zu/1024 dwords never written\n", untouched);
+            fails++;
+        }
+        else if (have_spr) {
+            size_t bad = 0;
+            for (size_t i = 0; i < 1024; i++) {
+                uint32_t r = ref_spr[i*4] | (ref_spr[i*4+1] << 8) |
+                             (ref_spr[i*4+2] << 16) | ((uint32_t)ref_spr[i*4+3] << 24);
+                if (spr[i] != r) bad++;
+            }
+            printf("back-to-back sprite %zu/1024 dwords differ%s\n", bad,
+                   bad ? "  <-- wrong source address" : "");
+            if (bad) fails++;
+        }
+        else printf("back-to-back sprite written (no reference to compare)\n");
+
+        size_t tm_untouched = 0;
+        for (auto v : tm) if (v == 0xDEADBEEF) tm_untouched++;
+        if (tm_untouched) {
+            printf("FAIL: tilemap DMA dropped -- %zu/4096 dwords never written\n", tm_untouched);
+            fails++;
+        }
+    }
+
     if (fails) { printf("FAIL\n"); return 1; }
     printf("PASS: DMA output matches MAME's video RAMs\n");
     delete dut;

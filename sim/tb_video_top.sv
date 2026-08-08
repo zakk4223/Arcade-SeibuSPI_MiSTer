@@ -78,6 +78,9 @@ module tb_video_top
 	output      [5:0] dbg_spr_pix,
 	output signed [10:0] dbg_spr_emitx,
 	output     [15:0] dbg_spr_code,
+	output     [15:0] dbg_spr_tile,
+	output      [3:0] dbg_spr_ry,
+	output      [3:0] dbg_spr_px,
 	output      [8:0] dbg_spr_sx, dbg_spr_sy
 );
 
@@ -123,7 +126,7 @@ module tb_video_top
 		.scroll_bx(scroll_bx), .scroll_by(scroll_by),
 		.scroll_mx(scroll_mx), .scroll_my(scroll_my),
 		.scroll_fx(scroll_fx), .scroll_fy(scroll_fy),
-		.rowscroll_enable(rowscroll_enable),
+		.rowscroll_enable(rowscroll_enable), .layer_off(layer_enable[3:0]),
 		.fore_layer_d13(fore_layer_d13),
 		.rf2_layer_bank(rf2_layer_bank),
 		.bg_fore_pos(15'h4000),
@@ -139,7 +142,8 @@ module tb_video_top
 		.dbg_rowscroll(dbg_rowscroll), .dbg_xstart(dbg_xstart),
 		.dbg_latch(dbg_latch), .dbg_finex(dbg_finex),
 		.dbg_col(dbg_col), .dbg_emitx(dbg_emitx),
-		.dbg_pix(dbg_pix), .dbg_emiti(dbg_emiti)
+		.dbg_pix(dbg_pix), .dbg_emiti(dbg_emiti),
+		.dbg_overruns(), .dbg_ovr_layer(), .dbg_text_col()
 	);
 
 	wire  [9:0] spr_ra;
@@ -164,7 +168,11 @@ module tb_video_top
 		.busy(spr_busy),
 		.dbg_we(dbg_spr_we), .dbg_state(dbg_spr_state), .dbg_index(dbg_spr_index),
 		.dbg_pix(dbg_spr_pix), .dbg_emitx(dbg_spr_emitx), .dbg_code(dbg_spr_code),
-		.dbg_sx(dbg_spr_sx), .dbg_sy(dbg_spr_sy)
+		.dbg_sx(dbg_spr_sx), .dbg_sy(dbg_spr_sy),
+		.dbg_scanned(), .dbg_yhit(), .dbg_emitted(),
+		.dbg_starved(), .dbg_tiles(),
+		.dbg_codes_nz(), .dbg_spr_or(),
+		.dbg_tile_code(dbg_spr_tile), .dbg_ry(dbg_spr_ry), .dbg_px(dbg_spr_px)
 	);
 
 	spi_mixer mixer
