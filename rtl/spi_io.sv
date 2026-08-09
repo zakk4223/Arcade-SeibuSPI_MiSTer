@@ -59,8 +59,47 @@ module spi_io
 	output reg        sndfifo_wr,
 	input             sndfifo_full,     // 386 -> Z80 FIFO full flag
 	input       [7:0] coin_latch,       // latched by the Z80's coin write
-	output reg        coin_latch_rd
+	output reg        coin_latch_rd,
+
+	// ---- SXX2C cartridge ------------------------------------------------
+	input             set_sxx2c,
+	// Z80 -> 386 FIFO. On the cartridge this REPLACES the coin latch at 0x680;
+	// coins arrive as a FIFO message instead of through sb_coin_r.
+	input       [7:0] fifo2_q,
+	input             fifo2_empty,
+	output reg        fifo2_rd,
+	// Z80 program download. The Z80's 256 KB is RAM here, pushed a byte at a
+	// time through 0x688 with an auto-incrementing pointer and released by
+	// 0x68C d0, which also resets the pointer (z80_prg_transfer_w /
+	// z80_enable_w). The pointer and the payload live in THIS clock domain so
+	// no write can be lost crossing to the SDRAM side; the CPU is stalled
+	// instead, which is also what the real board does when it steals the bus.
+	output reg [17:0] z80dl_addr,
+	output reg  [7:0] z80dl_data,
+	output reg        z80dl_req,
+	input             z80dl_ack,
+	output            z80dl_stall,
+	output reg        z80_rst_n
 );
+
+	// ------------------------------------------------------------------
+	// Z80 program download state (SXX2C). 19 bits so bit 18 is the "past the
+	// end of the 256 KB region" guard rather than a silent wrap.
+	// ------------------------------------------------------------------
+	reg [18:0] dl_pos;
+	reg        dl_pend;
+	reg        dl_ack_s1, dl_ack_s2;
+
+	// The CPU is held off while a pushed byte is still in flight to SDRAM.
+	// Asserted in the CPU's own clock domain on the write itself, so there is
+	// no window in which a second byte could be accepted and dropped; only the
+	// release crosses back, and a late release just costs cycles.
+	assign z80dl_stall = dl_pend;
+
+	// NOTE: everything this block would have driven lives in the write block
+	// below instead. Quartus rejects a net driven from two always blocks --
+	// "Can't resolve multiple constant drivers" -- and Verilator's -Wall does
+	// NOT, which is the same trap section 11 records for spi_mixer's RGB.
 
 	// ------------------------------------------------------------------
 	// Writes
@@ -109,7 +148,19 @@ module spi_io
 		dma_sprite    <= 1'b0;
 		sndfifo_wr    <= 1'b0;
 
+		// Z80 download handshake back from the SDRAM side.
+		dl_ack_s1 <= z80dl_ack;
+		dl_ack_s2 <= dl_ack_s1;
+		if (dl_pend && (dl_ack_s2 == z80dl_req)) dl_pend <= 1'b0;
+
 		if (reset) begin
+			dl_pos    <= 19'd0;
+			dl_pend   <= 1'b0;
+			z80dl_req <= 1'b0;
+			// Held in reset until the 386 releases it. On SXX2E the Z80 runs
+			// from ROM and must not be gated, so this reads as 1 there.
+			z80_rst_n <= ~set_sxx2c;
+
 			layer_enable     <= 5'b00000;   // MAME video_start: 0 = all layers enabled
 
 			rf2_layer_bank   <= 3'd0;
@@ -192,7 +243,25 @@ module spi_io
 					sndfifo_din <= wdata[7:0];
 					sndfifo_wr  <= 1'b1;
 				end
-				11'h68C: if (be[2]) rf2_layer_bank <= wdata[18:16];  // 0x68E, SXX2F/SYS386I
+				11'h68C: begin
+					// 0x68C z80_enable_w: d0 releases the Z80, and the write
+					// resets the transfer pointer whichever way d0 goes.
+					if (be[0] && set_sxx2c) begin
+						z80_rst_n <= wdata[0];
+						dl_pos    <= 19'd0;
+					end
+					if (be[2]) rf2_layer_bank <= wdata[18:16];  // 0x68E
+				end
+
+				// 0x688 z80_prg_transfer_w. MAME drops writes past the end of
+				// the region and stops advancing, so do the same.
+				11'h688: if (be[0] && set_sxx2c && !dl_pos[18]) begin
+					z80dl_addr <= dl_pos[17:0];
+					z80dl_data <= wdata[7:0];
+					z80dl_req  <= ~z80dl_req;
+					dl_pend    <= 1'b1;
+					dl_pos     <= dl_pos + 19'd1;
+				end
 
 				default: ;
 			endcase
@@ -237,8 +306,11 @@ module spi_io
 			11'h604: rdata = {16'hFFFF, inputs};
 			11'h608: rdata = 32'hFFFF_FFFF;
 			11'h60C: rdata = {24'hFFFFFF, system};
-			11'h680: rdata = {24'd0, coin_latch};
-			11'h684: rdata = {30'd0, 1'b0, ~sndfifo_full}; // d1=0: nothing from the Z80 yet
+			// On SXX2C 0x680 is the Z80->386 FIFO, not the coin latch.
+			11'h680: rdata = {24'd0, set_sxx2c ? fifo2_q : coin_latch};
+			// d1 = _EF of the Z80->386 FIFO: 0 while it is empty. SXX2E has no
+			// such FIFO (m_soundfifo[1] is a nullptr there) so it reads 0.
+			11'h684: rdata = {30'd0, set_sxx2c & ~fifo2_empty, ~sndfifo_full};
 			11'h6DC: rdata = 32'h0000_0000;
 			default: rdata = 32'h0000_0000;
 		endcase
@@ -246,8 +318,14 @@ module spi_io
 
 	// Reading 0x680 clears the coin latch (sb_coin_r).
 	always @(posedge clk) begin
-		if (reset) coin_latch_rd <= 1'b0;
-		else       coin_latch_rd <= rd && (dw == 11'h680);
+		if (reset) begin
+			coin_latch_rd <= 1'b0;
+			fifo2_rd      <= 1'b0;
+		end
+		else begin
+			coin_latch_rd <= rd && (dw == 11'h680) && !set_sxx2c;
+			fifo2_rd      <= rd && (dw == 11'h680) &&  set_sxx2c;
+		end
 	end
 
 endmodule

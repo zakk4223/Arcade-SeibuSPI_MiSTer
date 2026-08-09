@@ -193,10 +193,10 @@ the same game.
 
 ### SXX2C pre-flashed: what is built, and what is not
 
-**Built and verified (2026-08-09), but the core cannot boot `rdft` yet.** The
-ROM side is done; the board side is not.
+**Built 2026-08-09. Not yet run on hardware.** The ROM side is verified in
+simulation; the board side is written and lint-clean but unexercised.
 
-Done:
+ROM side:
 
 * `mra/rdft.mra` -- the pre-flashed cartridge MRA. It assembles the 2 MB flash
   image out of the cartridge's own sound ROMs with `offset`/`length`, carries
@@ -214,20 +214,61 @@ Done:
 * `tb_rom_loader` runs both tables, which is the first coverage those four
   scatter modes have ever had.
 
-Not done -- this is the board half, and none of it is started:
+The board half, built 2026-08-09 and lint-clean but NOT yet run:
 
-* **Z80 program RAM.** The 386 pushes 256 KB a byte at a time to port 0x688
-  (auto-incrementing) and releases the Z80 with 0x68C d0; 0x68C also resets the
-  pointer. Today Z80 code is a read-only SDRAM region behind an 8-byte line
-  buffer, so this needs a write path. ch3 is already read/write -- the loader
-  uses it -- and the Z80 is held in reset for the whole transfer, so the line
-  buffer needs no invalidation beyond that.
-* **The second FIFO**, Z80 -> 386: Z80 writes 0x4008, the 386 reads 0x680. Note
-  this REPLACES `sb_coin_r` at 0x680 on the cartridge, so the coin path becomes
-  a FIFO message rather than the latch SXX2E uses.
-* **Map differences** in `spi_io`: 0x680's read source, 0x68E becoming
-  `rf2_layer_bank_w`, and 0x600-0x603 as a no-op write.
-* **The jumpers port** at Z80 0x400a.
+* **Z80 program RAM.** `spi_io` keeps the transfer pointer and the payload in
+  the 386's own clock domain and asserts `z80dl_stall`, which `spi_cpu` folds
+  into `mem_accept` exactly like the video-DMA hold. So the CPU waits for each
+  byte to retire into SDRAM instead of a FIFO trying to keep up -- nothing can
+  be dropped, and stalling the 386 for this is what the real board does anyway.
+  256 KB at roughly one SDRAM round trip each is about 27 ms of boot.
+* **`spi_sdr_arb3`** replaces the two-port ch3 arbiter. The third port is a
+  write, and everything is serialised in the arbiter rather than by muxing
+  `sdram.sv`'s request lines: those use a toggle handshake, so switching a mux
+  with a transaction outstanding would hand one master's ack to another.
+* **The second FIFO**, Z80 -> 386. The Z80 writes 0x4008 -- the same address it
+  READS the other FIFO from -- and the 386 reads 0x680, which on this board is
+  the FIFO and not `sb_coin_r`. So on a cartridge the coin bits reach the 386
+  as a message the sound program sends. 0x684 d1 becomes a real `_EF` flag
+  instead of the constant 0 that SXX2E's missing device forces.
+* **0x68C** gates the Z80's reset and resets the pointer; **0x68E** already
+  existed as `rf2_layer_bank`; **0x400a** returns the jumpers, tied to all-ones
+  because no update-mode jumper is fitted and a pre-flashed image skips the
+  updater on content anyway.
+
+Every one of those paths is gated on `set_sxx2c`, and `z80_rst_n` ties high
+when it is clear, so an SXX2E build should be behaviourally identical -- that
+is the first thing to check on hardware, before trying the cartridge.
+
+**First hardware run, 2026-08-09: two bugs, both found by measurement.** Neither
+was in the RTL the simulation covers.
+
+**1. The mod byte must come BEFORE the index-0 ROM in the MRA.** Main_MiSTer
+sends `<rom>` elements in file order, so an index-1 that follows the image
+arrives after the loader has already walked its table -- the whole download
+then runs against the SXX2E layout. The symptom was a 386 executing garbage in
+real mode at 0000:0400, and the giveaway was in the SDRAM dump: program lanes 0
+and 1 correct, lanes 2 and 3 wrong. Those are exactly the two the SXX2E table
+happens to place identically, because its parts 0 and 1 are also M_32_B0 and
+M_32_B1. `bytes_in` was no help -- it counts what arrived, not which table was
+used, so it read the correct 23,265,280 either way.
+
+**2. JP1 all-ones is UPDATE MODE, not "no jumper fitted".** MAME's `sxx2c`
+port makes bits [1:0] = 0x3 "Update" -- its default -- and 0x0 "Normal", with
+bits [7:2] unused and active low. Tying the port to 0xFF therefore asked for
+the reflash, and the sound program sat in that path waiting for data a
+pre-flashed core never sends. Both CPUs ended up in poll loops: the 386
+oscillating over two instructions at 0x26D66x, the Z80 over 0x015D-0162 with
+its FIFO reads frozen at 10 and no YMF writes at all. 0xFC is the right value,
+and update mode is not reachable without the flash write path anyway.
+
+**What the first run did prove**, before the jumper stopped it: the SXX2C part
+table loads the program byte-exact (reset vector `E9 0D FF 00 ... 80 4A 4A 36`
+verified in SDRAM), the 386 reaches protected mode and runs (CS 0018), video
+DMA fires every frame, and **the Z80 program download works** -- the Z80 was
+executing downloaded code at PC 0x15D-0x162, which it could only do if the
+0x688 transfer and the 0x68C release both worked. Those are the two genuinely
+new mechanisms.
 
 Everything else the cartridge needs is already there: SEI252 sprite decryption
 and the SEI252 tile keys are the same as `rdfts` (both are `init_sei252`), the

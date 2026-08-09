@@ -14,6 +14,16 @@ module spi_top
 	input             clk_ram,     // 114.545455 MHz - SDRAM
 	input             reset,
 	input             rom_ready,
+
+	// SXX2C cartridge board. Selected by the MRA's mod byte; see rom_loader.sv.
+	input             set_sxx2c,
+	input       [7:0] jumpers,
+	// Z80 program download -> SDRAM ch3 write port
+	output     [24:0] z80dl_sdr_addr,
+	output     [15:0] z80dl_sdr_din,
+	output      [1:0] z80dl_sdr_be,
+	output            z80dl_sdr_req,
+	input             z80dl_sdr_ack,
 	input             dbg_en,
 	input       [3:0] chk_ok,
 	input             chk_done,
@@ -177,8 +187,58 @@ module spi_top
 		else if (vbl_rise) vbl_toggle <= ~vbl_toggle;
 	end
 
+	// ------------------------------------------------------------------
+	// Z80 program download bridge (SXX2C)
+	//
+	// spi_io owns the pointer and the payload on clk_cpu and holds the 386 off
+	// until the byte retires, so nothing is lost crossing here. This side just
+	// turns the request toggle into one 16-bit masked SDRAM write. The byte
+	// lane comes from bit 0 of the address, and the data is duplicated into
+	// both halves so the enable alone decides which lands.
+	// ------------------------------------------------------------------
+	wire  [7:0] fifo2_q;
+	wire        fifo2_empty, fifo2_rd;
+	wire [17:0] z80dl_addr;
+	wire  [7:0] z80dl_data;
+	wire        z80dl_req;
+	wire        z80dl_stall;
+	wire        z80_rst_n;
+
+	reg dl_req_s1, dl_req_s2, dl_req_s3;
+	always @(posedge clk_ram) begin
+		dl_req_s1 <= z80dl_req;
+		dl_req_s2 <= dl_req_s1;
+		dl_req_s3 <= dl_req_s2;
+		if (reset) {dl_req_s1, dl_req_s2, dl_req_s3} <= 3'b000;
+	end
+	wire dl_start = (dl_req_s2 != dl_req_s3);
+
+	reg [24:0] dl_sdr_addr;
+	reg [15:0] dl_sdr_din;
+	reg  [1:0] dl_sdr_be;
+	reg        dl_sdr_req;
+	always @(posedge clk_ram) begin
+		if (reset) begin
+			dl_sdr_req <= 1'b0;
+		end
+		else if (dl_start) begin
+			dl_sdr_addr <= SDR_Z80_BASE + {7'd0, z80dl_addr[17:1], 1'b0};
+			dl_sdr_din  <= {z80dl_data, z80dl_data};
+			dl_sdr_be   <= z80dl_addr[0] ? 2'b10 : 2'b01;
+			dl_sdr_req  <= ~dl_sdr_req;
+		end
+	end
+	assign z80dl_sdr_addr = dl_sdr_addr;
+	assign z80dl_sdr_din  = dl_sdr_din;
+	assign z80dl_sdr_be   = dl_sdr_be;
+	assign z80dl_sdr_req  = dl_sdr_req;
+
+	// Back to clk_cpu: spi_io clears its pending flag when this matches.
+	wire z80dl_ack = z80dl_sdr_ack;
+
 	spi_cpu cpu
 	(
+		.z80dl_stall (z80dl_stall),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),
@@ -266,6 +326,16 @@ module spi_top
 	// analyses those transfers normally.
 	spi_io io
 	(
+		.set_sxx2c  (set_sxx2c),
+		.fifo2_q    (fifo2_q),
+		.fifo2_empty(fifo2_empty),
+		.fifo2_rd   (fifo2_rd),
+		.z80dl_addr (z80dl_addr),
+		.z80dl_data (z80dl_data),
+		.z80dl_req  (z80dl_req),
+		.z80dl_ack  (z80dl_ack),
+		.z80dl_stall(z80dl_stall),
+		.z80_rst_n  (z80_rst_n),
 		.clk              (clk_cpu),
 		.reset            (cpu_reset),
 
@@ -317,6 +387,12 @@ module spi_top
 
 	spi_sound sound
 	(
+		.set_sxx2c  (set_sxx2c),
+		.jumpers    (jumpers),
+		.fifo2_q    (fifo2_q),
+		.fifo2_empty(fifo2_empty),
+		.fifo2_rd   (fifo2_rd),
+		.z80_rst_n  (z80_rst_n),
 		.clk        (clk_sys),
 		.reset      (vid_reset),
 

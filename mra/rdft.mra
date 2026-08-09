@@ -65,6 +65,22 @@
         0x0480000  6 MB   background tiles
         0x0A80000  12 MB  sprites, three 4 MB plane-pair chunks
     -->
+
+    <!--
+      Mod byte: bit 0 selects the SXX2C part table and board wiring in the core.
+      rdfts.mra leaves this at 0.
+
+      IT MUST COME BEFORE THE index="0" ROM. Main_MiSTer sends the <rom>
+      elements in file order, so an index-1 that follows the image arrives
+      AFTER the loader has already walked its table -- the download then runs
+      against the SXX2E layout and every part after the second lands wrong.
+      That is not hypothetical: it is what this file did first, and the symptom
+      was a 386 executing garbage at 0000:0400 with program lanes 2 and 3
+      corrupt, lanes 0 and 1 intact, because those are the two the SXX2E table
+      happens to place identically.
+    -->
+    <rom index="1"><part>01</part></rom>
+
     <rom index="0" zip="rdft.zip" md5="none">
         <!-- 386 program: four byte lanes, unlike rdfts's two bytes + one word -->
         <part name="raiden-fi_prg0_121196.u0211" crc="adcb5dbc"/>
@@ -99,11 +115,6 @@
         <part repeat="0x0269BD">FF</part>
     </rom>
 
-    <!--
-      Mod byte: bit 0 selects the SXX2C part table and board wiring in the
-      core. rdfts.mra leaves this at 0.
-    -->
-    <rom index="1"><part>01</part></rom>
 
     <!--
       Same control layout as rdfts; the names map to joystick bits 4 upwards IN

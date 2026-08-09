@@ -534,14 +534,29 @@ spi_jtag_peek peek
 // Z80 is served first: it stalls a running CPU, while the peek is a human.
 wire [24:0] arb_addr;
 wire        arb_req, arb_ack;
+wire [24:0] z80dl_sdr_addr;
+wire [15:0] z80dl_sdr_din;
+wire  [1:0] z80dl_sdr_be;
+wire        z80dl_sdr_req, z80dl_sdr_ack;
 wire [63:0] sdr_z80_dout, peek_dout;
 
-spi_sdr_arb2 ch3_arb
+// Three masters on ch3 once the ROM check is done: the Z80 fetch, the JTAG
+// peek, and -- on SXX2C -- the 386 writing the Z80's program into RAM. The
+// arbiter serialises whole round trips, so the channel's toggle handshake is
+// never handed to the wrong master. See rtl/spi_sdr_arb3.sv.
+wire [15:0] arb_din;
+wire  [1:0] arb_be;
+wire        arb_rnw;
+
+spi_sdr_arb3 ch3_arb
 (
 	.clk    (clk_ram),
 	.a_addr (sdr_z80_addr), .a_req (sdr_z80_req), .a_ack (sdr_z80_ack),
 	.b_addr (peek_addr),    .b_req (peek_req),    .b_ack (peek_ack),
+	.c_addr (z80dl_sdr_addr), .c_din (z80dl_sdr_din), .c_be (z80dl_sdr_be),
+	.c_req  (z80dl_sdr_req),  .c_ack (z80dl_sdr_ack),
 	.m_addr (arb_addr),     .m_req (arb_req),     .m_ack (arb_ack),
+	.m_din  (arb_din),      .m_be  (arb_be),      .m_rnw (arb_rnw),
 	.m_dout (sdr_rw_dout),
 	.a_dout (sdr_z80_dout), .b_dout (peek_dout)
 );
@@ -549,11 +564,12 @@ spi_sdr_arb2 ch3_arb
 assign arb_ack     = sdr_rw_ack;
 assign sdr_rw_addr = chk_done  ? arb_addr
                    : rom_ready ? chk_addr : ldr_addr;
-assign sdr_rw_din  = ldr_din;
-assign sdr_rw_be   = ldr_be;
+assign sdr_rw_din  = chk_done  ? arb_din  : ldr_din;
+assign sdr_rw_be   = chk_done  ? arb_be   : ldr_be;
 assign sdr_rw_req  = chk_done  ? arb_req
                    : rom_ready ? chk_req  : ldr_req;
-assign sdr_rw_rnw  = rom_ready ? 1'b1     : ldr_rnw;
+assign sdr_rw_rnw  = chk_done  ? arb_rnw
+                   : rom_ready ? 1'b1     : ldr_rnw;
 
 // Refresh aggressively while the board is idle; the controller also has its own
 // emergency refresh, which is what covers the download.
@@ -636,6 +652,21 @@ spi_top spi_top
 	.clk_ram      (clk_ram),
 	.reset        (reset),
 	.rom_ready    (rom_ready & chk_done),
+
+	.set_sxx2c      (set_sxx2c),
+	// JP1, SXX2C only. MAME's sxx2c port: bits [1:0] = 0x3 "Update" (which is
+	// its default), 0x0 "Normal"; bits [7:2] are unused IP_ACTIVE_LOW and read
+	// as 1. All-ones is therefore UPDATE MODE, and that is not inert -- the
+	// sound program sits in the reflash path waiting for data a pre-flashed
+	// core never sends, which deadlocks both CPUs in poll loops. Normal it is;
+	// update mode would need the flash write path this core does not have.
+	.jumpers        (8'hFC),
+	.z80dl_sdr_addr (z80dl_sdr_addr),
+	.z80dl_sdr_din  (z80dl_sdr_din),
+	.z80dl_sdr_be   (z80dl_sdr_be),
+	.z80dl_sdr_req  (z80dl_sdr_req),
+	.z80dl_sdr_ack  (z80dl_sdr_ack),
+
 	.dbg_en       (status[20]),
 	.chk_ok       (chk_ok),
 	.chk_done     (chk_done),

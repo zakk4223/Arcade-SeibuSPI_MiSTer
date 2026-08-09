@@ -58,6 +58,14 @@ module spi_sound
 	// ---- telemetry --------------------------------------------------------
 	output reg [15:0] dbg_z80_pc,
 	output reg [15:0] dbg_fifo_rd,
+
+	// ---- SXX2C cartridge -------------------------------------------------
+	input             set_sxx2c,
+	input       [7:0] jumpers,      // Z80 0x400a, update-mode select on SXX2C
+	output reg  [7:0] fifo2_q,      // Z80 -> 386 FIFO head, read by 0x680
+	output            fifo2_empty,
+	input             fifo2_rd,     // level from clk_cpu; edge detected here
+	input             z80_rst_n,    // 0 = hold the Z80 in reset (0x68C d0)
 	output reg [15:0] dbg_ymf_wr,
 	output     [15:0] dbg_stall,
 	output     [15:0] dbg_ymf_overrun,
@@ -85,7 +93,10 @@ module spi_sound
 
 	T80s #(.Mode(0), .T2Write(1), .IOWait(1)) z80
 	(
-		.RESET_n (~reset),
+		// On SXX2C the Z80 stays in reset until the 386 has pushed its whole
+		// program into RAM and released it with 0x68C d0. On SXX2E z80_rst_n is
+		// tied high, because there the program is a ROM and nothing gates it.
+		.RESET_n (~reset & z80_rst_n),
 		.CLK     (clk),
 		.CEN     (ce_z80),
 		.WAIT_n  (z80_wait_n),
@@ -267,6 +278,43 @@ module spi_sound
 	end
 
 	// ------------------------------------------------------------------
+	// Z80 -> 386 FIFO (m_soundfifo[1]), SXX2C only
+	//
+	// The Z80 writes 0x4008 -- the same address it READS the other FIFO from --
+	// and the 386 reads 0x680, which on this board is the FIFO rather than the
+	// coin latch. So on a cartridge the coin bits reach the 386 as a message
+	// the sound program sends, not through sb_coin_r.
+	//
+	// SXX2E has no such device: m_soundfifo[1] is a nullptr there, which is why
+	// its 0x684 d1 reads a constant 0. Pushes are gated so the SXX2E build does
+	// not quietly fill a FIFO nothing drains.
+	// ------------------------------------------------------------------
+	reg [7:0] f2_mem [0:511];
+	reg [8:0] f2_wp, f2_rp;
+
+	assign fifo2_empty = (f2_wp == f2_rp);
+	wire   f2_full     = ((f2_wp + 9'd1) == f2_rp);
+
+	reg fifo2_rd_d;
+	always @(posedge clk) fifo2_rd_d <= fifo2_rd;
+	wire fifo2_rd_pulse = fifo2_rd & ~fifo2_rd_d;
+
+	always @(posedge clk) begin
+		if (reset) begin
+			f2_wp <= 9'd0;
+			f2_rp <= 9'd0;
+		end
+		else begin
+			if (set_sxx2c && wr_end && b_io && (bus_addr[12:0] == 13'h008) && !f2_full) begin
+				f2_mem[f2_wp] <= bus_data;
+				f2_wp <= f2_wp + 9'd1;
+			end
+			if (fifo2_rd_pulse && !fifo2_empty) f2_rp <= f2_rp + 9'd1;
+		end
+		fifo2_q <= f2_mem[f2_rp];
+	end
+
+	// ------------------------------------------------------------------
 	// Coin latch (spi_coin_w / sb_coin_r)
 	//
 	// The Z80 writes the coin bits and the chip latches 0xA0 | data; the 386
@@ -349,6 +397,7 @@ module spi_sound
 			case (z80_addr[12:0])
 				13'h008: z80_di = fifo_q;
 				13'h009: z80_di = {6'd0, ~fifo_empty, 1'b0};
+				13'h00A: z80_di = jumpers;   // SXX2C only; MAME leaves it a TODO
 				13'h013: z80_di = coin;
 				default: z80_di = 8'hFF;
 			endcase

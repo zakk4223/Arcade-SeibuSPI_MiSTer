@@ -21,6 +21,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_debug.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_romcheck.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_jtag_peek.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb2.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb3.sv
 
 # Sound: Z80 + YMF271. The T80 core is VHDL, so it comes in through its own qip.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sound.sv
