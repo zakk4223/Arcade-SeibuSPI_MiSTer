@@ -677,8 +677,8 @@ runs the C algorithm and the RTL over the same pseudo-random inputs.
 by 1.030 ns (TNS -32.487). Every failing path was internal to the CPU, from
 `IND[0]` to the microcode ROM's address register — nothing to do with the glue
 logic. Upstream z386_MiSTer ships PLL profiles at 50 / 65 / 85 MHz, so the core
-can go faster, but they build with Quartus **Standard** and keep a `seed_sweep.py`
-in the repo, which says something about how hard 85 MHz is to hit.
+can go faster, but it also keeps a `seed_sweep.py` in the repo, which says
+something about how hard the top of that range is to hit.
 
 Halving the CPU clock fixes it with margin and improves accuracy at the same
 time: 28.64 MHz is far closer to the board's real 386DX-25 than 57.27 MHz was.
@@ -840,11 +840,11 @@ sim/                      Verilator testbenches for the decrypt units
 7. **DS2404** — the game reads it; a stub returning 0 may or may not satisfy the
    boot checks. `spi_ds2404_unknown_r` returning 0x00 is what MAME does.
 8. **Toolchain.** Quartus Prime 17.0.0 Lite at `~/intelFPGA_lite/17.0/quartus`
-   (`bin/quartus_sh`), target part `5CSEBA6U23I7` confirmed present. Note this is
-   *Lite*, whereas MiSTer officially builds with 17.0.x **Standard** — watch for IP
-   or fitter differences, and treat resource/timing numbers as indicative until
-   confirmed on a Standard install. Verilator 5.050 is also available for lint and
-   decrypt-unit unit tests.
+   (`bin/quartus_sh`), target part `5CSEBA6U23I7` confirmed present. This is the
+   normal MiSTer toolchain — Lite is what the platform is built with and what
+   `5CSEBA6` is supported by — so resource and timing numbers here are real, not
+   provisional. Verilator 5.050 is also available for lint and decrypt-unit unit
+   tests.
 
 ---
 
