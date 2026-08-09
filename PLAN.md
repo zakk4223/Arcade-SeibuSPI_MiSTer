@@ -1835,6 +1835,27 @@ nothing else changed. Two lessons, both already in this file and both worth
 having relearned: read the Setup Summary rather than the exit status, and when
 the failing endpoints are nowhere near the change, suspect placement.
 
+### Confirmed on hardware, 2026-08-09
+
+Deployed to the MiSTer at 192.168.1.125 and measured. The core boots and runs
+the attract sequence correctly: Seibu Kaihatsu logo, RAIDEN FIGHTERS title with
+the plane, the ACE PILOTS table, the propeller close-up, and the jungle title
+with heavy sprite traffic -- which is the scene whose blended background used to
+dominate the frame diff. No banding, no wrong colours, nothing out of place.
+
+`slop vitals`: state running, CS:EIP 0018:00203F57, all layers enabled, vblank
+advancing at ~54 Hz, layer overruns 0, and **sprite starvation not accumulating**
+(static across samples while vblank climbed; the non-zero total is from earlier
+in the session). `slop sound`: Z80 PC changing, FIFO reads and YMF writes
+climbing, 12-13 voices sounding, **0 PCM overruns** -- unchanged by the re-fit.
+
+**Screenshots are far easier than the capture card.** `echo "screenshot" >
+/dev/MiSTer_cmd` writes a PNG to `/media/fat/screenshots/<core>/`, at the core's
+native 320x240 and *before* rotation, so it is directly comparable with MAME's
+frame and with tb_video's output. No Elgato, no format negotiation, no black
+first frame, and no risk of photographing the room. Use this first; section 9b's
+capture-card advice is for when actual scanout needs checking.
+
 ### What it uncovered: the left edge is a bank race
 
 REAL went slightly UP, 158 -> 185, and that turned out to be the interesting
