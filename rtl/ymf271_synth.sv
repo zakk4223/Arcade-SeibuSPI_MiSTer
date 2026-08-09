@@ -116,10 +116,10 @@ module ymf271_synth
 	// ------------------------------------------------------------------
 	// Per-slot dynamic state, feedback state and sample-line cache.
 	// ------------------------------------------------------------------
-	// {stepptr[39:0], volume[26:0], env_state[1:0], active, lfo_phase[15:0]}
-	reg [85:0] st_mem [0:47];
+	// {stepptr[39:0], volume[26:0], env_state[1:0], active, lfo_phase[25:0]}
+	reg [95:0] st_mem [0:47];
 	reg  [5:0] st_ra, st_wa;
-	reg [85:0] st_q, st_wd;
+	reg [95:0] st_q, st_wd;
 	reg        st_we;
 
 	always @(posedge clk) begin
@@ -170,7 +170,7 @@ module ymf271_synth
 	reg signed [26:0] volume;
 	reg  [1:0] env_state;
 	reg        active;
-	reg [15:0] lfo_phase;
+	reg [25:0] lfo_phase;
 
 	reg signed [26:0] fb0, fb1;
 
@@ -258,7 +258,16 @@ module ymf271_synth
 	// ---- LFO --------------------------------------------------------------
 	// update_lfo() advances the phase first, then indexes both tables with the
 	// new value, so everything here uses lfo_next.
-	wire [15:0] lfo_next = lfo_phase + {6'd0, YMF_LFO_STEP[p_lfofreq]};
+	//
+	// 26 bits: an 8 bit index into the 256-entry shapes over 18 fractional
+	// bits. MAME keeps only 8 fractional bits, which truncates the step to
+	// zero for the 161 slowest of the 256 settings -- everything below 0.673
+	// Hz, where Table 2-6-2 goes down to 0.00066 Hz. Those slots do not lose
+	// their LFO quietly: a stalled phase sits at index 0, the peak of all
+	// three amplitude shapes, so they get a fixed attenuation instead of a
+	// sweep. Ten more fractional bits is the least that keeps setting 0 above
+	// zero, and costs ten bits a slot in st_mem.
+	wire [25:0] lfo_next = lfo_phase + {6'd0, YMF_LFO_STEP[p_lfofreq]};
 
 	// m_lut_alfo: silence, falling ramp, square, triangle -- all cheap enough
 	// to build from the phase rather than store.
@@ -269,6 +278,12 @@ module ymf271_synth
 		(p_lfowave == 2'd2) ? (lfo_idx_r[7] ? 17'd0 : 17'd65536) :
 		                      (lfo_idx_r[7] ? alfo_tri : (17'd65536 - alfo_tri));
 
+	// calculate_slot_volume()'s tremolo, with one correction: alfo peaks at
+	// 65536, so the constant here is the SWING and 65536 minus it is the gain
+	// at full modulation. MAME uses the gains themselves -- 65536/10^(dB/20)
+	// for Table 2-6-3's 5.90625, 11.8125 and 23.625 dB -- which lands the gain
+	// at 65536-K instead, giving 6.1, 2.6 and 0.6 dB: the deepest ams setting
+	// comes out the shallowest. YMF_ALFO_K holds the complements.
 	wire [32:0] alfo_scaled = alfo_r * YMF_ALFO_K[p_ams];
 	wire [17:0] lfo_vol_c   = 18'd65536 - {2'd0, amul_r[31:16]};
 
@@ -579,11 +594,11 @@ module ymf271_synth
 		S_LD1: begin
 			w0        <= par_q;
 			par_ra    <= {slot, 2'd2};
-			stepptr   <= st_q[85:46];
-			volume    <= st_q[45:19];
-			env_state <= st_q[18:17];
-			active    <= st_q[16];
-			lfo_phase <= st_q[15:0];
+			stepptr   <= st_q[95:56];
+			volume    <= st_q[55:29];
+			env_state <= st_q[28:27];
+			active    <= st_q[26];
+			lfo_phase <= st_q[25:0];
 			line_tv   <= cch_tv_q;
 			line_data <= cch_data_q;
 			state     <= S_LD2;
@@ -607,7 +622,7 @@ module ymf271_synth
 				volume    <= 27'sd6225920;      // (255 - 160) << 16
 				env_state <= ENV_ATTACK;
 				active    <= 1'b1;
-				lfo_phase <= 16'd0;             // init_lfo
+				lfo_phase <= 26'd0;             // init_lfo
 				line_tv   <= 21'd0;             // the sample line moved too
 			end
 			else if (keyoff_pend[slot] && active) env_state <= ENV_RELEASE;
@@ -635,7 +650,7 @@ module ymf271_synth
 		// update_lfo(): advance the phase, then read both shapes with it.
 		S_LFO0: begin
 			lfo_phase <= lfo_next;
-			lfo_idx_r <= lfo_next[15:8];
+			lfo_idx_r <= lfo_next[25:18];
 			state     <= S_LFO1;
 		end
 		S_LFO1: begin
@@ -894,7 +909,7 @@ module ymf271_synth
 
 	initial begin
 		for (i = 0; i <  48; i = i + 1) begin
-			st_mem[i]   = 86'd0;
+			st_mem[i]   = 96'd0;
 			fb_mem[i]   = 54'd0;
 			cch_tv[i]   = 21'd0;
 			cch_data[i] = 64'd0;

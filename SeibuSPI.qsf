@@ -342,5 +342,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_jtag_peek.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sound.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ymf271.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/ymf271_pcm.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ymf271_synth.sv
 set_global_assignment -name QIP_FILE rtl/t80/T80.qip

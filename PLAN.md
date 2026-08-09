@@ -31,14 +31,78 @@ CPU, video, sprite chip, GFX ROMs and encryption are **identical** between the t
 So the core is built against SXX2E and the SPI cart variants can be added later
 behind an MRA config bit once flash emulation exists.
 
-Later targets sharing >90% of this core (deliberately kept in mind while designing):
+### What else `seibuspi.cpp` covers, and what each would cost
 
-| Set       | Board   | Sprite crypt | Notes                          |
-|-----------|---------|--------------|--------------------------------|
-| `rdfts`   | SXX2E   | SEI252       | **primary target**             |
-| `rdft2us` | SXX2F   | RISE10       | + 93C46 EEPROM instead of DS2404 |
-| `rfjets`  | SXX2G   | RISE11       | different clocks               |
-| `rdft`…   | SXX2C   | SEI252       | needs flash + cart emulation   |
+Seven distinct titles across five board types. Everything below is read off the
+driver, not remembered; sizes are the sum of the set's `ROM_REGION`s.
+
+| Board  | Parent sets                                   | Sprite crypt          | Sound                        | Backup | 386      | Largest set |
+|--------|-----------------------------------------------|-----------------------|------------------------------|--------|----------|-------------|
+| SXX2E  | `rdfts`                                        | SEI252                | Z80 + YMF271 @16.9344        | DS2404 | 25 MHz   | 22.4 MB     |
+| SXX2F  | `rdft2us`                                      | RISE10                | Z80 + YMF271 @16.9344        | 93C46  | 25 MHz   | 34.9 MB     |
+| SXX2G  | `rfjets`, `rfjetsa`                            | RISE11                | Z80 + YMF271 **@16.384**     | 93C46  | 28.6 MHz | 37.9 MB     |
+| SXX2C  | `senkyu`, `viprp1`, `ejanhs`, `rdft`, `rdft2`, `rfjet` | SEI252 / RISE10 / RISE11 | Z80-in-RAM + YMF271 on flash | DS2404 | 25 MHz   | 46.4 MB     |
+| SYS386I| `rdft22kc`, `rfjet2kc`                         | RISE10 / RISE11       | **2x OKIM6295**, no Z80      | 93C46  | 40 MHz   | 39.2 MB     |
+| SYS386F| `ejsakura`, `ejsakura12`                       | none (word reorder)   | **YMZ280B**, no Z80          | 93C46  | 25 MHz   | 34.0 MB     |
+
+**Two costs recur, and they are independent of each other:** a new sprite
+decryption per chip family, and SDRAM capacity. Only `rdfts` (22.4 MB),
+`senkyu` (28.4) and `viprp1` / `ejanhs` / `rdft` (31.4 each) fit a 32 MB module.
+Everything else needs 64 MB or more. `sdram.sv` already routes addr[25] (A[9]
+on 1024-column parts) and addr[26] (second chip), so that is a board
+requirement, not an RTL redesign — but it does mean the bigger sets cannot ride
+along as an MRA config bit on a build 32 MB users can run.
+
+**SXX2F / SXX2G are the closest siblings.** Same `base_video`, same CRTC, same
+tilemaps, same Z80 + YMF271 topology, same 386 core. What actually differs:
+
+* **RISE10 / RISE11 sprite decryption** — different algorithms, not different
+  keys. Both are *address-independent*, unlike SEI252: fixed-constant bit
+  permutations feeding `seibu_partial_carry_sum16/32`, so no `key_table[addr]`
+  lookup and no per-tile key fetch. We already have the partial-carry
+  primitive. Both then apply `sprite_reorder`, which permutes words inside
+  64-byte groups; for on-the-fly decode that is an address swizzle at fetch
+  rather than a pass over ROM.
+* **Tile and char decryption come free.** `spi_tile_decrypt` takes key1/key2/key3
+  as inputs and `tb_tile_decrypt` already proves all three triples (rdft,
+  rdft2, rfjet) against MAME. Wire the keys to a config bit.
+* **Register moves:** sprite DMA trigger 0x50e -> 0x562 (`sei252_map` vs
+  `rise_map`), and 0x68e changes from `rf2_layer_bank_w` to
+  `spi_layerbanks_eeprom_w`.
+* **93C46 EEPROM** replaces the DS2404 we stub at 0x6D0-0x6DD.
+* **SXX2G clocks.** The YMF271 runs at **16.384 MHz**, so the sample rate is
+  42666.7 Hz and every envelope and LFO table scales by 16.9344/16.384 — MAME's
+  `clock_correction`, which the generator currently assumes is exactly 1.0 (see
+  14.5). The Z80 drops to 4.9152 MHz, which is not an integer divisor of
+  clk_sys (57.2727/4.9152 = 11.65) and needs a fractional CE. Note MAME's
+  source literal says `4.9512_MHz_XTAL` while its own comment says 4.9152;
+  4.9152 is the real part and the literal looks like a transposition.
+
+**SXX2C is gated on flash, as above, plus two things.** The Z80's 256 KB is
+*RAM*, written a byte at a time by the 386 through port 0x688 and released from
+reset by 0x68c, so Z80 code stops being a read-only SDRAM region with a line
+buffer and needs a write path. There is also a second FIFO in the Z80->386
+direction (the one that is a `nullptr` on our board), a jumpers port at 0x400a,
+and the DS2404 becomes real rather than stubbed. `senkyu` / `viprp1` / `ejanhs`
+at least use SEI252, so the existing sprite decrypt covers them, and they fit
+32 MB. `ejanhs` additionally wants mahjong inputs and disables the alpha table.
+
+**SYS386I is our video with a sound chip we do not have.** Identical tilemap
+video and region structure; the entire Z80 + YMF271 subsystem is replaced by two
+OKIM6295s at 28.63636/20 = 1.432 MHz with a bank register at 0x68f. So: delete
+the sound half, write an OKI6295, add the RISE decrypt and the EEPROM.
+
+**SYS386F is effectively a different core** and is not worth folding in. No
+tilemaps at all, sprites only, **8bpp instead of 6bpp** with an 8192-entry
+palette, its own 57.59 Hz / 40x30 screen timing, a YMZ280B, and a different
+memory map. It shares the 386 and the sprite chip family and little else.
+
+**Nothing on this list disturbs the parts that were hardest to get right** — the
+386, the CRTC, the tilemap and sprite renderers, the SDRAM arbiter, or (for
+SXX2F) the sound chip. Best reach for least work is `rdft2us`: one new decrypt
+unit, an EEPROM and two register moves, on the same YMF271 at the same clock —
+if a 64 MB module is acceptable. To stay on 32 MB the SXX2C games are the only
+option, and they cost flash emulation and the Z80 download path.
 
 ---
 
@@ -1565,11 +1629,9 @@ RAM, the slot parameters in a 256x64 RAM, and each slot keeps an 8-byte line of
 its sample stream so a slot stepping at roughly 1.0 hits SDRAM once every eight
 samples instead of every one.
 
-**Not implemented, and both are audible omissions:** the 4-operator FM half of
-the chip, and the LFO. Slots whose waveform is not 7 are silently skipped;
-vibrato and tremolo are absent rather than wrong. Seibu's driver leans heavily
-on PCM, so this should carry most of the soundtrack, but anything voiced on FM
-is missing.
+**The FM half and the LFO have since landed** and this section is about the PCM
+path only; the operator network, the 28 algorithms and both LFOs are described
+in the header of `ymf271_synth.sv`, and what is still missing is in 14.5.
 
 One knowing divergence: MAME latches the four envelope rates at key-on and
 keeps them for the note's life. Storing them would cost 96 bits a slot, so they
@@ -1619,18 +1681,103 @@ The DIP transfer arrives as ioctl index 254 on the same bus as the ROM
 download, so the core's reset had to stop keying on `ioctl_download` alone or
 changing a DIP would restart the game.
 
-### 14.5 Known divergences from MAME, beyond FM and the LFO
+### 14.5 Divergences, from MAME and from the datasheet
 
+The engine is a port of `ymf271.cpp`, so by default it inherits MAME's reading
+of the chip. Yamaha's own documents are in `~/Downloads/OPX`: `YMF271.pdf` is
+the 26-page Japanese catalog datasheet (pinout, mode-select table, bank layout,
+PCM overview) and `ymf271_trans.pdf` is a translation of the 78-page
+application manual, which is the one with the register bit maps and every
+numeric table. The four `Ce*.jpg` files are the algorithm diagrams, which
+appear in neither PDF.
+
+The whole engine was checked against those documents. What came out clean, and
+does not need rechecking: the bus and bank decode, every function- and
+PCM-register bit field, the status-flag scramble, the sync-mode mirroring, both
+pitch formulas against the manual's own worked examples (C4 lands on 261.60 Hz
+against a quoted 261.626, and the external-waveform cent table matches to four
+places), all 28 algorithms read off the diagrams, and the RKS, AR/DC, LFO
+frequency, PMS, feedback/modulation, channel attenuation, waveform and keycode
+tables.
+
+**Two places where the datasheet wins and MAME is wrong.** Both are fixed here,
+so the output deliberately differs from MAME:
+
+* **AMS tremolo depth.** `alfo` peaks at 65536, so the constant in
+  `lfo_volume = 65536 - ((alfo * K) >> 16)` is the swing and `65536-K` is the
+  gain at full modulation. MAME passes the gains themselves — 65536/10^(dB/20)
+  for Table 2-6-3's 5.90625 / 11.8125 / 23.625 dB — which lands the gain at
+  `65536-K` instead and yields 6.1 / 2.6 / 0.6 dB. The ordering inverts: ams=3,
+  the deepest setting in the book, comes out the shallowest by a factor of ten.
+  `YMF_ALFO_K` holds the complements, and `tb_ymf271` now asserts the ams=1
+  depth is 5.90625 dB rather than comparing against a constant.
+* **LFO phase resolution.** `init_lfo` keeps 8 fractional bits below the 8-bit
+  shape index and truncates, which makes the step zero for the 161 slowest of
+  the 256 settings — everything below 0.673 Hz, where Table 2-6-2 goes down to
+  0.00066 Hz. A stalled LFO is not a silent one: phase 0 is the peak of all
+  three amplitude shapes, so those slots take a fixed attenuation instead of a
+  sweep. `lfo_phase` is 26 bits here, 18 fractional, which is the least that
+  keeps setting 0 above zero; every setting now oscillates. Cost is ten bits a
+  slot in `st_mem`, which stays a 48 x 96 inferred RAM at 0 ALUTs.
+
+**One place where MAME wins and the datasheet is wrong.** Register 0x10 is the
+*high* 8 bits of the 10-bit timer A period and 0x11 the low 2, which is what
+`ymf271.sv` does. Section 2-6 3) says the opposite in as many words — 10H is
+"Timer-A1", 11H is "Timer-A2, the top 2 bits", and tA = 384·(1024 − (A2·256 +
+A1)). MAME contradicts it on purpose, with a comment saying the split matches
+the other Yamaha FM chips and not Yamaha's own book. Since the timer is the
+sound driver's heartbeat on this board, follow MAME.
+
+**Known gaps, in rough order of how likely they are to be heard:**
+
+* **The wave memory data read register is not implemented.** Offset 2 returns
+  0xFF and utility registers 0x14-0x17 are dropped. That is the port a program
+  uses to read sample ROM back through the chip (manual 4-3); MAME implements
+  it and notes seibuspi is the only driver that exercises the external memory
+  handlers, so this is the gap most likely to matter. On SXX2C the same port is
+  the cartridge flash path; SXX2E has a plain mask ROM on the YMF bus.
+* **PCM samples are not interpolated.** Block description 13 says external
+  waveform data is interpolated before the envelope multiply. Nearest-sample
+  here, as in MAME, so samples played away from their native rate alias more
+  than they should.
+* **The external-waveform keycode ignores Src B and Src Note.** Section 2-9(b)
+  makes the key code the sum of the sample's base key code and the played
+  block/F-number; only the second term is computed, so RKS envelope key-scaling
+  on a PCM voice is that of octave 0 regardless of how the sample was recorded.
+  MAME has the line present but commented out with "not sure". Note the sum can
+  exceed 31 and would need a clamp.
+* **Register fields decoded nowhere.** Detune (3xH d6:4, Table 2-6-5), A/L
+  alternate loop (PCM 2xH d7), Acc On (BxH d7), EN and EXT Out (0xH d7 and
+  d6:3, which route a voice to CH4-7 and so *out* of the DO1/DO2 mix), PFM
+  (utility 0xH d7, FM with an external PCM operator source), and the status
+  Busy flag, which always reads 0. Every one of these is also on MAME's own
+  TODO list at the top of `ymf271.cpp`.
+* **Sync 3 forces PCM on any group.** Section 2-7 gives external waveforms to
+  groups 0, 4 and 8 only — they are the twelve slots that have PCM attribute
+  registers — and a sync-3 group elsewhere is four one-operator FM voices.
+  `step_is_pcm` keys on the sync mode alone, so such a group would play from
+  sample address 0 (its start/end/loop bytes are never written) instead of
+  sounding. Latent, not live: MAME `fatalerror`s on exactly this case and the
+  games run, so it does not occur in practice. A `p_is_pcm` term closes it.
 * **`fns` / `block` update immediately.** MAME's `write_register` case 0x9 does
   `fns = (fns_hi << 8 & 0x0f00) | data` and `block = fns_hi >> 4`, so writing
-  register 0xA alone changes nothing until register 9 is written. Here both
-  fields are decoded straight out of the stored bytes, so a lone 0xA write takes
-  effect at once. Drivers write A then 9 together, which gives the same result.
-* **Timer A and B free-run once started.** That is MAME's behaviour too: the
-  "stop" branch in `ymf271_write_timer` case 0x13 is only reachable when the
-  enable bit is already set, so it can never be taken.
-* **The external memory port (registers 0x14-0x17) is not implemented.** It is
-  the cartridge flash path on SXX2C; SXX2E has a plain mask ROM on the YMF bus.
+  register 0xA alone changes nothing until register 9 is written — which is the
+  datasheet's rule too (2-6 AxH: write Block and F-Number2 before F-Number1).
+  Here both fields are decoded straight out of the stored bytes, so a lone 0xA
+  write takes effect at once. Drivers write A then 9 together, which gives the
+  same result except for the one sample where a tick falls between them.
+* **Timer A and B free-run once started.** Register 13H's Load bit is
+  documented as start on 1, stop on 0; nothing stops them here. That is MAME's
+  behaviour too: the "stop" branch in `ymf271_write_timer` case 0x13 is only
+  reachable when the enable bit is already set, so it can never be taken.
+* **Channel levels D, E and F are 1/65536, not silence.** The book says ∞
+  attenuation, MAME uses 96.1 dB. Inaudible, listed so nobody re-derives it.
+
+Also noted for later: `sxx2g` boards clock the YMF271 at 16.384 MHz rather than
+16.9344, which moves the sample rate to 42666.7 Hz and scales every envelope
+and LFO table by 16.9344/16.384. `rdfts` is `sxx2e` and runs at the documented
+clock, so the hardcoded 44100 and MAME's `clock_correction` of 1.0 are right
+for the only supported set.
 
 ### 14.6 What to check first when this is put on hardware
 

@@ -286,6 +286,13 @@ module ymf271
 							         + {2'b00, tim_a[1:0]}] <= din[1:0];
 					end
 					else case (tim_a)
+						// 0x10 is the HIGH 8 bits and 0x11 the low 2, which is
+						// the reverse of the datasheet: section 2-6 3) calls
+						// 0x10 "Timer-A1" and 0x11 "Timer-A2, the top 2 bits",
+						// tA = 384 * (1024 - (A2*256 + A1)). MAME contradicts
+						// it deliberately -- the split matches the other
+						// Yamaha FM chips -- and the timer is this board's
+						// sound heartbeat, so follow MAME. Do not "fix".
 						8'h10: timerA[9:2] <= din;
 						8'h11: timerA[1:0] <= din[1:0];
 						8'h12: timerB      <= din;

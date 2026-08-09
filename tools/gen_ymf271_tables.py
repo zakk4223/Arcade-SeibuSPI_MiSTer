@@ -13,7 +13,8 @@ time, in the fixed-point form the RTL uses:
   PLFO_W   [4][256] the LFO pitch shape, quantised to q/128 in [-1, +1]
   PLFO     [7][257] 2^(cents[pms] * q/128 / 1200); pms 0 is exactly 1.0 and is
                     handled in logic, so only pms 1..7 are stored
-  ALFO_K   [4]      LFO amplitude depth per ams setting
+  ALFO_K   [4]      LFO amplitude swing per ams setting (65536 - the gain at
+                    full modulation, which is not what MAME stores)
   MODLVL   [8]      phase modulation depth
   FBLVL    [8]      feedback depth
   RKS      [32][8]  keyscale rate adjustment, verbatim from RKS_Table
@@ -194,9 +195,17 @@ def main():
     # ---- LFO --------------------------------------------------------------
     lfo_freq = parse_double_table(src,
                                   "static const double LFO_frequency_table[256]", 256)
-    lfo_step = [int(((256.0 * f) / SAMPLE_RATE) * 256.0) for f in lfo_freq]
-    print("\t// init_lfo(): phase increment per sample, LFO_LENGTH 256 << 8.")
-    emit("YMF_LFO_STEP", 10, lfo_step, 8, "d%d")
+    # init_lfo() computes (LFO_LENGTH * f / 44100) * 256 and truncates to int,
+    # which is zero for every frequency below 0.673 Hz -- 161 of the 256
+    # settings, where the datasheet's Table 2-6-2 goes down to 0.00066 Hz. A
+    # stalled LFO is not a silent one either: phase 0 is the PEAK of all three
+    # amplitude shapes, so those slots get a constant attenuation instead of a
+    # sweep. Ten more fractional bits -- 18 below the phase index instead of 8
+    # -- is the least that keeps setting 0 above zero (it lands on 1.0044), so
+    # every one of the 256 settings oscillates. The fastest is exactly 2^19.
+    lfo_step = [int(((256.0 * f) / SAMPLE_RATE) * float(1 << 18)) for f in lfo_freq]
+    print("\t// init_lfo(): phase increment per sample, LFO_LENGTH 256 << 18.")
+    emit("YMF_LFO_STEP", 20, lfo_step, 8, "d%d")
 
     # The pitch LFO shape, exactly as init_tables builds plfo[], quantised to
     # 128ths so the exponential below can be a table of 257 entries per depth
@@ -229,9 +238,16 @@ def main():
     print("\t// 2^(cents[pms] * q/128 / 1200) for pms 1..7, index {pms-1, q+128}.")
     emit("YMF_PLFO", 18, plfo, 6, "d%d")
 
-    # calculate_slot_volume(): lfo_volume = 65536 - ((amplitude * K) >> 16)
-    print("\t// Amplitude LFO depth per ams; 0 means no modulation.")
-    emit("YMF_ALFO_K", 16, [0, 33124, 16742, 4277], 4, "d%d")
+    # calculate_slot_volume(): lfo_volume = 65536 - ((amplitude * K) >> 16),
+    # amplitude peaking at 65536, so K is the SWING and 65536-K is the gain at
+    # full modulation. MAME passes the gains themselves -- 65536/10^(dB/20) for
+    # the datasheet's 5.90625, 11.8125 and 23.625 dB (Table 2-6-3) -- which
+    # lands at 65536-K instead and yields 6.1, 2.6 and 0.6 dB: the deepest
+    # setting comes out the shallowest. The swings are the complements.
+    AMS_DB = [0.0, 5.90625, 11.8125, 23.625]
+    alfo_k = [0] + [65536 - int(65536.0 / math.pow(10.0, db / 20.0)) for db in AMS_DB[1:]]
+    print("\t// Amplitude LFO swing per ams (Table 2-6-3); 0 means no modulation.")
+    emit("YMF_ALFO_K", 16, alfo_k, 4, "d%d")
 
     # ---- operator modulation depths ---------------------------------------
     modlvl = parse_int_table(src, "static const int modulation_level[8]", 8)

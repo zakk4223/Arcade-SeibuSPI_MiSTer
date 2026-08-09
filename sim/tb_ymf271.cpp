@@ -766,8 +766,12 @@ static void test_lfo_amplitude() {
 
     for (int i = 0; i < 40; i++) next_sample();
 
-    // alfo[square][0] = 65536, so lfo_volume = 65536 - ((65536*33124)>>16).
-    int64_t lfo_vol = 65536 - ((65536LL * 33124) >> 16);
+    // alfo[square][0] = 65536, so lfo_volume = 65536 - ((65536*K)>>16) and the
+    // gain at full modulation is 65536-K. Table 2-6-3 puts ams=1 at 5.90625 dB
+    // down, so K is unity minus that gain -- not the gain itself, which is
+    // what MAME uses; see the note above alfo_scaled in ymf271_synth.sv.
+    int64_t ams1_k  = 65536 - (int64_t)(65536.0 / pow(10.0, 5.90625 / 20.0));
+    int64_t lfo_vol = 65536 - ((65536LL * ams1_k) >> 16);
     int64_t env = (65536LL * lfo_vol) >> 16;            // ENV_VOL[0] = 65536
     int16_t seed[4];
     for (int j = 0; j < 4; j++) seed[j] = next_sample();
@@ -792,8 +796,13 @@ static void test_lfo_amplitude() {
     }
     errors += bad;
     if (lfo_vol >= 65536) fail("lfo amplitude: the test did not actually attenuate");
-    printf("lfo amplitude: 200 samples, %d mismatches (gain %lld/65536)\n",
-           bad, (long long)lfo_vol);
+    // The point of the depth correction: full swing has to land on the
+    // datasheet's dB, not somewhere 5 dB away from it.
+    double depth_db = 20.0 * log10(65536.0 / (double)lfo_vol);
+    if (fabs(depth_db - 5.90625) > 0.01)
+        fail("lfo amplitude: ams=1 depth is not Table 2-6-3's 5.90625 dB");
+    printf("lfo amplitude: 200 samples, %d mismatches (gain %lld/65536, %.3f dB)\n",
+           bad, (long long)lfo_vol, depth_db);
 }
 
 // LFO pitch. Same trick: frequency 0 parks the square wave at +1, so the pitch
