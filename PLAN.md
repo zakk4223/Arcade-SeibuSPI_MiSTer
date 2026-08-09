@@ -734,7 +734,7 @@ Parameters: `PROTECT_UMA_ROM`, `DCACHE_SET_BITS`, `ICACHE_SET_BITS`.
 uncacheable. Findings after reading `l1_cache.sv` / `l1_icache.sv`:
 
 1. *The dcache is **write-through*** with a 3-entry in-order store queue
-   (`l1_cache.sv:108`). So the video DMA engines reading main RAM cannot see
+   (`l1_cache.sv`, `STOREQ_DEPTH = 3`). So the video DMA engines reading main RAM cannot see
    stale data: the DMA-trigger write to 0x480 / 0x484 / 0x562 goes through the
    same queue behind the data writes it is meant to publish. Ordering is free.
    No flush, no snoop, no dual-port coherency scheme needed.
@@ -748,8 +748,12 @@ uncacheable. Findings after reading `l1_cache.sv` / `l1_icache.sv`:
    `0x00000000` so 0x0–0x7FF is uncacheable. Plumb the two parameters through
    `z386.sv`. Keep the diff in `patches/`.
 
+   **This is the pre-patch state, kept because it explains the change.** The
+   line above no longer exists in `rtl/z386/l1_cache.sv`; it now reads
+   `(cpu_addr & UNCACHED_MASK) == UNCACHED_BASE`, which is the patch applied.
+
 3. *Self-modifying code works.* The icache snoops the dcache's own store stream
-   (`z386.sv:678` `icache_write_snoop`) and patches the cached data, so code
+   (`icache_write_snoop` in `z386.sv`) and patches the cached data, so code
    copied into RAM and executed is coherent without any help from us.
 
 4. *Cache tags only cover addr[24:0]* (`TAG_MSB = 24`, a 32 MB window). Two CPU
@@ -1386,8 +1390,9 @@ Order matters: T4 is the visible payoff and depends only on T1–T3. T5 can lag.
   unreachable on this board and halved clk_ram to 57.272727 to work around it.
   Reference cores run this register single at 120 MHz; restoring it single made
   114.545 MHz byte-perfect (all four checksums exact, zero layer overruns) with
-  timing closing at +0.379 ns. The original -0.054 ns violation never came back,
-  because USE_CH5=0 had already removed enough load.
+  timing closing at +0.379 ns. The original -0.054 ns violation never came back;
+  at the time USE_CH5 was 0, which had removed some load, but ch5 is enabled now
+  for the YMF271's PCM reads and clk_ram still closes.
   Lessons: chasing a tiny fabric slack broke a path the SDC does not even
   constrain; and "it is too fast for the hardware" is a conclusion to reach only
   after checking what a working core does differently -- IremM92 runs 120 MHz on
@@ -1593,14 +1598,21 @@ computed over the raw set, where the blend pixels outnumber it four to one; it
 now runs over REAL mismatches only and reports **3933 match a sprite pen, 2086
 do not**. So roughly two thirds of the genuine error is sprites, which agrees
 with section 13's other reading, and there is a residual third that is not
-sprite-coloured and has never been accounted for. Note the test still exits
-non-zero on any difference at all, so a green run is not the goal until the
-mixer is exact.
+sprite-coloured and has never been accounted for. (Superseded: the blend is
+exact as of 13c and the residual turned out to be the bank race, so tb_video
+now passes with every pixel identical. The paragraph is kept for the reasoning,
+not the numbers.)
 
 Fixed and verified on real hardware:
-  * SDRAM read corruption -- clk_ram now 57.272727 MHz, checksums exact.
+  * SDRAM read corruption -- fixed by restoring `sdram.sv`'s single `dq_reg`.
+    **clk_ram is 114.545455 MHz** (pll.v c0). This bullet used to say the fix
+    was halving clk_ram to 57.272727; that was the wrong diagnosis and was
+    reverted -- see section 10.
   * Sound FIFO status polarity at 0x684 (_FF/_EF are active low).
-  * clk_ram setup timing -- USE_CH5=0 and per-channel DQ capture registers.
+  * clk_ram setup timing. **Not** by per-channel DQ capture registers: section
+    10 records that splitting `dq_reg` per channel is what CAUSED the
+    corruption above, and it was reverted. USE_CH5 is also 1 now, not 0 -- the
+    YMF271 reads PCM through ch5.
 
 Verified good, so not worth re-investigating:
   * ioctl download delivers all 23,396,352 bytes, all 14 parts (bytes_in probe).
