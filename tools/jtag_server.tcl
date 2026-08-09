@@ -143,7 +143,8 @@ proc show_vitals {} {
 # SNDV is its own probe rather than more bits on VITL: altsource_probe caps a
 # probe at 511 bits and VITL is already at 478.
 #   0..15 z80 pc, 16..31 fifo reads, 32..47 ymf writes, 48..63 rom stalls,
-#   64..79 synth overruns, 80..95 slots sounding (PCM voices + FM operators)
+#   64..79 synth overruns, 80..95 slots sounding (PCM voices + FM operators),
+#   96..111 fifo2 pushes (Z80 -> 386), 112..127 fifo2 pops (386 reads 0x680)
 proc show_sound {} {
     global SNDV
     set p [read_probe_data -instance_index $SNDV]
@@ -154,6 +155,8 @@ proc show_sound {} {
     say [format "  rom stalls  %d   (SDRAM fetches the line buffer missed)" [fld $p 48 16]]
     say [format "  voices      %d   overruns %d (samples the engine could not finish)" \
          [fld $p 80 16] [fld $p 64 16]]
+    say [format "  fifo2 push  %d   pop %d   (Z80 -> 386; SXX2C only)" \
+         [fld $p 96 16] [fld $p 112 16]]
 }
 
 proc show_sums {} {

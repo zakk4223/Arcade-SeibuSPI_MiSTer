@@ -64,6 +64,8 @@ module spi_top
 	output     [15:0] snd_stall,
 	output     [15:0] ymf_overrun,
 	output     [15:0] ymf_active,
+	output     [15:0] snd_f2_wr,
+	output     [15:0] snd_f2_rd,
 	output     [31:0] eip,
 	output     [15:0] cs,
 	output            irq,
@@ -393,6 +395,8 @@ module spi_top
 		.fifo2_empty(fifo2_empty),
 		.fifo2_rd   (fifo2_rd),
 		.z80_rst_n  (z80_rst_n),
+		.dbg_f2_wr  (snd_f2_wr),
+		.dbg_f2_rd  (snd_f2_rd),
 		.clk        (clk_sys),
 		.reset      (vid_reset),
 

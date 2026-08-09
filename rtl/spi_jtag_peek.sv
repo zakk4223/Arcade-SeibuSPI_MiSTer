@@ -82,6 +82,11 @@ module spi_jtag_peek
 	input      [15:0] snd_stall,       // SDRAM fetches the Z80 had to wait for
 	input      [15:0] ymf_overrun,     // samples the synth could not finish
 	input      [15:0] ymf_active,      // slots sounding on the last sample
+	// Z80 -> 386 FIFO, one counter per side, so a stuck handshake names its own
+	// guilty half: pushes without pops means the 386 is not reading 0x680,
+	// pops without pushes means the Z80 never got room to send.
+	input      [15:0] snd_f2_wr,       // pushes by the Z80 (0x4008 write)
+	input      [15:0] snd_f2_rd,       // pops by the 386  (0x680 read)
 
 	// Live layer masks driven from the host, so a rendering fault can be
 	// isolated to a layer without a rebuild for each experiment.
@@ -168,15 +173,16 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (5),
 		.instance_id             ("SNDV"),
-		.probe_width             (96),
+		.probe_width             (128),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
 	)
 	sound_issp
 	(
+		// New fields go on the LSB side; see PLAN.md 14.3.
 		.probe  ({snd_pc, snd_fifo_rd, snd_ymf_wr, snd_stall,
-		          ymf_overrun, ymf_active}),
+		          ymf_overrun, ymf_active, snd_f2_wr, snd_f2_rd}),
 		.source ()
 	);
 

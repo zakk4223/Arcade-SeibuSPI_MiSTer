@@ -438,6 +438,7 @@ wire  [95:0] v_scr;
 wire  [17:2] v_ssrc;
 wire  [15:0] v_wspr, v_wtm;
 wire [15:0] v_spc, v_sfr, v_syw, v_sst, v_yov, v_yac;
+wire [15:0] v_f2w, v_f2r;
 wire  [3:0] ldr_part_end;
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
@@ -526,6 +527,7 @@ spi_jtag_peek peek
 	.rs_en(v_rs), .fd13(v_fd13), .tm_dwords(v_tmdw), .scrolls(v_scr),
 	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
+	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 	.ctrl(dbg_ctrl)
 );
 
@@ -682,6 +684,7 @@ spi_top spi_top
 	.rs_out(v_rs), .fd13_out(v_fd13), .tm_dwords_out(v_tmdw), .scroll_out(v_scr),
 	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
+	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 
 	.sdr_prg_addr (sdr_prg_addr),
 	.sdr_prg_dout (sdr_prg_dout),

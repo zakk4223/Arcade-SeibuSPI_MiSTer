@@ -271,14 +271,54 @@ start. `ok bits 1110` also shows CHARS, TILES and SPRITES checksumming
 identically to `rdfts`, which they should -- they are the same ROMs. Only PRG
 "fails", because the checker hardcodes `rdfts`'s expected value.
 
-**So the remaining suspect is the second FIFO.** Everything either side of it is
-now verified: ROM load, program image, protected mode, video DMA, the Z80
-download, the Z80 executing real code. The 386 sends 10 bytes, the Z80 reads
-exactly 10 and stops, and both then poll. That is the shape of a reply that
-never arrives -- the Z80 writing 0x4008 and the 386 not seeing it at 0x680, or
-0x684 d1 never going true. Neither has any telemetry, which is the first thing
-to add: a push/pop counter pair on fifo2 would say in one reading which side is
-wrong.
+**Third run: it boots.** The blocker was ONE BIT.
+
+`0x4009` d0 is the Z80's "is there room to send?" flag -- MAME's
+`z80_soundfifo_status_r` returns `soundfifo[1]->ff_r()` there. On SXX2E that
+device is a nullptr so d0 reads 0, which is exactly what this core hardwired
+and exactly right for that board. On SXX2C it has to be `~fifo2_full`. The
+sound program polls it before every push, so it sat waiting for room in a FIFO
+the core said was permanently full, while the 386 sat at 0x684 d1 waiting for
+the reply. Two poll loops, one missing bit.
+
+**Found by disassembly, not by staring at RTL**, and it is worth remembering as
+a technique: both CPUs' program images are in SDRAM and both PCs are on the
+probes, so the loop each one is stuck in can simply be read. The 386's, at
+0x26D65A in the PRG window:
+
+```
+bt   WORD PTR ds:0x684, 0x1     ; the Z80 -> 386 FIFO empty flag
+jae  back                        ; spin while clear
+mov  ax, ds:0x680                ; then take the reply
+```
+
+and the Z80's, at 0x15D, hand-decoded out of `maincpu[0x1BB800]`:
+
+```
+015D: 3A 09 40   ld  a,(0x4009)   ; FIFO status
+0160: E6 01      and 0x01         ; room to send?
+0162: CA 5D 01   jp  z,0x015D     ; spin while clear
+0168: 32 08 40   ld  (0x4008),a   ; push -- never reached
+```
+
+That took minutes and named the exact bit. A telemetry build would have taken
+half an hour to say which side was stuck.
+
+**The telemetry is there anyway** and earns its place: `fifo2 push` / `pop` on
+the SNDV probe (96 -> 128 bits, appended LSB-side per 14.3). It reads 16/16 on
+the working core, which is how the fix was confirmed rather than inferred from
+the screen lighting up.
+
+**Working, measured 2026-08-09:** `rdft` boots to attract with sprites and
+sound. Z80 PC advancing, FIFO reads 10 -> 2791, YMF writes 0 -> 41146, 6-16
+voices sounding, **0 PCM overruns**, fifo2 16/16, all layers enabled, video DMA
+every frame. Timing met on every clock (clk_ram +0.735, clk_sys +1.517, TNS
+0.000) at SEED 3.
+
+One thing to look at next: `sprite starved 1691`, which is not 0 the way SXX2E
+is. The cartridge has the same sprite engine, so this is most likely the ch3
+write path stealing bandwidth, or simply a heavier scene -- measure against
+y-hits per 13b before assuming.
 
 **What the first run proved**, before the jumper stopped it: the SXX2C part
 table loads the program byte-exact (reset vector `E9 0D FF 00 ... 80 4A 4A 36`

@@ -66,6 +66,9 @@ module spi_sound
 	output            fifo2_empty,
 	input             fifo2_rd,     // level from clk_cpu; edge detected here
 	input             z80_rst_n,    // 0 = hold the Z80 in reset (0x68C d0)
+	// Which side of the Z80->386 FIFO is stuck, in one reading.
+	output reg [15:0] dbg_f2_wr,    // pushes by the Z80 (0x4008 write)
+	output reg [15:0] dbg_f2_rd,    // pops by the 386  (0x680 read)
 	output reg [15:0] dbg_ymf_wr,
 	output     [15:0] dbg_stall,
 	output     [15:0] dbg_ymf_overrun,
@@ -303,13 +306,19 @@ module spi_sound
 		if (reset) begin
 			f2_wp <= 9'd0;
 			f2_rp <= 9'd0;
+			dbg_f2_wr <= 16'd0;
+			dbg_f2_rd <= 16'd0;
 		end
 		else begin
 			if (set_sxx2c && wr_end && b_io && (bus_addr[12:0] == 13'h008) && !f2_full) begin
 				f2_mem[f2_wp] <= bus_data;
 				f2_wp <= f2_wp + 9'd1;
+				dbg_f2_wr <= dbg_f2_wr + 16'd1;
 			end
-			if (fifo2_rd_pulse && !fifo2_empty) f2_rp <= f2_rp + 9'd1;
+			if (fifo2_rd_pulse && !fifo2_empty) begin
+				f2_rp <= f2_rp + 9'd1;
+				dbg_f2_rd <= dbg_f2_rd + 16'd1;
+			end
 		end
 		fifo2_q <= f2_mem[f2_rp];
 	end
@@ -396,7 +405,13 @@ module spi_sound
 		else if (sel_io) begin
 			case (z80_addr[12:0])
 				13'h008: z80_di = fifo_q;
-				13'h009: z80_di = {6'd0, ~fifo_empty, 1'b0};
+				// d0 = _FF of the Z80->386 FIFO: 1 when there is ROOM to
+				// send. The sound program polls this before every push, so
+				// leaving it 0 -- correct for SXX2E, where m_soundfifo[1] is a
+				// nullptr -- deadlocks the cartridge: the Z80 waits for room
+				// that never appears while the 386 waits at 0x684 d1 for the
+				// reply. d1 = _EF of the 386->Z80 FIFO: 1 when data is waiting.
+				13'h009: z80_di = {6'd0, ~fifo_empty, set_sxx2c & ~f2_full};
 				13'h00A: z80_di = jumpers;   // SXX2C only; MAME leaves it a TODO
 				13'h013: z80_di = coin;
 				default: z80_di = 8'hFF;
