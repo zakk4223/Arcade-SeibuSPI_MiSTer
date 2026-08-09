@@ -519,8 +519,14 @@ module spi_top
 	// ------------------------------------------------------------------
 	// Mixer
 	//
-	// TODO(T4b): the sprite engine. Until it lands the sprite input is marked
-	// invalid, so the mixer composites the four tile layers alone.
+	// All five inputs are live: the four tile layer buffers out of spi_layers
+	// and the sprite buffer out of spi_sprite above. Both modules follow the
+	// same convention -- write the line being rendered at {render_bank, x},
+	// serve the displayed pixel from the other bank (lb_wrap picks
+	// render_bank for the tail that belongs to the next line). spi_sprite
+	// once wrote the inverted bank, so it rendered into the buffer being
+	// displayed, cleared it at the next line start, and the mixer never saw
+	// a valid sprite pixel; see spi_sprite.sv around lb_wr_addr.
 	// ------------------------------------------------------------------
 	spi_mixer mixer
 	(

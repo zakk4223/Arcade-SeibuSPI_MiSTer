@@ -1166,9 +1166,6 @@ Of those, only the first would ever have produced an obvious symptom.
       - [x] `spi_mixer.sv` — MAME's exact composite order including the
             "draw back again" step, the alpha table, and BGR555 expansion.
       - [x] `spi_dpram.sv`, tilemap / palette / sprite RAMs.
-      - [ ] **`spi_sprite.sv` — not started.** The mixer's sprite input is tied
-            invalid, so it currently composites the four tile layers alone.
-            The decrypt unit it needs is already done and verified (T2).
       - [x] Golden-reference harness against MAME (see section 12). The frame
             diff went from 100% wrong to **40.1%** as four real bugs fell out.
       - [x] **All four layers verified 299/300** against reference scanlines
@@ -1195,7 +1192,7 @@ Of those, only the first would ever have produced an obvious symptom.
             the *probe*: line buffer readback is one ahead, and that only
             showed on fore because back/midl/text are uniform on the rows
             probed, so any shift matched them.
-      - [~] **Frame 18.2% wrong, and it IS the sprites.** Proven properly this
+      - [x] **Frame 18.2% wrong, and it IS the sprites.** Proven properly this
             time: for a mismatching pixel, every palette entry producing
             MAME's colour is below pen 4096, and pens below 4096 are sprite
             pens -- no tile-layer pen in the palette yields it. The earlier
@@ -1210,6 +1207,16 @@ Of those, only the first would ever have produced an obvious symptom.
             draw and cannot be validated. Suspects: the sprite DMA may use a
             source register other than 0x494, or writes to 0x50E may not be
             the only trigger.
+
+            **Resolved, and the diagnosis above was only half right.** Every
+            capture from 13a onwards carries real sprite data -- tb_video's
+            per-pixel sprite check and 13b's sweeps both read it -- so the
+            engine finally had something to validate against. The score came
+            down 18.2% -> 7.89% -> 1.78% -> 0.23% through the mixer fix (13a)
+            and the concurrent scan/draw, horizontal culling and fetch/emit
+            overlap (13b). The largest single piece of what "IS the sprites"
+            actually was is in 13a: the mixer pairing one pixel's colours
+            with the next pixel's draw decisions.
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's
@@ -1228,12 +1235,21 @@ Of those, only the first would ever have produced an obvious symptom.
       Build state with the tile layers in: 0 errors, 0 negative slack,
       67% ALMs, 77% RAM blocks, 3,265,253 block memory bits.
 
-      **Next step should be a frame-level testbench, not the sprite engine.**
-      Both bugs found while writing T4 (the RAM read off-by-one and the RGB
-      multi-driver) produced silently wrong data rather than a build failure,
-      and the same class of bug in the render path is invisible without
-      comparing actual pixels. Drive the Verilator model with a captured
-      tilemap/palette RAM dump from MAME and diff the line buffers.
+      **A frame-level testbench came before the sprite engine, and that was
+      right.** Both bugs found while writing T4 (the RAM read off-by-one and
+      the RGB multi-driver) produced silently wrong data rather than a build
+      failure, and the same class of bug in the render path is invisible
+      without comparing actual pixels. That harness is section 12, and every
+      T4 fault since has been found through it.
+
+      **What is left on T4:** the attract frame still differs by 0.23% with
+      no account of the residual, and `sim/tb_video` exits non-zero on any
+      difference at all, so it cannot go green while the mixer keeps the
+      cheap 50/50 blend in place of MAME's 127/129 (rtl/spi_mixer.sv:157 --
+      both exact forms blew clk_sys setup, and only pipelining the mixer
+      across its eight cycles per pixel would buy them back). Headroom still
+      unclaimed: `spi_layers` renders layers the game has disabled, and
+      issues two 64-bit reads per text column for a 6-byte char row.
 - [~] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
       - [x] `rtl/t80/` — T80 vendored from Arcade-IremM72_MiSTer. VHDL, so
             Verilator cannot read it; `sim/T80s.sv` is a port-compatible stub
@@ -1247,23 +1263,43 @@ Of those, only the first would ever have produced an obvious symptom.
       - [x] `rtl/ymf271_pcm.sv` — 48-slot PCM synthesis at 44100 Hz.
       - [x] `rtl/spi_sdr_arb2.sv` — ch3 now has two owners after boot (the Z80
             and the JTAG peek) and needs arbitration.
-      - [ ] **FM is not implemented.** A slot renders only when its waveform
-            field is 7 (external/PCM); every other waveform is an FM operator
-            and is skipped. Nor is the LFO — vibrato and tremolo are absent.
+      - [x] **FM and both LFOs landed** — see section 15. `ymf271_pcm.sv`
+            became `ymf271_synth.sv` and now walks 12 groups x 4 slots: the
+            28 algorithms collapse to one 28-entry wiring table over an
+            invariant slot1/slot3/slot2/slot4 order, plus the amplitude and
+            pitch LFOs. Pipelined to meet clk_sys (15.6) — no state may hold
+            more than one ROM read or one multiply.
       - [x] `sim/tb_ymf271.cpp` drives the chip's own register interface and
             checks 8-bit playback, 12-bit unpacking, the loop fold and end
-            status, timer A + IRQ, and key-off release. All pass.
+            status, timer A + IRQ, and key-off release — now ten checks with
+            the FM ones (carrier, modulation, chain + feedback, both LFOs)
+            and `test_all_algorithms`' sweep of 24 networks, 15.4 / 15.7.
+            All pass.
             `tools/check_ymf271_math.py` checks the phase step against MAME's
             doubles over all 600,064 (fns, block, fs, multiple) combinations.
-      - [ ] **Not yet heard on hardware.** Nothing above `ymf271` can be
-            simulated -- the Z80 is VHDL -- so the Z80 bus, the FIFO, the coin
-            latch and the ch3 arbiter have only been reasoned about and built.
-            `tools/slop sound` reports the Z80 PC, FIFO reads, YMF writes, ROM
-            stalls, sounding slots and PCM overruns; see section 14.6.
+      - [x] **Heard on hardware, 2026-08-04** — section 14.9. Nothing above
+            `ymf271` can be simulated (the Z80 is VHDL), so the Z80 bus, the
+            FIFO, the coin latch and the ch3 arbiter were only ever reasoned
+            about; the measurement is what cleared them. Z80 PC advancing,
+            ~45 FIFO reads/s, 7-12 slots sounding and tracking the music,
+            **0 PCM overruns on every reading**, L and R bit-identical as
+            SXX2E requires. `tools/slop sound` reports all of it; see 14.6.
+      - [ ] **Known YMF271 gaps remain** — enumerated in 14.5, in rough
+            order of audibility. The one most likely to matter is the **wave
+            memory data read register (utility 0x14-0x17)**, which is also
+            exactly the port SXX2C flash needs (section 0). Then: no PCM
+            interpolation, the external-waveform keycode ignoring Src B and
+            Src Note, the fields decoded nowhere (detune, alternate loop,
+            Acc On, EN / EXT Out, PFM, Busy), sync 3 forcing PCM on any
+            group (latent -- MAME fatalerrors on it and the games run),
+            `fns`/`block` updating immediately, timers that never stop, and
+            channel levels D/E/F at 1/65536 rather than silence.
 
-      Build with the sound subsystem in: 0 errors, TNS 0.000 on every clock,
-      **77% ALMs** (was 67%), **82% RAM blocks** (was 77%), 44% DSP.
-      Setup slack clk_ram +0.705 ns, clk_sys +0.877 ns, clk_cpu +3.032 ns.
+      Build with FM, the LFOs and the pipelining in (15.8): 0 errors, TNS
+      0.000 on every clock, **78% ALMs**, **86% RAM blocks**, 53% DSP. Setup
+      slack clk_ram +0.641 ns, clk_sys +0.919 ns, clk_cpu +3.044 ns. RAM
+      blocks are now the tightest resource. (The PCM-only build before FM was
+      77% ALMs / 82% RAM / 44% DSP.)
 - [ ] **T6** MRA, docs, build verification.
 
 Order matters: T4 is the visible payoff and depends only on T1–T3. T5 can lag.
