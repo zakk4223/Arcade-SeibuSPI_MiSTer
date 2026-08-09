@@ -160,6 +160,19 @@ always @(posedge clk) begin
     // the first 16-bit word of every burst read came back as unstable garbage.
     // Reference cores run this same register single at 120 MHz.
     reg [15:0] dq_reg;
+    // Fabric copy of the capture register, one cycle behind, and the ONLY thing
+    // the channel dout registers read. dq_reg drives 5 channels x 64 bits = 320
+    // flops spread across the die; with the capture register sitting in the I/O
+    // cell the fitter cannot place that net well, and clk_ram was failing setup
+    // on dq_reg -> chN_dout with literally no logic in the path -- pure routing.
+    //
+    // This is NOT the mistake above. That one duplicated dq_reg ITSELF per
+    // channel and let the fitter pull the capture out of the I/O cell, which
+    // destroyed the DQ input timing. Here dq_reg is untouched and still single;
+    // the fanout moves to a plain fabric register with no I/O constraint, which
+    // is free to be placed near its consumers. Every data_ready tap shifts one
+    // position later to pay for the extra cycle.
+    reg [15:0] dq_reg_d;
     reg  [3:0] state = STATE_STARTUP;
 
     reg       ch1_req_1, ch2_req_1, ch3_req_1, ch4_req_1, ch5_req_1;
@@ -206,37 +219,38 @@ always @(posedge clk) begin
     data_ready_delay4 <= data_ready_delay4>>1;
     data_ready_delay5 <= data_ready_delay5>>1;
 
-    dq_reg <= SDRAM_DQ;
+    dq_reg   <= SDRAM_DQ;
+    dq_reg_d <= dq_reg;
 
-    if(data_ready_delay1[4]) ch1_dout[15:00] <= dq_reg;
-    if(data_ready_delay1[3]) ch1_dout[31:16] <= dq_reg;
-    if(data_ready_delay1[2]) ch1_dout[47:32] <= dq_reg;
-    if(data_ready_delay1[1]) ch1_dout[63:48] <= dq_reg;
-    if(data_ready_delay1[1]) ch1_ack <= ch1_req;
+    if(data_ready_delay1[3]) ch1_dout[15:00] <= dq_reg_d;
+    if(data_ready_delay1[2]) ch1_dout[31:16] <= dq_reg_d;
+    if(data_ready_delay1[1]) ch1_dout[47:32] <= dq_reg_d;
+    if(data_ready_delay1[0]) ch1_dout[63:48] <= dq_reg_d;
+    if(data_ready_delay1[0]) ch1_ack <= ch1_req;
 
-    if(data_ready_delay2[4]) ch2_dout[15:00] <= dq_reg;
-    if(data_ready_delay2[3]) ch2_dout[31:16] <= dq_reg;
-    if(data_ready_delay2[2]) ch2_dout[47:32] <= dq_reg;
-    if(data_ready_delay2[1]) ch2_dout[63:48] <= dq_reg;
-    if(data_ready_delay2[1]) ch2_ack <= ch2_req;
+    if(data_ready_delay2[3]) ch2_dout[15:00] <= dq_reg_d;
+    if(data_ready_delay2[2]) ch2_dout[31:16] <= dq_reg_d;
+    if(data_ready_delay2[1]) ch2_dout[47:32] <= dq_reg_d;
+    if(data_ready_delay2[0]) ch2_dout[63:48] <= dq_reg_d;
+    if(data_ready_delay2[0]) ch2_ack <= ch2_req;
 
-    if(data_ready_delay3[4]) ch3_dout[15:00] <= dq_reg;
-    if(data_ready_delay3[3]) ch3_dout[31:16] <= dq_reg;
-    if(data_ready_delay3[2]) ch3_dout[47:32] <= dq_reg;
-    if(data_ready_delay3[1]) ch3_dout[63:48] <= dq_reg;
-    if(data_ready_delay3[1]) ch3_ack <= ch3_req;
+    if(data_ready_delay3[3]) ch3_dout[15:00] <= dq_reg_d;
+    if(data_ready_delay3[2]) ch3_dout[31:16] <= dq_reg_d;
+    if(data_ready_delay3[1]) ch3_dout[47:32] <= dq_reg_d;
+    if(data_ready_delay3[0]) ch3_dout[63:48] <= dq_reg_d;
+    if(data_ready_delay3[0]) ch3_ack <= ch3_req;
 
-    if(data_ready_delay4[4]) ch4_dout[15:00] <= dq_reg;
-    if(data_ready_delay4[3]) ch4_dout[31:16] <= dq_reg;
-    if(data_ready_delay4[2]) ch4_dout[47:32] <= dq_reg;
-    if(data_ready_delay4[1]) ch4_dout[63:48] <= dq_reg;
-    if(data_ready_delay4[1]) ch4_ack <= ch4_req;
+    if(data_ready_delay4[3]) ch4_dout[15:00] <= dq_reg_d;
+    if(data_ready_delay4[2]) ch4_dout[31:16] <= dq_reg_d;
+    if(data_ready_delay4[1]) ch4_dout[47:32] <= dq_reg_d;
+    if(data_ready_delay4[0]) ch4_dout[63:48] <= dq_reg_d;
+    if(data_ready_delay4[0]) ch4_ack <= ch4_req;
 
-    if(data_ready_delay5[4]) ch5_dout[15:00] <= dq_reg;
-    if(data_ready_delay5[3]) ch5_dout[31:16] <= dq_reg;
-    if(data_ready_delay5[2]) ch5_dout[47:32] <= dq_reg;
-    if(data_ready_delay5[1]) ch5_dout[63:48] <= dq_reg;
-    if(data_ready_delay5[1]) ch5_ack <= ch5_req;
+    if(data_ready_delay5[3]) ch5_dout[15:00] <= dq_reg_d;
+    if(data_ready_delay5[2]) ch5_dout[31:16] <= dq_reg_d;
+    if(data_ready_delay5[1]) ch5_dout[47:32] <= dq_reg_d;
+    if(data_ready_delay5[0]) ch5_dout[63:48] <= dq_reg_d;
+    if(data_ready_delay5[0]) ch5_ack <= ch5_req;
 
     SDRAM_DQ <= 16'bZ;
 

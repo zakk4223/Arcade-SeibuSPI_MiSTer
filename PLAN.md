@@ -262,7 +262,25 @@ oscillating over two instructions at 0x26D66x, the Z80 over 0x015D-0162 with
 its FIFO reads frozen at 10 and no YMF writes at all. 0xFC is the right value,
 and update mode is not reachable without the flash write path anyway.
 
-**What the first run did prove**, before the jumper stopped it: the SXX2C part
+**Second run, with the jumper fixed: no change.** Same deadlock, same PCs. So
+JP1 was a real bug but not the one holding this up. What the second run did add
+is that the Z80 program download is **byte-exact at both ends** -- SDRAM
+0x200000 matches `maincpu[0x1BB800]` (`C3 67 00`, a valid `jp 0x0067`) and
+0x23FFF0 matches `maincpu[0x1FB7F0]`, so the full 256 KB transfers, not just the
+start. `ok bits 1110` also shows CHARS, TILES and SPRITES checksumming
+identically to `rdfts`, which they should -- they are the same ROMs. Only PRG
+"fails", because the checker hardcodes `rdfts`'s expected value.
+
+**So the remaining suspect is the second FIFO.** Everything either side of it is
+now verified: ROM load, program image, protected mode, video DMA, the Z80
+download, the Z80 executing real code. The 386 sends 10 bytes, the Z80 reads
+exactly 10 and stops, and both then poll. That is the shape of a reply that
+never arrives -- the Z80 writing 0x4008 and the 386 not seeing it at 0x680, or
+0x684 d1 never going true. Neither has any telemetry, which is the first thing
+to add: a push/pop counter pair on fifo2 would say in one reading which side is
+wrong.
+
+**What the first run proved**, before the jumper stopped it: the SXX2C part
 table loads the program byte-exact (reset vector `E9 0D FF 00 ... 80 4A 4A 36`
 verified in SDRAM), the 386 reaches protected mode and runs (CS 0018), video
 DMA fires every frame, and **the Z80 program download works** -- the Z80 was
@@ -913,7 +931,26 @@ sim/                      Verilator testbenches for the decrypt units
    sprites. **Resolved in 13b** -- concurrent scan/draw, horizontal culling and
    fetch/emit overlap took starvation to zero across the whole measured load
    range, on hardware.
-3. **SDRAM at 114.5 MHz** with CAS3 — above the usual 100 MHz for this
+3. **SDRAM at 114.5 MHz** with CAS3 -- **largely resolved 2026-08-09 by a
+   pipeline stage after `dq_reg`.** The recurring `dq_reg -> chN_dout` failures
+   had no logic in them at all: one 16-bit capture register in the I/O cell
+   fanning out to 5 channels x 64 bits, so the fitter could not place the net.
+   `dq_reg_d` is a plain fabric copy one cycle behind, and the only thing the
+   channel dout registers read; every `data_ready` tap moved one position later
+   to pay for the cycle. On the SAME seed this took clk_ram from -0.690 (TNS
+   -12.459) to -0.022 (TNS -0.022), and a reseed then closed the whole design at
+   +0.301. Note this is NOT the section 10 mistake: `dq_reg` itself is untouched
+   and still single, so the DQ input path is unchanged; only the fanout moved to
+   a register with no I/O constraint. Verified on hardware -- the ROM checker
+   reads all four regions back and reports `ok bits 1111`.
+
+   Also worth correcting: this section used to nominate retiming `spi_layers`'
+   address path as the first lever. That path is real -- `gfx_base` is four adds
+   deep -- but it is in **clk_sys**, which passes with margin, so it could never
+   have fixed a clk_ram failure. Look at the failing endpoint before picking a
+   lever.
+
+   Original note follows. **SDRAM at 114.5 MHz** with CAS3 — above the usual 100 MHz for this
    controller, and now the tightest domain in the design. Setup slack on
    `clk_ram` fell to **+0.106 ns** when the tile layers landed, from +1.415 ns
    before. The sprite engine shares that channel arbitration and will very

@@ -56,13 +56,19 @@ module tb_sdram_top
 		.ioctl_index    (8'd0),
 		.ioctl_dout     (ioctl_dout),
 		.ioctl_wait     (ioctl_wait),
+		.set_sxx2c      (1'b0),      // this bench drives the rdfts layout
 		.sdr_addr       (ldr_addr),
 		.sdr_din        (ldr_din),
 		.sdr_be         (ldr_be),
 		.sdr_req        (ldr_req),
 		.sdr_rnw        (ldr_rnw),
 		.sdr_ack        (ldr_ack),
-		.rom_ready      (rom_ready)
+		.rom_ready      (rom_ready),
+		// Telemetry outputs this bench does not look at. They were added to
+		// rom_loader long after tb_sdram_top was written and never wired, which
+		// left run-sdram failing to elaborate.
+		.bytes_in       (),
+		.part_end       ()
 	);
 
 	sdram sdram
