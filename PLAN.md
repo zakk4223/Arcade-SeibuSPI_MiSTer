@@ -804,10 +804,13 @@ sim/                      Verilator testbenches for the decrypt units
    LFO, 1800 lines of C in MAME, and no existing FPGA implementation anywhere
    (checked jtcores, jtframe, all local Arcade-* cores — nothing). Staged plan:
    PCM slots first (Seibu games lean heavily on PCM for both music and SFX), then
-   4-op FM. Until FM lands the core will have partial audio.
+   4-op FM. **Both landed** -- see 14 and 15; music plays on hardware with 0
+   overruns. What is left is the list of gaps in 14.5, none of which is
+   structural.
 2. **Sprite bandwidth.** 3 SDRAM reads per 16-pixel sprite row; worst case 512
-   sprites. Needs a per-line sprite list pre-pass in hblank and a hard per-line
-   fetch budget. Measure in sim before trusting it.
+   sprites. **Resolved in 13b** -- concurrent scan/draw, horizontal culling and
+   fetch/emit overlap took starvation to zero across the whole measured load
+   range, on hardware.
 3. **SDRAM at 114.5 MHz** with CAS3 — above the usual 100 MHz for this
    controller, and now the tightest domain in the design. Setup slack on
    `clk_ram` fell to **+0.106 ns** when the tile layers landed, from +1.415 ns
@@ -829,8 +832,11 @@ sim/                      Verilator testbenches for the decrypt units
    clock-enable port, so the lever is either wait-states on the memory
    interface or adding a real `cpu_en` to the core. **Unresolved.**
 5. **Decrypt table transcription** (see §5.4) — script-generated + Verilator-checked.
-6. **Alpha blending** is a MAME approximation, not the real hardware behaviour
-   (MAME's own TODO). Ours will be equally approximate.
+6. **Alpha blending.** MAME's table of blended pens is its own approximation of
+   the hardware (its TODO says so) and we reproduce that table exactly; the
+   blend arithmetic itself is now bit-exact rather than a 50/50 average, so we
+   are as close to MAME as it is possible to be. Any remaining inaccuracy is
+   MAME's, not ours. See 13c.
 7. **DS2404** — the game reads it; a stub returning 0 may or may not satisfy the
    boot checks. `spi_ds2404_unknown_r` returning 0x00 is what MAME does.
 8. **Toolchain.** Quartus Prime 17.0.0 Lite at `~/intelFPGA_lite/17.0/quartus`
@@ -1153,7 +1159,7 @@ Of those, only the first would ever have produced an obvious symptom.
         (a registered one accepts every write twice, because `l1_cache` holds
         `valid` until it observes `ready`), and `cpu_addr` is declared `[31:2]`
         so the main RAM dword index is `cpu_addr[17:2]`, not `[15:0]`.
-- [~] **T4** Video: DMA engines, palette, 4 layer pipelines, sprite engine,
+- [x] **T4** Video: DMA engines, palette, 4 layer pipelines, sprite engine,
       mixer, 320x240 output + ROT270.
       - [x] `spi_dma.sv` — tilemap / palette / sprite DMA, including the oddly
             interleaved rowscroll destinations and the segment skipping when
@@ -1307,7 +1313,41 @@ Of those, only the first would ever have produced an obvious symptom.
       slack clk_ram +0.641 ns, clk_sys +0.919 ns, clk_cpu +3.044 ns. RAM
       blocks are now the tightest resource. (The PCM-only build before FM was
       77% ALMs / 82% RAM / 44% DSP.)
-- [ ] **T6** MRA, docs, build verification.
+- [x] **T6** MRA, docs, build verification.
+      - [x] **`tools/check_mra.py`, wired up as `make check-mra`.** Three
+            copies of the part list have to agree and nothing at runtime
+            checks them: MAME's `ROM_START(rdfts)`, `mra/rdfts.mra`, and
+            `rom_loader.sv`'s table. The MRA carries no scatter information
+            at all -- the loader infers everything from the part INDEX -- so
+            a reordered or dropped part loads to the wrong address silently.
+            The checker compares order, name, CRC, size, scatter mode and
+            destination address, using MAME as the authority rather than
+            `build_sdram_image.py`, which is ours and could share a mistake
+            (the section 12 trap). Optionally confirms every part resolves
+            out of a real zip by CRC. Proven to catch a swap, a one-digit
+            CRC error and a dropped part. All 14 parts currently agree.
+      - [x] **`make verify`** = lint + check-mra + test, and it passes.
+      - [x] **`make test` never ran the tests.** `sim/Makefile` defined
+            `lint-sound` above `all`, so it was the default goal and
+            `make -C sim` linted one module instead of running the suite.
+            `all` is now first. This is why the ordering matters more than
+            it looks: the root Makefile calls the sub-make with no target.
+      - [x] **`make -C sim capture`** produces the golden capture and the
+            SDRAM image, so `run-video` / `run-dma` are reproducible instead
+            of depending on paths from whoever last ran them -- `CAP`
+            defaulted to a scratch directory that no longer existed.
+      - [x] README brought up to date: the frame is bit-exact, the MRA check
+            and capture flow are documented, and the fitter-seed procedure is
+            written down where someone hitting a negative `clk_ram` will find
+            it.
+      - [x] `releases/` refreshed to the current RBF and MRA.
+      - [x] **Clean-from-scratch build verified.** `make clean && make build`
+            from an empty `db/`, `incremental_db/` and `output_files/`: 0
+            errors, timing identical to the incremental build (`clk_ram`
+            +0.443, `clk_sys` +1.241), and the RBF **byte-identical** to the
+            one in `releases/` and running on the MiSTer. So nothing in the
+            incremental database was masking a file missing from
+            `files.qip`, and the build is deterministic.
 
 Order matters: T4 is the visible payoff and depends only on T1–T3. T5 can lag.
 

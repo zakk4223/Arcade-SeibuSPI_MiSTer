@@ -4,23 +4,30 @@ Raiden Fighters on Seibu **SXX2E** single-board hardware (MAME set `rdfts`).
 
 ## Status
 
-Video is functional and cross-checked against MAME frame by frame. Sound plays
-on real hardware. See `PLAN.md` for the full design notes and the task list.
+**The rendered frame is bit-exact against MAME** — every one of 76,800 pixels,
+on two independent captures with different register state. Sound plays on real
+hardware. See `PLAN.md` for the full design notes and the task list.
 
 | block | state |
 |---|---|
 | ROM loading (hardware byte scatter) | verified byte-exact against MAME's regions |
+| MRA part list | verified against MAME's driver and the RTL table (`make check-mra`) |
 | GFX decryption (tiles, chars, SEI252 sprites) | verified against MAME, done at fetch time |
 | 386 (z386) + memory map + IRQ | running |
 | Video DMA | verified exact against MAME's video RAMs |
 | Tile layers (back / midl / fore / text) | verified against MAME |
-| Mixer | verified against MAME |
-| Sprites | drawing, not yet fully validated |
+| Sprites | verified against MAME, no starvation under load |
+| Mixer, including the exact 127/129 alpha blend | **bit-exact against MAME** |
 | Z80 + banked ROM + command FIFO + coin latch | running on hardware |
 | YMF271 registers, timers, IRQ | verified in simulation, running on hardware |
 | YMF271 PCM synthesis (12 voices) | verified in simulation, music plays on hardware |
 | YMF271 FM (4-op, 2x2-op, 3-op, all 16 algorithms, feedback) | verified in simulation |
 | YMF271 LFO (pitch and amplitude) | verified in simulation |
+
+Known gaps, all in the sound chip and none of them silent-failure risks: the
+wave-memory read port, PCM interpolation, and a handful of register fields
+nothing writes. `PLAN.md` section 14.5 lists them in order of how likely they
+are to be heard.
 
 ## Installing
 
@@ -37,10 +44,19 @@ Needs an SDRAM module of **32 MB or more**; the ROM set occupies 22.5 MB.
     make timing     # name the worst timing paths after a fit
     make lint       # Verilator lint
     make test       # Verilator unit tests
+    make check-mra  # MRA vs MAME's driver vs the RTL loader table
+    make verify     # all three of the above
 
 A compile that reports "successful" has not necessarily met timing — check the
 Setup Summary in `output_files/SeibuSPI.sta.rpt`, or run `make timing`, which
 prints the endpoints the summary leaves out.
+
+`clk_ram` is close enough to the edge that the **fitter seed decides whether a
+build closes**, and the winning seed is specific to the netlist. If the Setup
+Summary is negative on `clk_ram`, change `SEED` in `SeibuSPI.qsf` and re-fit —
+`make fit && make sta && make asm` skips synthesis and is much quicker than a
+full compile. The failing paths are always inside `sdram.sv`; do not "optimise"
+`dq_reg` to chase them, which corrupts SDRAM reads (`PLAN.md` section 10).
 
 Quartus 17.0 is expected at `~/intelFPGA_lite/17.0/quartus`; override with
 `QUARTUS_DIR=`.
@@ -52,9 +68,18 @@ replaying it through the RTL. See `PLAN.md` section 12 — it documents several
 traps that cost real time, including that the capture must take the bitmap one
 frame after the video RAM snapshot.
 
-    tools/mame_capture.lua       capture registers, video RAMs and a frame
-    tools/build_sdram_image.py   build the SDRAM image from a ROM set, by CRC32
-    make -C sim run-video        render a frame and diff it against MAME's
+    make -C sim capture ROMS=~/Downloads   # grab a frame, build the SDRAM image
+    make -C sim run-video                  # render it and diff against MAME
+    make -C sim run-dma                    # DMA output vs MAME's video RAMs
+
+Both currently pass exactly: 0 of 76,800 pixels differ. `FRAME=` picks the
+scene — 600 is the early attract screen, 2400 the title with the jungle
+background and heavy sprite traffic. Capture more than one; a quiet scene hid
+two sprite bugs and a tile-layer offset for weeks.
+
+Underneath, `tools/mame_capture.lua` takes the registers, video RAMs and bitmap,
+and `tools/build_sdram_image.py` assembles the SDRAM image from a ROM set by
+CRC32 (matching by name fails on merged sets).
 
 The sound chip is checked differently, because there is no equivalent capture.
 `make -C sim run-ymf271` drives the YMF271's register interface the way a sound

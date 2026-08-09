@@ -5,16 +5,32 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-boot run-sdram
+.PHONY: all clean lint lint-top lint-sound capture run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-video run-dma run-boot run-sdram
+
+SLOP_BIAS ?= 1
+
+# Golden-reference capture from MAME, used by run-video and run-dma. Neither is
+# in `all` because both need this capture and a built SDRAM image, which are far
+# too big to keep in the repo. `make capture` produces both:
+#
+#     make capture ROMS=~/Downloads          # then: make run-video
+#
+# FRAME picks the scene -- 600 is the early attract screen, 2400 the title with
+# the jungle background and heavy sprite traffic. Capture your own rather than
+# trusting one scene; PLAN.md 13 records two sprite bugs that a quiet scene hid.
+CAP   ?= /tmp/slop_cap
+ROMS  ?= $(HOME)/Downloads
+FRAME ?= 2400
+# A sibling of $(CAP), not inside it: the SDRAM image is built from the ROM set
+# and is the same for every scene, so several captures share one.
+SDRAM ?= $(CAP)/../sdram.bin
+
+all: run-rom_loader run-tile_decrypt run-spr_decrypt run-ymf271-math run-ymf271
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
 	$(VERILATOR) --lint-only -Wall -I$(RTL) lint.vlt --top-module spi_sound $(SOUND_SRCS)
 
-SLOP_BIAS ?= 1
-CAP ?= /tmp/claude-1000/-home-zakk-proj-SlopperPI/efc84222-a8fe-4ba8-9ca2-3a1f50422bb8/scratchpad/cap
-
-all: run-rom_loader run-tile_decrypt run-spr_decrypt run-ymf271-math run-ymf271
 
 # The YMF271 step and envelope arithmetic against MAME's doubles, exhaustively.
 # No RTL involved -- it checks the algebra ymf271_pcm.sv is built on.
@@ -52,14 +68,23 @@ run-tile_decrypt: obj_dir/Vspi_tile_decrypt
 run-spr_decrypt: obj_dir/Vspi_spr_decrypt
 	@./obj_dir/Vspi_spr_decrypt
 
+# Produce the golden capture and the SDRAM image the two reference tests need.
+# The bitmap is taken one frame after the video RAM snapshot, deliberately --
+# see PLAN.md 12, it is the trap that made ~20% of tilemap entries look wrong.
+capture:
+	@mkdir -p $(CAP)
+	cd $(MAME) && SLOP_OUT=$(abspath $(CAP)) SLOP_FRAME=$(FRAME) ./mame rdfts \
+	    -rompath $(ROMS) -autoboot_script $(abspath $(TOOLS))/mame_capture.lua \
+	    -video none -sound none -seconds_to_run 45 -nothrottle
+	python3 $(TOOLS)/build_sdram_image.py $(ROMS)/rdft.zip $(SDRAM)
+	@echo "capture in $(CAP), sdram image $(SDRAM)"
+
 # Golden-reference tests. Need a capture from tools/mame_capture.lua in $(CAP).
 run-dma: obj_dir/Vspi_dma
 	@./obj_dir/Vspi_dma $(CAP)
 
 obj_dir/Vspi_dma: $(RTL)/spi_dma.sv tb_dma.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module spi_dma $(RTL)/spi_dma.sv tb_dma.cpp
-
-SDRAM ?= $(CAP)/../sdram.bin
 
 run-video: obj_dir/Vtb_video_top
 	@./obj_dir/Vtb_video_top $(CAP) $(SDRAM)

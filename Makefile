@@ -3,7 +3,7 @@
 QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
-.PHONY: all build map fit asm sta timing clean lint test
+.PHONY: all build map fit asm sta timing clean lint test check-mra verify
 
 all: build
 
@@ -36,6 +36,17 @@ lint:
 
 test:
 	@$(MAKE) -C sim
+
+# The MRA carries no scatter information -- rom_loader.sv infers all of it from
+# the part INDEX -- so a reordered or dropped part loads to the wrong address
+# with no error anywhere. This checks the MRA, the RTL table and MAME's driver
+# all agree. Pass ZIP=... to also confirm the parts resolve out of an archive.
+#   make check-mra ZIP=~/Downloads/rdft.zip
+check-mra:
+	@python3 tools/check_mra.py $(if $(ZIP),--zip $(ZIP))
+
+# Everything that can be checked without a Quartus run or a MiSTer.
+verify: lint check-mra test
 
 clean:
 	rm -rf db incremental_db output_files
