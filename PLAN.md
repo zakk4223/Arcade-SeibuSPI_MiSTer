@@ -1222,11 +1222,12 @@ Of those, only the first would ever have produced an obvious symptom.
             which removes the entire +-1-per-channel error class: 26,492
             pixels of the frame-2400 capture to zero, and the raw frame score
             from 34.70% to 0.24%.
-      - [ ] **The left-edge band is the whole remaining residual** -- 185
-            pixels, ALL of them in source columns 2-5, and it is a
-            line-buffer bank race rather than anything in the mixer. See 13c
-            for the measurement and the intended fix; it lives in
-            `spi_layers` / `spi_sprite`, not `spi_mixer`.
+      - [x] **The left-edge band is fixed** -- it was a line-buffer bank
+            race, not the mixer: the display read the bank the *renderer*
+            was pointing at, and that flip is deferred to a tile boundary.
+            The read side now comes from `vcnt[0]` in both `spi_layers` and
+            `spi_sprite`. **tb_video passes exactly, 0 of 76,800 pixels
+            differing, on two independent captures.** See 13c.
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's
@@ -1252,11 +1253,10 @@ Of those, only the first would ever have produced an obvious symptom.
       without comparing actual pixels. That harness is section 12, and every
       T4 fault since has been found through it.
 
-      **What is left on T4:** the 185-pixel left-edge band of 13c, which is
-      a bank race in `spi_layers` / `spi_sprite` and is now the only thing
-      between `sim/tb_video` and a green run. Headroom still unclaimed:
-      `spi_layers` renders layers the game has disabled, and issues two
-      64-bit reads per text column for a 6-byte char row.
+      **What is left on T4:** nothing for correctness -- the frame is exact
+      against MAME on two captures. Optional headroom only: `spi_layers`
+      renders layers the game has disabled, and issues two 64-bit reads per
+      text column for a 6-byte char row.
 - [~] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
       - [x] `rtl/t80/` — T80 vendored from Arcade-IremM72_MiSTer. VHDL, so
             Verilator cannot read it; `sim/T80s.sv` is a port-compatible stub
@@ -1877,13 +1877,52 @@ lands anywhere in the first three pixels of a line, jittering per line. Until
 it happens the mixer is reading `~render_bank`, which is still the *previous*
 line's buffer. That is the band, and it has been there all along.
 
-The fix belongs on the display side, not the renderer's: derive the bank the
-mixer reads from the display position rather than from the renderer's progress,
-so it switches exactly on the line boundary. Deriving both sides from `vcnt[0]`
-would also make drift structurally impossible. It touches `spi_layers` and
-`spi_sprite`, which is where the bank convention has bitten twice before
-(section 13), so it wants its own change and its own verification rather than
-riding along with the blend.
+### Fixed, and the frame is now exact
+
+The fix is on the display side, not the renderer's. `render_bank` keeps the
+write side and keeps its deferred tile-boundary flip, which is correct for the
+reason the restart path already documents. The read side stops following it:
+
+    wire disp_bank = ~vcnt[0];
+    wire [9:0] lb_rd_addr = {lb_wrap ? ~disp_bank : disp_bank, lb_x};
+
+in **both** `spi_layers` and `spi_sprite` -- they have to agree, or the mixer
+takes its sprite pixel from a different line than its tile pixels. `vcnt`
+changes on exactly the edge the display crosses into a new line, one cycle
+earlier than a `line_start`-triggered register could manage, which matters
+because the read address for hcnt=0 is presented in that very cycle. It also
+cannot drift: VTOTAL is 296, so `vcnt[0]` toggles every line including across
+the frame wrap.
+
+    frame 2400   185 wrong  ->  0 / 76800   PASS, exact
+    frame  600     - -      ->  0 / 76800   PASS, exact
+
+Frame 600 is an independent capture with a different register state
+(`fore_d13=1`, different scrolls), so this is not one frame being fitted. **This
+is the first time tb_video has ever passed**, and with the blend exact there is
+no tolerance left in the comparison -- 76,800 of 76,800 pixels identical to
+MAME, twice.
+
+The render-bank flip still jitters across hcnt 0-2; that is expected and now
+harmless, and tb_video still prints it because it is the measurement that found
+the fault.
+
+Confirmed on hardware the same day: attract renders correctly with sprites,
+`slop vitals` reports running with all layers on, vblank counting, **layer
+overruns 0**, and `slop sound` **0 PCM overruns**. Timing met on every clock,
+TNS 0.000, worst hold +0.242; `clk_ram` +0.443, `clk_sys` +1.241, `clk_cpu`
++2.568.
+
+**The fitter seed is a lottery on this design, and it is worth budgeting for.**
+`clk_ram` is marginal enough that seed choice decides whether a build closes,
+and the winning seed is netlist-specific -- 17 failed the mixer-only netlist at
+-0.556 and then passed the mixer+bank netlist at +0.443. This round went 5
+(-0.155), 12 (-0.428), 17 (+0.443). Two things make that cheaper: a re-fit is
+`make fit && make sta && make asm`, which skips `quartus_map` and is much faster
+than a full compile; and the failing paths are always the same `sdram|dq_reg ->
+chN_dout` and `chN_rq -> SDRAM_A`. The latter is the wide combinational address
+calculation section 9.3 already nominates as the first structural lever, so if
+seeds ever stop working, retiming that -- not touching `dq_reg` -- is next.
 
 ## 14. Sound (T5) — design notes and what is deliberately missing
 

@@ -395,9 +395,11 @@ int main(int argc, char **argv)
         }
 
         // When does the render bank flip, relative to the display line?
-        // spi_layers defers the flip to a tile boundary, so it can land some
-        // way into the line the mixer has already started reading -- which is
-        // the whole of the left-edge error band. Record where it happens.
+        // spi_layers defers it to a tile boundary, so it lands at hcnt 0, 1 or
+        // 2 and jitters per line. That used to decide which buffer the mixer
+        // read, and was the whole left-edge error band; the read bank now comes
+        // from vcnt[0] instead, so this jitter is expected and harmless. Kept
+        // because it is the measurement that identified the fault.
         {
             static int prev_bank = -1;
             if (frame == 2 && prev_bank >= 0 && (int)dut->dbg_lb_bank != prev_bank

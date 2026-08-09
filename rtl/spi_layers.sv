@@ -352,7 +352,21 @@ module spi_layers
 	reg  [3:0] lb_we;      // one bit per layer
 
 	assign lb_bank = render_bank;
-	wire [9:0] lb_rd_addr = {lb_wrap ? render_bank : ~render_bank, lb_x};
+
+	// The bank the MIXER reads. It has to switch exactly on the display's line
+	// boundary, and render_bank cannot do that: the renderer defers its flip to
+	// a tile boundary (deliberately -- see the restart path above; abandoning an
+	// SDRAM fetch with its ack outstanding is worse), so the flip lands at hcnt
+	// 0, 1 or 2 and jitters from line to line. Until it happened the display was
+	// still reading the PREVIOUS line's buffer, which is the error band in
+	// source columns 2-5 that section 13c of PLAN.md measures.
+	//
+	// vcnt[0] switches on exactly the right edge, costs nothing, and cannot
+	// drift out of step: VTOTAL is 296, so the parity toggles every line
+	// including across the frame wrap. render_bank still owns the WRITE side,
+	// unchanged, so the renderer keeps its safe tile-boundary restart.
+	wire disp_bank = ~vcnt[0];
+	wire [9:0] lb_rd_addr = {lb_wrap ? ~disp_bank : disp_bank, lb_x};
 
 	spi_dpram #(.DW(10), .AW(10)) lbuf_back
 		(.wr_clk(clk), .rd_clk(clk), .wr_addr(lb_wr_addr), .wr_data(lb_wr_data), .wr_en(lb_we[0]),

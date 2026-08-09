@@ -138,7 +138,12 @@ module spi_sprite
 	reg [14:0] lb_wr_data;
 	reg        lb_we;
 
-	wire [9:0] lb_rd_addr = {lb_wrap ? render_bank : ~render_bank, lb_x};
+	// Display-side bank, switching on the line boundary rather than following
+	// the renderer's deferred flip -- same reasoning and same expression as
+	// spi_layers, and the two must agree or the mixer takes its sprite pixel
+	// from a different line than its tile pixels.
+	wire disp_bank = ~vcnt[0];
+	wire [9:0] lb_rd_addr = {lb_wrap ? ~disp_bank : disp_bank, lb_x};
 
 	spi_dpram #(.DW(15), .AW(10)) lbuf
 		(.wr_clk(clk), .rd_clk(clk),
