@@ -17,9 +17,9 @@ Seibu **SXX2E Ver3.0** hardware (`sxx2e` machine in MAME).
 The SPI cartridge mainboard (SXX2C) has no sound sample ROM. Its YMF271 reads from
 two Intel E28F008SA 1 MB flash chips that the **game itself programs at first boot**
 (the several-minute "techno music" reflash procedure). MAME persists the flash to
-NVRAM after that one-time flash. There is no dumped pre-flashed image, and the
-mapping from the cartridge's `sound01` region into flash is a runtime software
-transform we would have to reverse.
+NVRAM after that one-time flash, and there is no dumped pre-flashed image. This
+file used to say the cartridge-to-flash mapping was "a runtime software transform
+we would have to reverse"; it has since been measured and is written out below.
 
 `rdfts` is the same game on a single board that replaces all of that with:
 
@@ -30,6 +30,151 @@ transform we would have to reverse.
 CPU, video, sprite chip, GFX ROMs and encryption are **identical** between the two.
 So the core is built against SXX2E and the SPI cart variants can be added later
 behind an MRA config bit once flash emulation exists.
+
+### What the SPI cartridge copies at boot, and where
+
+Measured rather than inferred: `rdft` under MAME with an `install_write_tap` on
+the Z80's 0x6000-0x600F (the same idiom as `tools/mame_probe.lua`) and a fresh
+`-nvram_directory`, left running until the reflash stopped changing the flash,
+then the resulting images correlated byte-for-byte against the cartridge ROMs.
+Numbers below are `rdft`; the mechanism should be common to the cart games but
+each has its own payload.
+
+**Two copies happen, and only one of them is persistent.**
+
+**1. The Z80 program, every boot, into RAM.** 256 KB copied verbatim from the
+cartridge's 386 program ROM at region offset 0x1BB800 (0x003BB800 as the 386
+addresses it), pushed a byte at a time to port 0x00000688
+(`z80_prg_transfer_w`, auto-incrementing pointer) and released from reset by
+0x0000068C. Captured all 262144 bytes and they match the program ROM exactly.
+This is RAM, not flash, and it is redone on every boot — it is the first of the
+three differences listed above.
+
+**2. The PCM samples, once, into flash.** The destination is the two E28F008SA
+chips, which *are* the YMF271's sample memory: 0x000000-0x0FFFFF and
+0x100000-0x1FFFFF of the chip's 23-bit external address space.
+
+The writer is the **Z80**, through the **YMF271's own external memory port** —
+utility registers 0x14/0x15/0x16 set the 23-bit address (0x16 d7 = R/W) and
+every write to 0x17 pre-increments the address and writes one byte. That is the
+register block 14.5 lists as unimplemented. Stock Intel command set, as
+observed:
+
+```
+ADDR  7FFFFF rw=0     address -1, so the pre-increment lands on 0
+WRITE 000000 = FF     Read Array (reset), both chips
+WRITE 000000 = 20     Block Erase Setup
+WRITE 000001 = D0     Erase Confirm
+   ... all 16 x 64 KB blocks of each chip, both chips in lockstep,
+       R/W flipped to 1 between steps to poll the status register
+WRITE 000081 = 40     Byte Program Setup
+WRITE 000081 = F7     the data byte
+```
+
+The source is the cartridge's `sound01` ROMs, which live on the **386** bus at
+0x00A00000-0x013FFFFF. The Z80 has no window onto that, so the bytes cross the
+sound FIFO from the 386. Payload, 1,939,011 bytes:
+
+| Flash range         | Source                                              |
+|---------------------|-----------------------------------------------------|
+| `0x000000-0x0FFFFF` | `gun_dogs_pcm.u0217`, first 1 MB                     |
+| `0x100000-0x1A13B5` | `gun_dogs_pcm.u0217`, second 1 MB (its first 0xA13B6)|
+| `0x1A13B6-0x1D9642` | `seibu_8.u0216` (its first 0x3828D bytes)            |
+| `0x1D9643-0x1FFFFF` | left erased                                          |
+
+The uncopied tail of *both* source ROMs is entirely 0xFF blank padding, so this
+is a complete copy of all the real data, packed contiguously. Nothing is
+selected, skipped or rearranged.
+
+**The "transform" is just bus width.** `gun_dogs_pcm.u0217` is wired to D0-D15
+of the 386's 32-bit bus and `seibu_8.u0216` to D0-D7, which is why MAME's
+`sound01` region is a sparse 10 MB image with three populated windows
+(`ROM_LOAD32_WORD` and `ROM_LOAD32_BYTE`). The flash payload is exactly those
+populated byte lanes concatenated — verified across the whole span.
+
+**Region lock.** Byte 0 of flash chip 0 is the region ID (0x80, Europe, for this
+set). MAME ships `flash0_blank_region80.u1053` as a dumped blank flash carrying
+it and re-asserts it on every `machine_reset` as an anti-brick hack; an erased
+or mismatched byte is the "hardware error 81" the driver header describes.
+
+Only the writes were tapped, so the reads themselves are not captured here; what
+is measured is that the direction bit is set to read between steps — which is
+enough to say the port has to work in both directions, since a write-only one
+would hang the updater on its first status poll.
+
+### Two MRAs: pre-flashed, or the reflash with the music
+
+Both are possible, and the split is lopsided — the pre-flashed one is nearly
+free and the authentic one carries all of the work.
+
+**The flash image is fully derivable from the cartridge ROMs.** No emulated
+reflash is needed to obtain it:
+
+```
+flash[0x000000-0x000003] = maincpu[0x1FFFFC-0x1FFFFF]      region + build stamp
+flash[0x000004-0x1A13B5] = gun_dogs_pcm.u0217[0x4-0x1A13B5]
+flash[0x1A13B6-0x1D9642] = seibu_8.u0216[0x0-0x3828C]
+flash[0x1D9643-0x1FFFFF] = 0xFF
+```
+
+Built straight from the zip, that is **byte-identical** to the image the game
+programs itself. Booting `rdft` on it, the flash is left untouched and the
+machine runs at 2368% instead of the 565% it manages while flashing: the
+updater is skipped. (Video and sound were off in that run, so what is confirmed
+is that the update is skipped and the image accepted, not that attract plays
+with correct audio.)
+
+**The four header bytes are not a magic number and not a checksum.** They are a
+verbatim copy of the last four bytes of the 386 program ROM — found at
+`maincpu[0x1FFFFC]`, which is the location the MAME driver header already names
+for the region code. Region byte plus a three-byte build ID. Simple sums over
+the payload do not reproduce them. That is also the region lock in one
+sentence: a cartridge from another region carries a different stamp, the stamp
+in flash no longer matches, and the updater runs.
+
+So the trigger is **content-based**, not the jumper. Real hardware uses a jumper
+to select update mode (the 0x400a port MAME leaves as a TODO), but what is
+observed here is: stamp matches -> play, stamp missing or wrong -> reflash.
+That is exactly what makes two MRAs work off one core.
+
+No interleaving is involved, so the pre-flashed part list is plain
+concatenation:
+
+```xml
+<!-- YMF271 sample flash, pre-programmed -->
+<part>80 4a 4a 36</part>
+<part name="gun_dogs_pcm.u0217" offset="0x000004" length="0x1A13B2"/>
+<part name="seibu_8.u0216"                        length="0x03828D"/>
+<part repeat="0x0269BD">FF</part>
+```
+
+4 + 0x1A13B2 + 0x3828D + 0x269BD = 0x200000 exactly.
+
+**What each variant costs the core:**
+
+| Requirement                                   | Pre-flashed | Authentic |
+|-----------------------------------------------|-------------|-----------|
+| Z80 program download (0x688 / 0x68C)           | yes         | yes       |
+| Second FIFO (Z80 -> 386)                       | yes         | yes       |
+| Flash region in SDRAM                          | read-only, exactly like SXX2E's sample ROM | **writable**, and the sample line cache has to be invalidated on write |
+| YMF271 ext memory port 0x14-0x17               | no          | **yes, both directions** |
+| E28F008SA command state machine                | no          | **yes** — Read Array, Block Erase 20/D0, Byte Program 40/data, status polling |
+| Persistence                                    | none needed | **MiSTer save file**, or it reflashes on every boot |
+
+The pre-flashed variant needs nothing beyond what SXX2C support already
+requires. The authentic one adds a small flash controller, a write path down a
+channel that is read-only today, and save-file plumbing — and without that last
+one it is a multi-minute ritual every single boot.
+
+Two MRAs is not the only mechanism: the loader could build either image from the
+same part list behind an OSD switch. Two MRAs is the more idiomatic MiSTer split
+and needs no core option plumbing. Either way the pre-flashed one is what people
+want to play, and the authentic one is a strict superset that can follow later.
+
+One possible bonus, unverified: the 10 MB `sound01` window exists so the updater
+can read it, so a pre-flashed MRA may be able to omit those files entirely and
+claw back roughly 2.5 MB against `rdft`'s 31.4 MB footprint. Confirm the 386
+never touches that window during normal play before budgeting on it.
 
 ### What else `seibuspi.cpp` covers, and what each would cost
 
