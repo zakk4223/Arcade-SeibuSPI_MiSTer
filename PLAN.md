@@ -315,10 +315,37 @@ voices sounding, **0 PCM overruns**, fifo2 16/16, all layers enabled, video DMA
 every frame. Timing met on every clock (clk_ram +0.735, clk_sys +1.517, TNS
 0.000) at SEED 3.
 
-One thing to look at next: `sprite starved 1691`, which is not 0 the way SXX2E
-is. The cartridge has the same sprite engine, so this is most likely the ch3
-write path stealing bandwidth, or simply a heavier scene -- measure against
-y-hits per 13b before assuming.
+**Sprite starvation, measured against y-hits (2026-08-09).** The `starved 1691`
+seen after boot was a cumulative total since core load, not a rate -- the same
+trap as the 17199 read on SXX2E earlier the same day. Sampled properly, with
+masked 16-bit deltas at ~54 ms (fast enough that y-hit, which ticks ~400k/s,
+cannot wrap twice), `rdft` is **no worse than `rdfts` and mostly better** at
+matching work:
+
+| y-hits/frame | rdfts starved/frame | rdft starved/frame |
+|--------------|---------------------|--------------------|
+| 3200-3599    | 0.10                | 0.25               |
+| 4400-4799    | 2.00                | 0.64               |
+| 4800-5199    | 1.58                | 0.00               |
+| 5600-5999    | 6.24                | 0.00               |
+
+So the ch3 write path is not costing the sprite engine anything measurable. The
+question that prompted this is answered: SXX2C is fine.
+
+**But neither board reproduces 13b's "0.0 across 4000-8799" any more**, and that
+is unexplained. Both show starvation climbing above ~6000 y-hits/frame -- the
+pre-`dq_reg` core reads 18.85 at 6400-6799, the current one 2.60, and the two
+swap places in the buckets either side. So the `dq_reg` pipeline stage is NOT
+the cause, which was the obvious suspect since it adds a cycle to every SDRAM
+read; it was tested directly by reloading the previous core off its backup.
+
+Treat this as *not yet established* rather than as a regression. Every
+high-load bucket in both sweeps has n = 2 to 7, which is exactly the sample
+size 13b warns about ("several with n < 5"), and the two runs disagree with
+each other as much as either disagrees with 13b. What it needs is a sweep that
+sits on a busy scene long enough to fill those buckets -- a frozen heavy frame,
+or the demo gameplay rather than the whole attract cycle -- before anyone
+concludes the engine got slower.
 
 **What the first run proved**, before the jumper stopped it: the SXX2C part
 table loads the program byte-exact (reset vector `E9 0D FF 00 ... 80 4A 4A 36`
