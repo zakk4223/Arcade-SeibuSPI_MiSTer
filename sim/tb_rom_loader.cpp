@@ -37,8 +37,10 @@ enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
 
 struct Part { const char *name; uint32_t base; uint32_t size; Mode mode; };
 
-// Must match the part table in rtl/rom_loader.sv and the <part> order in the MRA.
-static const Part parts[] = {
+// Must match the part tables in rtl/rom_loader.sv and the <part> order in the
+// MRAs. tools/check_mra.py checks those against MAME; this checks that the
+// loader's SCATTER actually puts every byte where the table says.
+static const Part parts_sxx2e[] = {
     { "seibu_1.u0259",        PRG_BASE,                  0x080000, W32_B0  },
     { "raiden-f_prg2.u0258",  PRG_BASE,                  0x080000, W32_B1  },
     { "raiden-f_prg34.u0262", PRG_BASE,                  0x100000, W32_W23 },
@@ -54,7 +56,29 @@ static const Part parts[] = {
     { "gun_dogs_obj-3.u0323", SPRITES_BASE + 0x800000,   0x400000, LINEAR  },
     { "raiden-f_pcm2.u0975",  PCM_BASE,                  0x200000, LINEAR  },
 };
-static const int NPARTS = sizeof(parts) / sizeof(parts[0]);
+
+// rdft, SPI cartridge, pre-flashed. Four byte lanes for the program and three
+// for the text layer instead of SXX2E's word+byte pairs, which is what makes
+// W32_B2/W32_B3/W24_B0/W24_B1 reachable at all -- before this set they were
+// implemented but dead, so this is their first coverage. No Z80 part: that
+// region is RAM the 386 fills through port 0x688.
+static const Part parts_sxx2c[] = {
+    { "raiden-fi_prg0_121196.u0211", PRG_BASE,                0x080000, W32_B0  },
+    { "raiden-fi_prg1_121196.u0212", PRG_BASE,                0x080000, W32_B1  },
+    { "raiden-fi_prg2_121196.u0210", PRG_BASE,                0x080000, W32_B2  },
+    { "raiden-fi_prg3_121196.u029",  PRG_BASE,                0x080000, W32_B3  },
+    { "seibu_5.u0423",               CHARS_BASE,              0x010000, W24_B0  },
+    { "seibu_6.u0424",               CHARS_BASE,              0x010000, W24_B1  },
+    { "seibu_7.u048",                CHARS_BASE,              0x010000, W24_B2  },
+    { "gun_dogs_bg1-d.u0415",        TILES_BASE,              0x200000, W24_W01 },
+    { "gun_dogs_bg1-p.u0410",        TILES_BASE,              0x100000, W24_B2  },
+    { "gun_dogs_bg2-d.u0424",        TILES_BASE + 0x300000,   0x200000, W24_W01 },
+    { "gun_dogs_bg2-p.u049",         TILES_BASE + 0x300000,   0x100000, W24_B2  },
+    { "gun_dogs_obj-1.u0322",        SPRITES_BASE + 0x000000, 0x400000, LINEAR  },
+    { "gun_dogs_obj-2.u0324",        SPRITES_BASE + 0x400000, 0x400000, LINEAR  },
+    { "gun_dogs_obj-3.u0323",        SPRITES_BASE + 0x800000, 0x400000, LINEAR  },
+    { "pre-programmed flash image",  PCM_BASE,                0x200000, LINEAR  },
+};
 
 static uint32_t dest_of(const Part &p, uint32_t i)
 {
@@ -82,10 +106,11 @@ static uint8_t src_byte(int pi, uint32_t i)
     return (uint8_t)((i & 0xFF) ^ (uint8_t)(pi * 0x37 + 0x5A));
 }
 
-int main(int argc, char **argv)
+static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label)
 {
-    Verilated::commandArgs(argc, argv);
+    printf("--- %s ---\n", label);
     Vrom_loader *dut = new Vrom_loader;
+    dut->set_sxx2c = sxx2c;
 
     std::vector<uint8_t> mem(SDR_SIZE, 0xFF);
     std::vector<uint8_t> ref(SDR_SIZE, 0xFF);
@@ -209,4 +234,15 @@ int main(int argc, char **argv)
     printf("PASS: SDRAM image matches the MAME region layout exactly\n");
     delete dut;
     return 0;
+}
+
+int main(int argc, char **argv)
+{
+    Verilated::commandArgs(argc, argv);
+    int rc = run_set(parts_sxx2e, (int)(sizeof(parts_sxx2e) / sizeof(parts_sxx2e[0])),
+                     0, "rdfts (SXX2E)");
+    if (rc) return rc;
+    rc = run_set(parts_sxx2c, (int)(sizeof(parts_sxx2c) / sizeof(parts_sxx2c[0])),
+                 1, "rdft pre-flashed (SXX2C)");
+    return rc;
 }

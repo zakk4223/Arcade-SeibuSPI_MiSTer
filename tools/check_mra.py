@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
 """
-Verify mra/rdfts.mra against MAME's driver and against the RTL loader.
+Verify the MRAs against MAME's driver and against the RTL loader table.
 
-Three copies of the same part list exist in this project and they have to agree
-exactly, because nothing at runtime checks them:
+Three copies of the same part list exist and they have to agree exactly, because
+nothing at runtime checks them:
 
-    MAME  seibuspi.cpp ROM_START(rdfts)   the authority: names, CRCs, sizes,
+    MAME  seibuspi.cpp ROM_START(<set>)   the authority: names, CRCs, sizes,
                                           load macros and region offsets
-    MRA   mra/rdfts.mra                   what MiSTer hands the core, IN ORDER
+    MRA   mra/<set>.mra                   what MiSTer hands the core, IN ORDER
     RTL   rtl/rom_loader.sv               a fixed table indexed by part number,
                                           which applies the byte scatter
 
-The MRA carries no scatter information at all -- rom_loader.sv infers everything
-from the part INDEX -- so a reordered, inserted or dropped part is silently
-loaded to the wrong address with no error anywhere. That is the failure this
-catches.
+The MRA carries no scatter information -- rom_loader.sv infers every destination
+and byte-lane rule from the part INDEX -- so a reordered, inserted or dropped
+part is loaded to the wrong address with no error anywhere. That is the failure
+this catches.
 
 Comparing the MRA against build_sdram_image.py would prove nothing: both are
-ours and could share a mistake, which is exactly how tb_rom_loader passed for
-months against a reference implementing the same wrong rule (PLAN.md 12). MAME
-is the only independent source here.
+ours and could share a mistake, which is how tb_rom_loader passed for months
+against a reference implementing the same wrong rule (PLAN.md 12). MAME is the
+only independent source here.
+
+The loader is modelled the way the hardware works -- a byte stream split by the
+table's part sizes -- so MRA <part> boundaries need not line up with loader
+parts. rdft relies on that: its sample part is one 2 MB loader part assembled
+from four MRA elements.
 
 Usage:
-    tools/check_mra.py [--mame ~/proj/mame] [--zip rdft.zip]
+    tools/check_mra.py [--set rdfts|rdft|all] [--mame ~/proj/mame] [--zip rdft.zip]
 
-With --zip, also confirms every part resolves out of that archive by CRC32,
+With --zip, also confirms every file part resolves out of that archive by CRC32,
 which is how Main_MiSTer looks parts up (zip_search_by_crc, PLAN.md 11).
 """
 
 import argparse
-import binascii
 import os
 import re
 import sys
 import zipfile
-
-SET = "rdfts"
 
 # rtl/spi_defs.vh
 BASES = {
@@ -47,25 +49,36 @@ BASES = {
     "sprites": 0x0A80000,
 }
 
-# MAME region name -> our SDRAM region
 REGION = {
-    "maincpu": "prg",
-    "audiocpu": "z80",
-    "chars":   "chars",
-    "tiles":   "tiles",
-    "sprites": "sprites",
-    "ymf":     "pcm",
+    "maincpu": "prg", "audiocpu": "z80", "chars": "chars",
+    "tiles": "tiles", "sprites": "sprites", "ymf": "pcm",
 }
 
-# (MAME load macro, offset within region mod 4) -> the loader's scatter mode.
-# ROM_LOAD24_* uses a 3-byte period, which is why MRA <interleave> cannot
-# express it and the scatter lives in hardware.
+SETS = {
+    # table:  which rom_loader.sv part table this set walks
+    # skip:   MAME regions the MRA deliberately does not carry
+    # synth:  logical parts with no single MAME ROM behind them
+    "rdfts": dict(mra="rdfts.mra", table="sxx2e", skip=(), synth=0),
+    "rdft":  dict(mra="rdft.mra",  table="sxx2c",
+                  # audiocpu is RAM the 386 fills through 0x688; sound01 is the
+                  # updater's window and is measurably untouched once the flash
+                  # is programmed; soundflash1 is the blank flash we replace.
+                  skip=("audiocpu", "sound01", "soundflash1"), synth=1),
+}
+
+
 def mame_mode(macro, off):
-    if macro == "ROM_LOAD32_BYTE":  return {0: "M_32_B0", 1: "M_32_B1"}.get(off & 3)
-    if macro == "ROM_LOAD32_WORD":  return "M_32_W23" if (off & 3) == 2 else None
-    if macro == "ROM_LOAD24_WORD":  return "M_24_W01" if (off % 3) == 0 else None
-    if macro == "ROM_LOAD24_BYTE":  return "M_24_B2"  if (off % 3) == 2 else None
-    if macro == "ROM_LOAD":         return "M_LINEAR"
+    """MAME load macro + offset within region -> the loader's scatter mode."""
+    if macro == "ROM_LOAD32_BYTE":
+        return {0: "M_32_B0", 1: "M_32_B1", 2: "M_32_B2", 3: "M_32_B3"}[off & 3]
+    if macro == "ROM_LOAD32_WORD":
+        return {0: "M_32_W01", 2: "M_32_W23"}.get(off & 3)
+    if macro == "ROM_LOAD24_WORD":
+        return "M_24_W01" if (off % 3) == 0 else None
+    if macro == "ROM_LOAD24_BYTE":
+        return {0: "M_24_B0", 1: "M_24_B1", 2: "M_24_B2"}.get(off % 3)
+    if macro == "ROM_LOAD":
+        return "M_LINEAR"
     return None
 
 
@@ -74,19 +87,17 @@ def fail(msg):
     sys.exit(1)
 
 
-def parse_mame(path):
-    """The authoritative list, in ROM_START order."""
+def parse_mame(path, setname, skip):
     src = open(path, encoding="utf-8", errors="replace").read()
-    m = re.search(r"ROM_START\(\s*%s\s*\)(.*?)ROM_END" % SET, src, re.S)
+    m = re.search(r"ROM_START\(\s*%s\s*\)(.*?)ROM_END" % setname, src, re.S)
     if not m:
-        fail("no ROM_START(%s) in %s" % (SET, path))
-    body = m.group(1)
+        fail("no ROM_START(%s) in %s" % (setname, path))
 
-    parts, region, region_off = [], None, 0
-    for line in body.splitlines():
-        r = re.search(r'ROM_REGION(?:32_LE)?\(\s*(0x[0-9a-fA-F]+)\s*,\s*"(\w+)"', line)
+    parts, region = [], None
+    for line in m.group(1).splitlines():
+        r = re.search(r'ROM_REGION(?:32_LE|16_BE)?\(\s*0x[0-9a-fA-F]+\s*,\s*"(\w+)"', line)
         if r:
-            region = r.group(2)
+            region = r.group(1)
             continue
         r = re.search(r'(ROM_LOAD(?:24_WORD|24_BYTE|32_BYTE|32_WORD)?)\('
                       r'\s*"([^"]+)"\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*,'
@@ -94,76 +105,242 @@ def parse_mame(path):
         if not r:
             continue
         macro, name, off, size, crc = r.groups()
-        if region not in REGION:
+        entry = {"name": name, "crc": int(crc, 16), "size": int(size, 16),
+                 "off": int(off, 16), "region": region, "macro": macro}
+        if region in skip:
+            entry["skipped"] = True
+        elif region not in REGION:
             fail("part %s is in unmapped MAME region %r" % (name, region))
-        parts.append({
-            "name": name,
-            "crc":  int(crc, 16),
-            "size": int(size, 16),
-            "off":  int(off, 16),
-            "region": REGION[region],
-            "mode": mame_mode(macro, int(off, 16)),
-            "macro": macro,
-        })
+        else:
+            entry["sdram"] = REGION[region]
+            entry["mode"] = mame_mode(macro, int(off, 16))
+        parts.append(entry)
     if not parts:
-        fail("parsed no ROMs out of ROM_START(%s)" % SET)
+        fail("parsed no ROMs out of ROM_START(%s)" % setname)
     return parts
 
 
 def parse_mra(path):
+    """Every <part> of index 0, in order, as a flat byte-stream description."""
     src = open(path, encoding="utf-8").read()
-    # Only <part> elements carrying a crc; the MRA has none other, but be strict.
+    m = re.search(r'<rom index="0".*?>(.*?)</rom>', src, re.S)
+    if not m:
+        fail('no <rom index="0"> in %s' % path)
+
     out = []
-    for m in re.finditer(r'<part\s+name="([^"]+)"\s+crc="([0-9a-fA-F]+)"\s*/>', src):
-        out.append({"name": m.group(1), "crc": int(m.group(2), 16)})
+    for pm in re.finditer(r"<part\b([^>]*?)(?:/>|>(.*?)</part>)", m.group(1), re.S):
+        attrs, text = pm.group(1), (pm.group(2) or "")
+        name = re.search(r'name="([^"]+)"', attrs)
+        crc = re.search(r'crc="([0-9a-fA-F]+)"', attrs)
+        off = re.search(r'offset="((?:0x)?[0-9a-fA-F]+)"', attrs)
+        ln = re.search(r'length="((?:0x)?[0-9a-fA-F]+)"', attrs)
+        rep = re.search(r'repeat="((?:0x)?[0-9a-fA-F]+)"', attrs)
+        if name:
+            out.append({"kind": "file", "name": name.group(1),
+                        "crc": int(crc.group(1), 16) if crc else None,
+                        "offset": int(off.group(1), 16) if off else 0,
+                        "length": int(ln.group(1), 16) if ln else None})
+        else:
+            nb = len(text.split())
+            if nb == 0:
+                fail("empty <part> in %s" % path)
+            n = int(rep.group(1), 16) if rep else 1
+            out.append({"kind": "fill" if rep else "inline", "size": n * nb})
     if not out:
-        fail("no <part name= crc=> elements in %s" % path)
+        fail("no <part> elements in %s" % path)
     return out
 
 
-def parse_loader(path):
-    """The RTL table: index -> base, size, mode, and the filename in the comment."""
+def parse_loader(path, table):
+    """One of rom_loader.sv's part tables, plus its part count."""
     src = open(path, encoding="utf-8").read()
+    # The tables are the two arms of `always @* if (set_sxx2c) ... else ...`.
+    m = re.search(r"always @\* if \(set_sxx2c\) begin(.*?)\n\telse begin(.*?)\n\tend\n", src, re.S)
+    if not m:
+        fail("cannot find the two part tables in %s" % path)
+    body = m.group(1) if table == "sxx2c" else m.group(2)
+
     out = {}
-    for m in re.finditer(
-            r"4'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
-            r"\s*part_size\s*=\s*25'h([0-9a-fA-F_]+);"
-            r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(\S+)", src):
-        idx, base, size, mode, name = m.groups()
+    for e in re.finditer(r"4'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
+                         r"\s*part_size\s*=\s*25'h([0-9a-fA-F_]+);"
+                         r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(\S+)", body):
+        idx, base, size, mode, name = e.groups()
         out[int(idx)] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
                          "mode": mode, "name": name}
-    m = re.search(r"default\s*:\s*begin\s*part_base\s*=\s*([^;]+);"
+    e = re.search(r"default\s*:\s*begin\s*part_base\s*=\s*([^;]+);"
                   r"\s*part_size\s*=\s*25'h([0-9a-fA-F_]+);"
-                  r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(\S+)", src)
-    if m:
-        base, size, mode, name = m.groups()
-        out["default"] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
-                          "mode": mode, "name": name}
-    nparts = re.search(r"localparam \[3:0\] NPARTS\s*=\s*4'd(\d+)", src)
-    if not nparts:
-        fail("cannot find NPARTS in %s" % path)
-    return out, int(nparts.group(1))
+                  r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(.+)", body)
+    if not e:
+        fail("no default arm in the %s table" % table)
+    base, size, mode, name = e.groups()
+    out["default"] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
+                      "mode": mode, "name": name.strip()}
+
+    sym = "NPARTS_SXX2C" if table == "sxx2c" else "NPARTS_SXX2E"
+    n = re.search(r"localparam \[3:0\] %s\s*=\s*4'd(\d+)" % sym, src)
+    if not n:
+        fail("cannot find %s in %s" % (sym, path))
+    return out, int(n.group(1))
 
 
-def resolve_base(expr, region, region_off):
-    """Evaluate the RTL's part_base expression to a number."""
-    e = expr.replace("SDR_PRG_BASE", hex(BASES["prg"]))
-    e = e.replace("SDR_Z80_BASE", hex(BASES["z80"]))
-    e = e.replace("SDR_CHARS_BASE", hex(BASES["chars"]))
-    e = e.replace("SDR_PCM_BASE", hex(BASES["pcm"]))
-    e = e.replace("SDR_TILES_BASE", hex(BASES["tiles"]))
-    e = e.replace("SDR_SPRITES_BASE", hex(BASES["sprites"]))
-    e = e.replace("SPR_CHUNK_STRIDE", hex(0x400000))
+def resolve_base(expr):
+    e = expr
+    for k, v in (("SDR_PRG_BASE", BASES["prg"]), ("SDR_Z80_BASE", BASES["z80"]),
+                 ("SDR_CHARS_BASE", BASES["chars"]), ("SDR_PCM_BASE", BASES["pcm"]),
+                 ("SDR_TILES_BASE", BASES["tiles"]), ("SDR_SPRITES_BASE", BASES["sprites"]),
+                 ("SPR_CHUNK_STRIDE", 0x400000)):
+        e = e.replace(k, hex(v))
     e = re.sub(r"25'h([0-9a-fA-F_]+)", lambda m: hex(int(m.group(1).replace("_", ""), 16)), e)
     return eval(e, {"__builtins__": {}}, {})
 
 
-def main():
+def expected_base(rom):
+    """Where the loader must put this ROM: region base + whole-group displacement.
+
+    For the 3- and 4-byte-period modes the region offset is a byte LANE within a
+    group, not a displacement, so only whole groups carry into the base.
+    """
+    off = rom["off"]
+    if rom["mode"] in ("M_24_W01", "M_24_B0", "M_24_B1", "M_24_B2"):
+        disp = (off // 3) * 3
+    elif rom["mode"] in ("M_32_B0", "M_32_B1", "M_32_B2", "M_32_B3",
+                         "M_32_W01", "M_32_W23"):
+        disp = (off // 4) * 4
+    else:
+        disp = off
+    return BASES[rom["sdram"]] + disp, disp
+
+
+def check_set(setname, cfg, args):
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    drv = os.path.join(args.mame, "src", "mame", "seibu", "seibuspi.cpp")
+    mra_path = os.path.join(here, "mra", cfg["mra"])
+
+    print("=== %s (%s table) ===" % (setname, cfg["table"]))
+    mame = parse_mame(drv, setname, cfg["skip"])
+    mra = parse_mra(mra_path)
+    rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"), cfg["table"])
+
+    roms = [r for r in mame if not r.get("skipped")]
+    skipped = [r for r in mame if r.get("skipped")]
+    print("MAME: %d ROMs carried, %d in skipped regions (%s)"
+          % (len(roms), len(skipped), ", ".join(cfg["skip"]) or "none"))
+
+    # Sizes of the MRA's byte stream, element by element. A file element with no
+    # explicit length takes its size from MAME.
+    by_name = {r["name"]: r for r in mame}
+    stream = []
+    for el in mra:
+        if el["kind"] == "file":
+            if el["length"] is not None:
+                size = el["length"]
+            else:
+                if el["name"] not in by_name:
+                    fail("MRA part %r is in no ROM_START(%s) entry" % (el["name"], setname))
+                size = by_name[el["name"]]["size"]
+            stream.append((size, el))
+        else:
+            stream.append((el["size"], el))
+
+    # Split the stream by the table's part sizes -- exactly what the hardware does.
+    table = [rtl.get(i, rtl["default"]) for i in range(nparts)]
+    pos, si, sub = 0, 0, 0
+    for idx, ent in enumerate(table):
+        want = ent["size"]
+        got, members = 0, []
+        while got < want:
+            if si >= len(stream):
+                fail("part %d (%s) wants 0x%X bytes, the MRA ran out after 0x%X"
+                     % (idx, ent["name"], want, got))
+            avail = stream[si][0] - sub
+            take = min(avail, want - got)
+            members.append(stream[si][1])
+            got += take
+            sub += take
+            if sub == stream[si][0]:
+                si += 1
+                sub = 0
+        if got != want:
+            fail("part %d (%s): MRA supplies 0x%X, table wants 0x%X"
+                 % (idx, ent["name"], got, want))
+        ent["members"] = members
+        pos += want
+    if si != len(stream) or sub != 0:
+        left = sum(s for s, _ in stream[si:]) - sub
+        fail("MRA has 0x%X bytes left over after the last table part" % left)
+
+    # Each single-file part must be the MAME ROM the table names, in order.
+    ri = 0
+    for idx, ent in enumerate(table):
+        if len(ent["members"]) == 1 and ent["members"][0]["kind"] == "file":
+            el = ent["members"][0]
+            if el["length"] is not None:
+                continue                      # part of a synthesised image
+            if ri >= len(roms):
+                fail("part %d (%s) has no MAME ROM left to match" % (idx, ent["name"]))
+            rom = roms[ri]; ri += 1
+            if el["crc"] != rom["crc"]:
+                fail("part %d: MRA crc %08x != MAME %s crc %08x"
+                     % (idx, el["crc"], rom["name"], rom["crc"]))
+            if el["name"] != rom["name"]:
+                fail("part %d: MRA name %r != MAME %r" % (idx, el["name"], rom["name"]))
+            if ent["name"] != rom["name"]:
+                fail("part %d: rom_loader comment says %r, MAME says %r"
+                     % (idx, ent["name"], rom["name"]))
+            if ent["size"] != rom["size"]:
+                fail("part %d (%s): table size 0x%X != MAME 0x%X"
+                     % (idx, rom["name"], ent["size"], rom["size"]))
+            if rom["mode"] is None:
+                fail("part %d (%s): cannot map %s at region offset 0x%X to a mode"
+                     % (idx, rom["name"], rom["macro"], rom["off"]))
+            if ent["mode"] != rom["mode"]:
+                fail("part %d (%s): table mode %s, MAME %s at region offset 0x%X"
+                     % (idx, rom["name"], ent["mode"], rom["mode"], rom["off"]))
+            want_base, disp = expected_base(rom)
+            got_base = resolve_base(ent["base"])
+            if got_base != want_base:
+                fail("part %d (%s): table base 0x%X != expected 0x%X (%s + 0x%X)"
+                     % (idx, rom["name"], got_base, want_base, rom["sdram"], disp))
+        else:
+            names = [m.get("name", m["kind"]) for m in ent["members"]]
+            print("  part %-2d %-28s synthesised from %d elements: %s"
+                  % (idx, ent["name"], len(ent["members"]), ", ".join(names)))
+
+    if ri != len(roms):
+        fail("%d MAME ROMs never appeared as a whole part (first: %s)"
+             % (len(roms) - ri, roms[ri]["name"]))
+
+    total = sum(e["size"] for e in table)
+    print("all %d parts agree: order, name, CRC, size, scatter mode, destination"
+          % nparts)
+    print("download total: %d bytes (%.1f MB)" % (total, total / 1048576.0))
+
+    if args.zip:
+        z = zipfile.ZipFile(args.zip)
+        have = {}
+        for info in z.infolist():
+            if not info.is_dir():
+                have.setdefault(info.CRC, os.path.basename(info.filename))
+        needed = {}
+        for el in mra:
+            if el["kind"] == "file" and el["crc"] is not None:
+                needed[el["crc"]] = el["name"]
+        missing = [(c, n) for c, n in needed.items() if c not in have]
+        for c, n in missing:
+            print("  MISSING crc %08x  %s" % (c, n))
+        if missing:
+            fail("%d of %d parts are not in %s" % (len(missing), len(needed), args.zip))
+        renamed = sum(1 for c, n in needed.items() if have[c] != n)
+        print("all %d distinct files present in %s by CRC%s"
+              % (len(needed), os.path.basename(args.zip),
+                 " (%d under the parent set's names)" % renamed if renamed else ""))
+    print()
+
+
+def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--set", default="all", choices=["all"] + sorted(SETS))
     ap.add_argument("--mame", default=os.path.expanduser("~/proj/mame"))
-    ap.add_argument("--mra", default=os.path.join(here, "mra", "rdfts.mra"))
-    ap.add_argument("--rtl", default=os.path.join(here, "rtl", "rom_loader.sv"))
     ap.add_argument("--zip", default=None)
     args = ap.parse_args()
 
@@ -171,90 +348,8 @@ def main():
     if not os.path.exists(drv):
         fail("MAME driver not found at %s (pass --mame)" % drv)
 
-    mame = parse_mame(drv)
-    mra = parse_mra(args.mra)
-    rtl, nparts = parse_loader(args.rtl)
-
-    print("MAME %s: %d ROMs" % (SET, len(mame)))
-    print("MRA  %s: %d parts" % (os.path.basename(args.mra), len(mra)))
-    print("RTL  NPARTS = %d" % nparts)
-
-    if len(mra) != len(mame):
-        fail("MRA has %d parts, MAME's %s has %d ROMs" % (len(mra), SET, len(mame)))
-    if nparts != len(mame):
-        fail("rom_loader NPARTS is %d, MAME's %s has %d ROMs" % (nparts, SET, len(mame)))
-
-    # 1. MRA against MAME, in order.
-    for i, (a, b) in enumerate(zip(mra, mame)):
-        if a["crc"] != b["crc"]:
-            fail("part %d: MRA crc %08x != MAME %s crc %08x" % (i, a["crc"], b["name"], b["crc"]))
-        if a["name"] != b["name"]:
-            fail("part %d: MRA name %r != MAME %r (crc matches, so this is a "
-                 "naming slip, but fix it -- the name is the fallback lookup)"
-                 % (i, a["name"], b["name"]))
-
-    # 2. RTL table against MAME, in order: size, scatter mode and destination.
-    for i, b in enumerate(mame):
-        r = rtl.get(i) if i in rtl else rtl.get("default")
-        if r is None:
-            fail("rom_loader has no entry for part %d" % i)
-        if r["name"] != b["name"]:
-            fail("part %d: rom_loader comment says %r, MAME says %r -- the table "
-                 "is indexed by MRA position, so this is a real mismatch"
-                 % (i, r["name"], b["name"]))
-        if r["size"] != b["size"]:
-            fail("part %d (%s): rom_loader size 0x%X != MAME 0x%X"
-                 % (i, b["name"], r["size"], b["size"]))
-        if b["mode"] is None:
-            fail("part %d (%s): cannot map MAME macro %s at offset 0x%X to a "
-                 "scatter mode" % (i, b["name"], b["macro"], b["off"]))
-        if r["mode"] != b["mode"]:
-            fail("part %d (%s): rom_loader mode %s, MAME %s at region offset 0x%X"
-                 % (i, b["name"], r["mode"], b["mode"], b["off"]))
-
-        # Destination base. For the 3-byte-period modes the region offset is a
-        # byte lane within a group, not a displacement, so only whole-group
-        # offsets carry into the base.
-        if b["mode"] in ("M_24_W01", "M_24_B2"):
-            disp = (b["off"] // 3) * 3
-        elif b["mode"] in ("M_32_B0", "M_32_B1", "M_32_W23"):
-            disp = (b["off"] // 4) * 4
-        else:
-            disp = b["off"]
-        want = BASES[b["region"]] + disp
-        got = resolve_base(r["base"], b["region"], disp)
-        if got != want:
-            fail("part %d (%s): rom_loader base 0x%X != expected 0x%X "
-                 "(region %s + 0x%X)" % (i, b["name"], got, want, b["region"], disp))
-
-    total = sum(b["size"] for b in mame)
-    print("all %d parts agree: order, name, CRC, size, scatter mode, destination"
-          % len(mame))
-    print("download total: %d bytes (%.1f MB)" % (total, total / 1048576.0))
-
-    # 3. Optionally, do the parts actually resolve out of a real archive?
-    if args.zip:
-        if not os.path.exists(args.zip):
-            fail("zip not found: %s" % args.zip)
-        z = zipfile.ZipFile(args.zip)
-        have = {}
-        for info in z.infolist():
-            if not info.is_dir():
-                have.setdefault(info.CRC, os.path.basename(info.filename))
-        missing = [b for b in mame if b["crc"] not in have]
-        if missing:
-            for b in missing:
-                print("  MISSING crc %08x  %s" % (b["crc"], b["name"]))
-            fail("%d of %d parts are not in %s" % (len(missing), len(mame), args.zip))
-        renamed = [(b["name"], have[b["crc"]]) for b in mame
-                   if have[b["crc"]] != b["name"]]
-        print("all %d parts present in %s by CRC" % (len(mame), os.path.basename(args.zip)))
-        if renamed:
-            print("  (%d stored under the parent set's names, which is fine -- "
-                  "MiSTer matches by CRC first)" % len(renamed))
-            for want, got in renamed[:4]:
-                print("    %s -> %s" % (want, got))
-
+    for name in (sorted(SETS) if args.set == "all" else [args.set]):
+        check_set(name, SETS[name], args)
     print("PASS")
     return 0
 

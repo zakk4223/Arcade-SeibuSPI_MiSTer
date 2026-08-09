@@ -171,10 +171,67 @@ same part list behind an OSD switch. Two MRAs is the more idiomatic MiSTer split
 and needs no core option plumbing. Either way the pre-flashed one is what people
 want to play, and the authentic one is a strict superset that can follow later.
 
-One possible bonus, unverified: the 10 MB `sound01` window exists so the updater
-can read it, so a pre-flashed MRA may be able to omit those files entirely and
-claw back roughly 2.5 MB against `rdft`'s 31.4 MB footprint. Confirm the 386
-never touches that window during normal play before budgeting on it.
+**Measured 2026-08-09: a pre-flashed MRA can omit `sound01` entirely.** The
+window exists so the updater can read the samples out of the 386's address
+space; once the flash carries them it is dead. A read tap over
+0xA00000-0x13FFFFF, booted on the derived flash image, counted **0 reads across
+4800 frames** (~89 s of attract, 2185% -- the updater skipped).
+
+The control matters more than the result, because a tap reporting zero is
+exactly what a broken tap reports. Same script, same run length, blank nvram:
+**97,901 reads by frame 2100**, the address climbing steadily through the window
+(00A00008 up to 00A5F9B8) at 570% -- which is the flashing speed section 0
+already records. The tap works; the window really is untouched.
+
+So the pre-flashed part list drops `gun_dogs_pcm.u0217` and `seibu_8.u0216` as
+*sources for sound01* -- they are still needed, but only as the material the
+flash image is built from, which the MRA does with `offset`/`length` on the same
+files. `rdft` pre-flashed comes to about **22.2 MB**: 2 program + 0.19 chars + 6
+tiles + 12 sprites + 2 flash, and no Z80 ROM at all because that region is RAM.
+Within a rounding error of `rdfts`'s 22.4 MB, which is the sanity check -- it is
+the same game.
+
+### SXX2C pre-flashed: what is built, and what is not
+
+**Built and verified (2026-08-09), but the core cannot boot `rdft` yet.** The
+ROM side is done; the board side is not.
+
+Done:
+
+* `mra/rdft.mra` -- the pre-flashed cartridge MRA. It assembles the 2 MB flash
+  image out of the cartridge's own sound ROMs with `offset`/`length`, carries
+  no `sound01` (measured untouched, above), and carries no Z80 ROM at all.
+  22.2 MB against `rdfts`'s 22.3 MB.
+* `rom_loader.sv` gains a second part table, selected by `set_sxx2c` from the
+  MRA's index-1 mod byte, latched in `SeibuSPI.sv`. The four scatter modes the
+  cartridge needs -- `M_32_B2`, `M_32_B3`, `M_24_B0`, `M_24_B1` -- already
+  existed but had never been reachable; SXX2C is their first user.
+* `tools/check_mra.py` now models the loader the way the hardware works, as a
+  byte stream split by the table's part sizes, so MRA `<part>` boundaries need
+  not line up with loader parts. That is what lets one 2 MB sample part be
+  assembled from four MRA elements. Both MRAs verify against MAME; the checker
+  is re-tested against a lane swap, a short pad and a truncated header stamp.
+* `tb_rom_loader` runs both tables, which is the first coverage those four
+  scatter modes have ever had.
+
+Not done -- this is the board half, and none of it is started:
+
+* **Z80 program RAM.** The 386 pushes 256 KB a byte at a time to port 0x688
+  (auto-incrementing) and releases the Z80 with 0x68C d0; 0x68C also resets the
+  pointer. Today Z80 code is a read-only SDRAM region behind an 8-byte line
+  buffer, so this needs a write path. ch3 is already read/write -- the loader
+  uses it -- and the Z80 is held in reset for the whole transfer, so the line
+  buffer needs no invalidation beyond that.
+* **The second FIFO**, Z80 -> 386: Z80 writes 0x4008, the 386 reads 0x680. Note
+  this REPLACES `sb_coin_r` at 0x680 on the cartridge, so the coin path becomes
+  a FIFO message rather than the latch SXX2E uses.
+* **Map differences** in `spi_io`: 0x680's read source, 0x68E becoming
+  `rf2_layer_bank_w`, and 0x600-0x603 as a no-op write.
+* **The jumpers port** at Z80 0x400a.
+
+Everything else the cartridge needs is already there: SEI252 sprite decryption
+and the SEI252 tile keys are the same as `rdfts` (both are `init_sei252`), the
+sprite DMA trigger at 0x50E is already decoded, and the DS2404 stub is shared.
 
 ### What else `seibuspi.cpp` covers, and what each would cost
 

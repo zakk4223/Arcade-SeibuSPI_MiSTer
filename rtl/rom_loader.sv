@@ -33,6 +33,12 @@ module rom_loader
 	input       [7:0] ioctl_dout,
 	output reg        ioctl_wait,
 
+	// Which part table to walk. 0 = rdfts (SXX2E single board), 1 = rdft
+	// pre-flashed (SXX2C cartridge). Comes from the MRA's index-1 mod byte and
+	// must be stable before the index-0 download starts, which it is: the HPS
+	// sends the mod byte first.
+	input             set_sxx2c,
+
 	// SDRAM write port (channel 3, toggle handshake)
 	output reg [24:0] sdr_addr,
 	output reg [15:0] sdr_din,
@@ -68,13 +74,26 @@ module rom_loader
 	localparam [3:0] M_24_B2   = 4'd9;   // dest = base + i*3 + 2
 	localparam [3:0] M_24_W01  = 4'd10;  // dest = base + (i>>1)*3 + (1 - (i&1))
 
-	localparam [3:0] NPARTS = 4'd14;
+	localparam [3:0] NPARTS_SXX2E = 4'd14;
+	localparam [3:0] NPARTS_SXX2C = 4'd15;
+
+	wire [3:0] nparts = set_sxx2c ? NPARTS_SXX2C : NPARTS_SXX2E;
 
 	// ------------------------------------------------------------------
-	// Part table for rdfts (SXX2E single board).
-	// The order here must match the <part> order in the MRA.
+	// Part tables. The order in each must match the <part> order in the MRA,
+	// and tools/check_mra.py checks exactly that against MAME's driver --
+	// nothing at runtime can, because the MRA carries no scatter information.
 	// A case statement rather than a parameter array: Quartus 17.0 handles
 	// unpacked-array parameters unevenly.
+	//
+	// SXX2C differs more than it looks. Its 386 program is four byte-lanes
+	// instead of two bytes plus a word, its text layer is three byte-lanes
+	// instead of a word plus a byte, and it has NO Z80 part at all -- that
+	// region is RAM the 386 fills through port 0x688 before releasing the Z80
+	// from reset. The sample part is the pre-programmed flash image the MRA
+	// assembles from the cartridge's own sound ROMs, and `sound01` is absent:
+	// measured, the 386 never reads that window once the flash is programmed
+	// (section 0).
 	// ------------------------------------------------------------------
 	reg [3:0]  part;
 	reg [24:0] off;        // byte offset within the current part
@@ -83,7 +102,27 @@ module rom_loader
 	reg [24:0] part_size;
 	reg [3:0]  part_mode;
 
-	always @* begin
+	always @* if (set_sxx2c) begin
+		case (part)
+		//                                          base   size          mode
+		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
+		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
+		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
+		4'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
+		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
+		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
+		4'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
+		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 25'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
+		4'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 25'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
+		4'd9 : begin part_base = SDR_TILES_BASE + 25'h030_0000;      part_size = 25'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
+		4'd10: begin part_base = SDR_TILES_BASE + 25'h030_0000;      part_size = 25'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
+		4'd11: begin part_base = SDR_SPRITES_BASE;                   part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
+		4'd12: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
+		4'd13: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+		default:begin part_base = SDR_PCM_BASE;                      part_size = 25'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
+		endcase
+	end
+	else begin
 		case (part)
 		//                                          base   size          mode
 		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
@@ -103,7 +142,7 @@ module rom_loader
 		endcase
 	end
 
-	wire last_part = (part == NPARTS - 4'd1);
+	wire last_part = (part == nparts - 4'd1);
 
 	// destination offset within the part, per scatter mode
 	reg [24:0] scat;

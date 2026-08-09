@@ -290,6 +290,19 @@ always @(posedge clk_sys) begin
 	if (ioctl_wr && (ioctl_index == 8'd254) && ~|ioctl_addr[24:1]) dsw[ioctl_addr[0]] <= ioctl_dout;
 end
 
+// MRA mod byte (ioctl index 1). Bit 0 selects the SXX2C cartridge board: a
+// different ROM part table, the Z80 program arriving over port 0x688 instead
+// of from a ROM, and the second FIFO. The HPS sends this before the index-0
+// ROM image, so it is stable by the time the loader walks its table -- but it
+// is latched on clk_sys and read by the loader on clk_ram, so it crosses as a
+// static value that is settled long before rom_ready.
+reg [7:0] mod_byte = 8'd0;
+always @(posedge clk_sys) begin
+	if (ioctl_wr && (ioctl_index == 8'd1) && ~|ioctl_addr[24:0]) mod_byte <= ioctl_dout;
+end
+
+wire set_sxx2c = mod_byte[0];
+
 wire flip_screen_dip  = dsw[0][0];
 wire service_mode_dip = dsw[0][1];
 
@@ -440,6 +453,7 @@ rom_loader rom_loader
 	.ioctl_index    (ioctl_index),
 	.ioctl_dout     (ioctl_dout),
 	.ioctl_wait     (ioctl_wait),
+	.set_sxx2c      (set_sxx2c),
 
 	.sdr_addr       (ldr_addr),
 	.sdr_din        (ldr_din),

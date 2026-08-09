@@ -1,0 +1,119 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SlopperPI.                                     -->
+<!--                                                                     -->
+<!-- SlopperPI is free software: you can redistribute it and/or modify   -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters (Germany, SPI cartridge, pre-flashed)</name>
+    <setname>rdft</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1996</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>Germany</region>
+    <category>Shooter</category>
+
+    <!--
+      THE SPI CARTRIDGE HAS NO SAMPLE ROM. Its YMF271 plays from two Intel
+      E28F008SA flash chips that the game programs itself on first boot -- the
+      several-minute "techno music" reflash. This MRA ships the flash
+      PRE-PROGRAMMED, so the updater is skipped and the game boots straight in.
+
+      The image is not a dump. It is derived from the cartridge's own sound
+      ROMs, and built this way it is byte-identical to what the game writes
+      (PLAN.md section 0, measured under MAME):
+
+        flash[0x000000-0x000003] = maincpu[0x1FFFFC-0x1FFFFF]   region + build
+        flash[0x000004-0x1A13B5] = gun_dogs_pcm.u0217[4..]
+        flash[0x1A13B6-0x1D9642] = seibu_8.u0216[0..0x3828C]
+        flash[0x1D9643-0x1FFFFF] = 0xFF
+
+      The four header bytes are not a checksum. They are a verbatim copy of the
+      last four bytes of the 386 program -- region byte plus build ID -- and
+      they are the whole region lock: a stamp that does not match the program
+      makes the game reflash. So this image is specific to THIS set's program
+      ROMs, and a different region's cartridge needs its own.
+
+      `sound01` is deliberately absent. That 10 MB window exists so the updater
+      can read the samples out of the 386's address space; with the flash
+      already programmed the 386 never touches it. Measured rather than
+      assumed: a read tap over 0xA00000-0x13FFFFF counted 0 reads across 4800
+      frames pre-flashed, against 97,901 by frame 2100 on a blank flash.
+    -->
+    <!--
+      Part order is significant. rtl/rom_loader.sv walks this list with a fixed
+      table -- selected by the mod byte below -- and performs MAME's
+      ROM_LOAD24_* / ROM_LOAD32_* byte scatter in hardware, because MRA
+      <interleave> cannot express the 3-byte period the Seibu "D + P" graphics
+      ROM pairs need. Do not reorder or insert parts without updating the
+      SXX2C table in rom_loader.sv to match. `make check-mra` checks them
+      against each other and against MAME's driver.
+
+      Layout produced in SDRAM (see rtl/spi_defs.vh):
+        0x0000000  2 MB   386 program
+        0x0200000  256 KB Z80 program -- RAM, NOT loaded here. The 386 fills it
+                          through port 0x688 and releases the Z80 with 0x68C.
+        0x0240000  192 KB text tiles
+        0x0280000  2 MB   YMF271 samples: the pre-programmed flash image
+        0x0480000  6 MB   background tiles
+        0x0A80000  12 MB  sprites, three 4 MB plane-pair chunks
+    -->
+    <rom index="0" zip="rdft.zip" md5="none">
+        <!-- 386 program: four byte lanes, unlike rdfts's two bytes + one word -->
+        <part name="raiden-fi_prg0_121196.u0211" crc="adcb5dbc"/>
+        <part name="raiden-fi_prg1_121196.u0212" crc="60c5b92e"/>
+        <part name="raiden-fi_prg2_121196.u0210" crc="44b86db5"/>
+        <part name="raiden-fi_prg3_121196.u029"  crc="e70727ce"/>
+
+        <!-- text layer: three byte lanes -->
+        <part name="seibu_5.u0423" crc="8f8d4e14"/>
+        <part name="seibu_6.u0424" crc="6ac64968"/>
+        <part name="seibu_7.u048"  crc="4d87e1ea"/>
+
+        <!-- background tiles -->
+        <part name="gun_dogs_bg1-d.u0415" crc="6a68054c"/>
+        <part name="gun_dogs_bg1-p.u0410" crc="3400794a"/>
+        <part name="gun_dogs_bg2-d.u0424" crc="61cd2991"/>
+        <part name="gun_dogs_bg2-p.u049"  crc="502d5799"/>
+
+        <!-- sprites -->
+        <part name="gun_dogs_obj-1.u0322" crc="59d86c99"/>
+        <part name="gun_dogs_obj-2.u0324" crc="1ceb0b6f"/>
+        <part name="gun_dogs_obj-3.u0323" crc="36e93234"/>
+
+        <!--
+          YMF271 sample flash, pre-programmed. 4 + 0x1A13B2 + 0x3828D + 0x269BD
+          = 0x200000 exactly. The uncopied tail of both source ROMs is blank
+          0xFF padding, verified, so nothing real is being left behind.
+        -->
+        <part>80 4A 4A 36</part>
+        <part name="gun_dogs_pcm.u0217" crc="31253ad7" offset="0x000004" length="0x1A13B2"/>
+        <part name="seibu_8.u0216"      crc="f88cb6e4" length="0x03828D"/>
+        <part repeat="0x0269BD">FF</part>
+    </rom>
+
+    <!--
+      Mod byte: bit 0 selects the SXX2C part table and board wiring in the
+      core. rdfts.mra leaves this at 0.
+    -->
+    <rom index="1"><part>01</part></rom>
+
+    <!--
+      Same control layout as rdfts; the names map to joystick bits 4 upwards IN
+      ORDER and SeibuSPI.sv decodes them at exactly those positions.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
+             default="A,B,X,Start,Select,R,L" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>
