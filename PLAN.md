@@ -1217,6 +1217,16 @@ Of those, only the first would ever have produced an obvious symptom.
             overlap (13b). The largest single piece of what "IS the sprites"
             actually was is in 13a: the mixer pairing one pixel's colours
             with the next pixel's draw decisions.
+      - [x] **The alpha blend is exact** -- section 13c. The mixer does
+            MAME's `(src*127 + dst*129) >> 8` rather than a 50/50 average,
+            which removes the entire +-1-per-channel error class: 26,492
+            pixels of the frame-2400 capture to zero, and the raw frame score
+            from 34.70% to 0.24%.
+      - [ ] **The left-edge band is the whole remaining residual** -- 185
+            pixels, ALL of them in source columns 2-5, and it is a
+            line-buffer bank race rather than anything in the mixer. See 13c
+            for the measurement and the intended fix; it lives in
+            `spi_layers` / `spi_sprite`, not `spi_mixer`.
 
       The fore layer's long-running failure turned out NOT to be a decode bug
       at all. `line_start` was only honoured in `S_IDLE`, so when a line's
@@ -1242,14 +1252,11 @@ Of those, only the first would ever have produced an obvious symptom.
       without comparing actual pixels. That harness is section 12, and every
       T4 fault since has been found through it.
 
-      **What is left on T4:** the attract frame still differs by 0.23% with
-      no account of the residual, and `sim/tb_video` exits non-zero on any
-      difference at all, so it cannot go green while the mixer keeps the
-      cheap 50/50 blend in place of MAME's 127/129 (rtl/spi_mixer.sv:157 --
-      both exact forms blew clk_sys setup, and only pipelining the mixer
-      across its eight cycles per pixel would buy them back). Headroom still
-      unclaimed: `spi_layers` renders layers the game has disabled, and
-      issues two 64-bit reads per text column for a 6-byte char row.
+      **What is left on T4:** the 185-pixel left-edge band of 13c, which is
+      a bank race in `spi_layers` / `spi_sprite` and is now the only thing
+      between `sim/tb_video` and a green run. Headroom still unclaimed:
+      `spi_layers` renders layers the game has disabled, and issues two
+      64-bit reads per text column for a 6-byte char row.
 - [~] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
       - [x] `rtl/t80/` — T80 vendored from Arcade-IremM72_MiSTer. VHDL, so
             Verilator cannot read it; `sim/T80s.sv` is a port-compatible stub
@@ -1743,6 +1750,119 @@ happily and the core is plainly running. `pkill -f jtagd` and re-run
 `jtagconfig`. Half an hour went into suspecting the build before checking the
 host. Also: the server must not be started until the FPGA has finished
 reconfiguring after a `load_core`, or it fails the same way.
+
+## 13c. The exact alpha blend, and what it uncovered (2026-08-09)
+
+The mixer now does MAME's blend exactly. The thing that had made this look
+expensive was never the arithmetic -- it was doing all ten composite steps in
+one cycle.
+
+### The arithmetic
+
+`alpha_blend_r32(dest, pen, 0x7f)` is `(src*127 + dst*129) >> 8`. Rearranged so
+there is neither a multiplier nor a signed intermediate:
+
+    127*s + 129*d  ==  127*(s+d) + 2*d  ==  ((s+d) << 7) - (s+d) + (d << 1)
+
+Three adder levels, every term non-negative for all inputs -- `(s+d)<<7` is
+always at least `s+d` -- and the maximum is 65280, so the 16-bit accumulator
+never overflows and `acc[15:8]` is the truncating `>>8` C gives. Checked
+exhaustively against the C expression over all 65,536 `(d,s)` pairs, zero
+mismatches.
+
+### The pipeline is the actual fix
+
+A pixel is eight clk_sys cycles and the composite only has to produce one
+result per pixel, so the chain gets five cycles instead of one, at most two
+exact blends per stage. The palette fetch order changed to make that possible:
+it now follows the order the composite first *needs* each colour -- sprite,
+back, midl, fore, text -- rather than layer order with sprites last. The old
+dead slot 0 (a fetch of pen 0, unused because a disabled back layer is hard
+black) is gone.
+
+The tail deliberately runs into the next pixel's first two cycles. That is safe
+because every source it reads is a register the next pixel does not overwrite
+until later, and it keeps the published output on the same phase, so the
+callers' two-pixel `lb_x` lead is untouched and the picture does not move.
+
+**Two facts about the step counter, both of which I got wrong first time:**
+
+* `step` lags `div` in `spi_video_timing` by one cycle, so **step 7 is the
+  first clk_sys cycle of an hcnt period**, not the last. `lb_*` is a registered
+  line-buffer read, settling one cycle after hcnt moves -- which lands exactly
+  on step 0. So all eight steps see the same pixel's `lb_*` and any of them can
+  fetch. My first attempt asserted the opposite in a comment; it was wrong.
+* A colour written by the fetch case "at step N" is captured on the edge
+  **ending** step N and is readable from step N+1. Reading it during step N
+  shifts the whole picture one pixel. That is what my first attempt actually
+  did, and `best shift: dx=1` in tb_video named it immediately -- that line is
+  worth reading before anything else when a change goes wrong.
+
+### Score
+
+    frame 2400, raw pixels differing   26,650 (34.70%)  ->  185 (0.24%)
+    of those, within +-1 per channel   26,492            ->  0
+    REAL mismatches                       158            ->  185
+
+The +-1 class is gone completely, which is what the change was for. tb_video's
+tolerance bucket is kept, re-labelled: it must now read zero, and anything in
+it is a blend regression rather than expected noise.
+
+### Timing: the exact blend is free, and clk_ram needed a seed
+
+The pipelining more than pays for the arithmetic. Against the pre-change build
+of 15.8, every clock improved:
+
+| clock     | before   | after    |
+|-----------|----------|----------|
+| `clk_ram` | +0.641   | +0.820   |
+| `clk_sys` | +0.919   | **+1.611** |
+| `clk_cpu` | +3.044   | +3.999   |
+
+TNS 0.000 on every clock, worst hold +0.221. 78% ALMs, 86% RAM blocks, 53% DSP
+-- unchanged but for a fraction of a percent of logic. The blend infers no DSP,
+which is the point of writing it as shifts and adds rather than `127*s`.
+
+Getting there took a fitter seed, and the intermediate result is worth keeping
+because it is a trap. The first build reported "Full Compilation was
+successful" and **failed timing**: `clk_ram` at -0.556, TNS -4.953. Every one
+of the worst 25 paths was `sdram|dq_reg -> sdram|chN_dout`, and not one was in
+the mixer -- `clk_sys` had *gained* margin in that same build. That is exactly
+the path section 10 records destroying SDRAM input timing when it is
+restructured, and 15.8 already said the lever is a fitter seed rather than the
+register. **SEED 17 -> 5 in the QSF**, rebuilt, and it closed at +0.820 with
+nothing else changed. Two lessons, both already in this file and both worth
+having relearned: read the Setup Summary rather than the exit status, and when
+the failing endpoints are nowhere near the change, suspect placement.
+
+### What it uncovered: the left edge is a bank race
+
+REAL went slightly UP, 158 -> 185, and that turned out to be the interesting
+result. Every one of those 185 pixels is in **source columns 2-5** -- the
+histogram of error locations now counts REAL mismatches instead of raw ones,
+which is what made the band visible at all; under the old blend it was buried
+under 26k rounding differences spread across every column.
+
+It is not the mixer. Three different fetch schedules give 77, 114 and 127 wrong
+pixels in column 2, so the error depends on *which cycle the mixer samples
+`lb_*`* -- meaning `lb_*` is not stable across the pixel at the start of a
+line. Measured directly, with the render bank exposed to tb_video:
+
+    render-bank flips at (vcnt,hcnt): (0,0) (1,2) (2,2) (3,0) (4,0) (5,1) (6,2) ...
+
+`spi_layers` defers `render_bank <= ~render_bank` to a tile boundary (correctly
+-- section 11 records why abandoning a line mid-fetch is worse), so the flip
+lands anywhere in the first three pixels of a line, jittering per line. Until
+it happens the mixer is reading `~render_bank`, which is still the *previous*
+line's buffer. That is the band, and it has been there all along.
+
+The fix belongs on the display side, not the renderer's: derive the bank the
+mixer reads from the display position rather than from the renderer's progress,
+so it switches exactly on the line boundary. Deriving both sides from `vcnt[0]`
+would also make drift structurally impossible. It touches `spi_layers` and
+`spi_sprite`, which is where the bank convention has bitten twice before
+(section 13), so it wants its own change and its own verification rather than
+riding along with the blend.
 
 ## 14. Sound (T5) — design notes and what is deliberately missing
 

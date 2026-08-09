@@ -55,6 +55,7 @@ module tb_video_top
 
 	// Line buffer taps, so a testbench can check the layer renderer on its own
 	// rather than only through the mixer.
+	output            dbg_lb_bank,
 	output      [9:0] dbg_back,
 	output      [9:0] dbg_midl,
 	output      [9:0] dbg_fore,
@@ -197,6 +198,8 @@ module tb_video_top
 	assign dbg_fore = lb_fore;
 	assign dbg_text = lb_text;
 
-	wire _unused = &{1'b0, hsync, vsync, vbl_rise, lb_bank, layers_busy, spr_busy};
+	assign dbg_lb_bank = lb_bank;
+
+	wire _unused = &{1'b0, hsync, vsync, vbl_rise, layers_busy, spr_busy};
 
 endmodule

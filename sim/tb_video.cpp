@@ -328,6 +328,7 @@ int main(int argc, char **argv)
     std::vector<uint16_t> lb_midl_seen(512, 0xFFFF);
     std::vector<std::pair<uint32_t,uint32_t>> fore_codes;
     std::vector<uint32_t> rtl_rgb(512, 0);
+    std::vector<std::pair<int,int>> bank_flips;   // (vcnt, hcnt) of each render-bank flip
     std::pair<int,int> seen_rs[4] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
     int latch_fx[4][3] = {}, latch_col[4][3] = {}, latch_n[4] = {};
     int emit_lo[4] = {9999,9999,9999,9999}, emit_hi[4] = {-9999,-9999,-9999,-9999};
@@ -391,6 +392,18 @@ int main(int argc, char **argv)
                 latch_col[L][latch_n[L]] = dut->dbg_col;
                 latch_n[L]++;
             }
+        }
+
+        // When does the render bank flip, relative to the display line?
+        // spi_layers defers the flip to a tile boundary, so it can land some
+        // way into the line the mixer has already started reading -- which is
+        // the whole of the left-edge error band. Record where it happens.
+        {
+            static int prev_bank = -1;
+            if (frame == 2 && prev_bank >= 0 && (int)dut->dbg_lb_bank != prev_bank
+                && bank_flips.size() < 12)
+                bank_flips.push_back({(int)dut->vcnt, (int)dut->hcnt});
+            prev_bank = dut->dbg_lb_bank;
         }
 
         // What rowscroll / x_start does each layer actually use?
@@ -852,10 +865,28 @@ int main(int argc, char **argv)
         printf("REAL mismatches (x>=2): %zu match a sprite pen, %zu do not\n", spr_like, other);
     }
 
-    {   // where are the errors?
+    {   // Where does the render bank flip? It should land exactly on the line
+        // boundary the mixer reads across; anything later means the first
+        // pixels of a line are composited from the wrong buffer.
+        printf("render-bank flips at (vcnt,hcnt): ");
+        for (auto &p : bank_flips) printf("(%d,%d) ", p.first, p.second);
+        printf("\n");
+    }
+
+    {   // Where are the errors? Counted over REAL mismatches: a raw histogram
+        // is dominated by whatever per-pixel rounding noise happens to exist
+        // and hides a localised fault completely. That is how a band confined
+        // to four columns sat unnoticed under the old 50/50 blend.
+        auto real_bad = [&](size_t i) {
+            if (got[i] == want[i]) return false;
+            int dr = int((got[i] >> 16) & 0xFF) - int((want[i] >> 16) & 0xFF);
+            int dg = int((got[i] >>  8) & 0xFF) - int((want[i] >>  8) & 0xFF);
+            int db = int( got[i]        & 0xFF) - int( want[i]        & 0xFF);
+            return !(dr >= -1 && dr <= 1 && dg >= -1 && dg <= 1 && db >= -1 && db <= 1);
+        };
         int rowbad[H] = {0}, colbad[W] = {0};
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++)
-            if (got[(size_t)y*W+x] != want[(size_t)y*W+x]) { rowbad[y]++; colbad[x]++; }
+            if (real_bad((size_t)y*W+x)) { rowbad[y]++; colbad[x]++; }
         printf("rows with errors (every 8th): ");
         for (int y = 0; y < H; y += 8) printf("%d:%d ", y, rowbad[y]);
         printf("\n");
@@ -870,9 +901,11 @@ int main(int argc, char **argv)
     write_png((outdir + "/got.png").c_str(),  got,  W, H);
     write_png((outdir + "/want.png").c_str(), want, W, H);
 
-    {   // The mixer averages where MAME does a 127/129 alpha blend, so blended
-        // pixels can sit one unit out per channel. Score that separately: an
-        // exact count buries real faults under tens of thousands of +-1s.
+    {   // The mixer used to average where MAME does a 127/129 alpha blend,
+        // which put ~26k pixels one unit out per channel and buried every real
+        // fault. It does the exact blend now, so this bucket MUST read zero --
+        // if it does not, the blend arithmetic has regressed, and that is a
+        // different failure from the mismatches counted below.
         size_t near = 0;
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
             size_t i = (size_t)y*W+x;
@@ -883,10 +916,10 @@ int main(int argc, char **argv)
             if (dr >= -1 && dr <= 1 && dg >= -1 && dg <= 1 && db >= -1 && db <= 1)
                 near++;
         }
-        printf("raw pixels differing: %zu / %d  (%.2f%%)"
-               " -- NOT the score to quote\n", bad, W * H, 100.0 * bad / (W * H));
-        printf("of those, %zu are within +-1 per channel: the mixer's deliberate"
-               " 50/50 average where MAME blends 127/129 (rtl/spi_mixer.sv:157)\n", near);
+        printf("pixels differing: %zu / %d  (%.2f%%)\n",
+               bad, W * H, 100.0 * bad / (W * H));
+        printf("of those, %zu are within +-1 per channel -- MUST be 0 now the"
+               " blend is exact; anything here is a blend regression\n", near);
         printf("REAL mismatches: %zu / %d  (%.2f%%)\n",
                bad - near, W * H, 100.0 * (bad - near) / (W * H));
     }
