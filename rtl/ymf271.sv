@@ -94,6 +94,17 @@ module ymf271
 	reg [10:0] timA_cnt;
 	reg [12:0] timB_cnt;
 
+	// Wave memory port. ext_latch is a read-ahead: a read returns it and only
+	// then advances the address and refetches, which is MAME's structure and
+	// the reason the first read after setting an address is a dummy.
+	reg [22:0] ext_addr;
+	reg        ext_rw;
+	reg  [7:0] ext_latch;
+	reg        ext_req;
+	reg        ext_pend;
+	wire       ext_ack;
+	wire [7:0] ext_data;
+
 	assign irq = |irqstate;
 
 	wire [10:0] timA_period = 11'd1024 - {1'b0, timerA};
@@ -257,6 +268,19 @@ module ymf271
 			end
 		end
 
+		// ---- wave memory read-ahead ----------------------------------
+		// The Z80 samples DI at the end of its cycle, which is when `rd`
+		// strobes, so the byte it takes is the pre-increment latch.
+		if (rd && (addr == 4'h2) && ext_rw) begin
+			ext_addr <= ext_addr + 23'd1;
+			ext_req  <= ~ext_req;
+			ext_pend <= 1'b1;
+		end
+		if (ext_pend && (ext_ack == ext_req)) begin
+			ext_latch <= ext_data;
+			ext_pend  <= 1'b0;
+		end
+
 		// ---- bus write -----------------------------------------------
 		if (wr) begin
 			regs_main[addr] <= din;
@@ -312,7 +336,24 @@ module ymf271
 							if (din[5]) begin irqstate[1] <= 1'b0; status[1] <= 1'b0; end
 							enable <= din;
 						end
-						default: ;   // external memory port, unused on this board
+						// Wave memory port (manual 4-3). The address register
+						// runs one BEHIND the next transfer: both 0x17 and the
+						// read at offset 2 pre-increment. That is why the SPI
+						// cartridge's flash updater sets 0x7FFFFF before
+						// writing byte 0 (PLAN.md section 0).
+						8'h14: ext_addr[7:0]   <= din;
+						8'h15: ext_addr[15:8]  <= din;
+						8'h16: begin
+							ext_addr[22:16] <= din[6:0];
+							ext_rw          <= din[7];
+						end
+						8'h17: begin
+							// Writes go nowhere on SXX2E: the YMF271's sample
+							// memory here is a mask ROM. On SXX2C it is two
+							// flash chips and this is the programming path.
+							ext_addr <= ext_addr + 23'd1;
+						end
+						default: ;
 					endcase
 				end
 
@@ -335,6 +376,11 @@ module ymf271
 			timB_run   <= 1'b0;
 			timA_cnt   <= 11'd0;
 			timB_cnt   <= 13'd0;
+			ext_addr   <= 23'd0;
+			ext_rw     <= 1'b0;
+			ext_latch  <= 8'd0;
+			ext_req    <= 1'b0;
+			ext_pend   <= 1'b0;
 			for (k = 0; k < 16; k = k + 1) regs_main[k] <= 8'd0;
 			for (k = 0; k < 12; k = k + 1) grp_sync[k]  <= 2'd0;
 		end
@@ -344,16 +390,21 @@ module ymf271
 	// Reads. Status 1 carries the timer flags and the low four end flags,
 	// status 2 the rest; everything else on this board reads back 0xFF.
 	// ------------------------------------------------------------------
+	// Offset 2 is the wave memory data port. It returns the LATCHED byte and
+	// only then advances, so the first read after setting an address is a dummy
+	// and the data stream starts at address+1 -- MAME's read() does exactly
+	// this. Reads while the direction bit says "write" return 0xFF.
 	always @* begin
 		case (addr)
 			4'h0:    dout = {1'b0, end_status[3:0], 1'b0, status};
 			4'h1:    dout = end_status[11:4];
+			4'h2:    dout = ext_rw ? ext_latch : 8'hFF;
 			default: dout = 8'hFF;
 		endcase
 	end
 
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire _unused = &{1'b0, rd, enable[7:4], end_status[15:12], es_grp6[5:4], ks_grp6[5:4]};
+	wire _unused = &{1'b0, enable[7:4], end_status[15:12], es_grp6[5:4], ks_grp6[5:4]};
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	// The engine walks groups, so it needs every group's sync mode at once.
@@ -384,6 +435,10 @@ module ymf271
 		.sdr_dout    (sdr_dout),
 		.sdr_req     (sdr_req),
 		.sdr_ack     (sdr_ack),
+		.ext_addr    (ext_addr),
+		.ext_req     (ext_req),
+		.ext_ack     (ext_ack),
+		.ext_data    (ext_data),
 		.audio       (audio),
 		.dbg_overrun (dbg_overrun),
 		.dbg_active  (dbg_active)

@@ -26,3 +26,6 @@ sim/*.png
 tools/__pycache__/
 releases/
 *.114
+
+# Generated from MAME by tools/gen_ref_c.py; the Makefile rebuilds it.
+sim/spi_ref.h

@@ -70,6 +70,19 @@ module ymf271_synth
 	output reg           sdr_req,
 	input                sdr_ack,
 
+	// ---- wave memory read port (utility registers 0x14-0x17) --------------
+	// The host reads sample memory back through the chip. Served at slot
+	// boundaries (S_NEXT) and when idle, never mid-slot, so it costs the
+	// synthesis pass one SDRAM round trip and never corrupts a fetch in
+	// flight. S_IDLE alone was NOT enough: under polyphony the pass fills most
+	// of a sample period while a Z80 `in` is ~88 clk_sys cycles, so
+	// back-to-back reads outran the refill and returned a stale latch -- 8 of
+	// 32 bytes wrong in tb_ymf271.
+	input         [22:0] ext_addr,
+	input                ext_req,      // toggle: a byte is wanted
+	output reg           ext_ack,      // toggle: mirrors ext_req when data is up
+	output reg     [7:0] ext_data,
+
 	output reg    [15:0] audio,
 	output reg    [15:0] dbg_overrun,
 	output reg    [15:0] dbg_active   // slots processed, PCM voices + FM ops
@@ -468,9 +481,20 @@ module ymf271_synth
 
 	// PCM when the group says so, or when a slot 4 the network leaves spare
 	// carries the external waveform.
-	wire step_is_pcm = (sync == 2'd3)
-	                || ((sync == 2'd2) && (step == 2'd3))
-	                || ((sync == 2'd0) && (step == 2'd3) && p_is_pcm);
+	//
+	// Every case is additionally gated on the slot actually carrying waveform 7.
+	// Section 2-7 gives external waveforms to groups 0, 4 and 8 only -- the
+	// twelve slots with PCM attribute registers -- so a sync-3 group anywhere
+	// else is four one-operator FM voices, not PCM. Without the gate such a
+	// group played from sample address 0, because its start/end/loop bytes are
+	// never written. MAME does not handle this either: update_pcm() calls
+	// fatalerror() on any waveform but 7, so it would abort where this now
+	// sounds the operator. Latent in practice -- the games never do it, which
+	// is why MAME can get away with the assertion.
+	wire step_is_pcm = p_is_pcm
+	                && ((sync == 2'd3)
+	                 || ((sync == 2'd2) && (step == 2'd3))
+	                 || ((sync == 2'd0) && (step == 2'd3)));
 
 	wire mix_this_op = out_mask[step];
 
@@ -542,9 +566,11 @@ module ymf271_synth
 	                 S_FMPH  = 6'd27, S_FMWT = 6'd28, S_FMOP = 6'd29, S_FMMIX = 6'd30,
 	                 S_STORE = 6'd31,
 	                 S_NEXT  = 6'd32,
-	                 S_OUT   = 6'd33;
+	                 S_OUT   = 6'd33,
+	                 S_EXT   = 6'd34;   // host wave-memory readback
 
 	reg [5:0] state;
+	reg [5:0] ext_ret;    // where S_EXT resumes: the pass must not lose its place
 
 	// SXX2E wires all four of the chip's outputs to one mono speaker
 	// (add_route(ALL_OUTPUTS, "mono", 1.0)), and MAME normalises each of them
@@ -575,7 +601,19 @@ module ymf271_synth
 		case (state)
 
 		// ------------------------------------------------------------
-		S_IDLE: if (tick_pend) begin
+		// A pending sample tick always wins: the synthesis pass is what has a
+		// deadline, the host's readback does not.
+		S_IDLE: if (!tick_pend && (ext_req != ext_ack)) begin
+			// Same masking as the sample path: the burst is 64-bit aligned and
+			// the region is 2 MB, so the chip's 23-bit space mirrors inside it.
+			// Real hardware has nothing above the ROM either; MAME reads 0
+			// there because its region is ERASE00.
+			sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
+			sdr_req  <= ~sdr_req;
+			ext_ret  <= S_IDLE;
+			state    <= S_EXT;
+		end
+		else if (tick_pend) begin
 			tick_pend  <= 1'b0;
 			group      <= 4'd0;
 			step       <= 2'd0;
@@ -723,6 +761,16 @@ module ymf271_synth
 		end
 		S_FE2: state <= S_SAMP;      // let line_hit / line_byte settle
 
+		// Host readback. Deliberately does not touch line_data / line_tv: that
+		// cache belongs to whichever slot is mid-note, and evicting it here
+		// would cost that slot a refetch for a transfer the synthesis path
+		// never asked for.
+		S_EXT: if (sdr_ack == sdr_req) begin
+			ext_data <= sdr_dout[{ext_addr[2:0], 3'b000} +: 8];
+			ext_ack  <= ext_req;
+			state    <= ext_ret;
+		end
+
 		S_SAMP: begin
 			if (!p_bits12) begin
 				sample <= {line_byte, 8'h00};
@@ -849,10 +897,24 @@ module ymf271_synth
 			state <= S_NEXT;
 		end
 
+		// A slot boundary is the other safe place to serve the host: no sample
+		// fetch is outstanding and the line cache is not mid-use. Servicing
+		// only from S_IDLE was not enough -- under polyphony the pass occupies
+		// most of a sample period, while a Z80 `in` is about 88 clk_sys cycles,
+		// so back-to-back reads outran the refill and returned a stale latch.
+		// Here the host gets an opening every slot, ~20-27 cycles.
 		S_NEXT: begin
 			keyon_pend[slot]  <= 1'b0;
 			keyoff_pend[slot] <= 1'b0;
-			if ((group == 4'd11) && (step == 2'd3)) state <= S_OUT;
+			if ((group == 4'd11) && (step == 2'd3)) begin
+				if (ext_req != ext_ack) begin
+					sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
+					sdr_req  <= ~sdr_req;
+					ext_ret  <= S_OUT;
+					state    <= S_EXT;
+				end
+				else state <= S_OUT;
+			end
 			else begin
 				step   <= nstep;
 				group  <= ngroup;
@@ -860,7 +922,13 @@ module ymf271_synth
 				fb_ra  <= nslot;
 				cch_ra <= nslot;
 				par_ra <= {nslot, 2'd0};
-				state  <= S_LD0;
+				if (ext_req != ext_ack) begin
+					sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
+					sdr_req  <= ~sdr_req;
+					ext_ret  <= S_LD0;
+					state    <= S_EXT;
+				end
+				else state <= S_LD0;
 			end
 		end
 
@@ -881,6 +949,8 @@ module ymf271_synth
 		if (reset) begin
 			state       <= S_IDLE;
 			sdr_req     <= 1'b0;
+			ext_ack     <= 1'b0;
+			ext_data    <= 8'd0;
 			tick_pend   <= 1'b0;
 			audio       <= 16'd0;
 			acc         <= 28'sd0;
@@ -904,7 +974,12 @@ module ymf271_synth
 	wire _unused = &{1'b0, w0, w1, w2, step_nsh, d1_mul, gain_tl, gain_lfo,
 	                 mix_pcm, mix_fm, addr8, idx3, step_mul, alfo_scaled,
 	                 op_mul, fb_mul, fb_div, fb_sum, phase_sum, mod_in, op_input, fb_avg,
-	                 plfo_q, plfo_base, plfo_addr, alfo, amul_r};
+	                 plfo_q, plfo_base, plfo_addr, alfo, amul_r,
+	                 // ext_addr is the chip's full 23-bit space; SXX2E has a
+	                 // 2 MB sample ROM, so the top two bits mirror rather than
+	                 // address anything. On SXX2C they would reach the second
+	                 // flash chip and this must be widened with the region.
+	                 ext_addr[22:21]};
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	initial begin

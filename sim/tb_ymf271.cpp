@@ -100,6 +100,19 @@ static void wr(uint8_t a, uint8_t d) {
     run(8);                                 // the write fan-out drains in <= 4
 }
 
+// Read a bus offset. dout is combinational on addr, and the DUT advances the
+// wave-memory pointer on the SAME edge the Z80 samples DI, so the value has to
+// be taken before the strobe -- exactly as spi_sound presents it.
+static uint8_t rd(uint8_t a) {
+    dut->addr = a; dut->rd = 1;
+    dut->clk = 0; dut->eval();
+    uint8_t v = dut->dout;
+    tick();
+    dut->rd = 0;
+    run(300);                               // let the refill finish from S_IDLE
+    return v;
+}
+
 // Even offset latches the address, odd offset delivers the data.
 static void fm_write(int bank, uint8_t sel, uint8_t reg, uint8_t data) {
     wr(bank * 2,     (uint8_t)((reg << 4) | sel));
@@ -857,6 +870,48 @@ static void test_lfo_pitch() {
     printf("lfo pitch: 300 samples, %d mismatches (step %u, was 65536)\n", bad, step);
 }
 
+// The wave memory read port (utility registers 0x14-0x17, data at offset 2).
+// Two behaviours matter and both are easy to get backwards:
+//   * the port is a read-AHEAD -- a read returns the latched byte and only
+//     then advances and refetches, so the first read after setting an address
+//     is a dummy and the stream starts at address+1;
+//   * with the direction bit clear the port reads 0xFF, not data.
+// The address is therefore set one BELOW the first byte wanted, which is the
+// same convention the SPI cartridge's flash updater uses when it programs
+// from 0x7FFFFF (PLAN.md section 0).
+static void test_ext_memory_read() {
+    const uint32_t A = 0x12345;             // first byte we want back
+
+    // Direction bit clear: the port must not return data.
+    uint32_t x = A - 1;
+    timer_write(0x14, (uint8_t)(x & 0xff));
+    timer_write(0x15, (uint8_t)((x >> 8) & 0xff));
+    timer_write(0x16, (uint8_t)((x >> 16) & 0x7f));      // bit7 = 0 -> write dir
+    uint8_t off = rd(0x2);
+    if (off != 0xFF) {
+        printf("FAIL: ext read with rw=0 returned %02X, want FF\n", off);
+        errors++;
+    }
+
+    // Direction bit set: dummy read, then the ROM verbatim.
+    timer_write(0x16, (uint8_t)(((x >> 16) & 0x7f) | 0x80));
+    (void)rd(0x2);                          // the read-ahead's dummy
+
+    int bad = 0;
+    for (int i = 0; i < 32; i++) {
+        uint8_t want = rom[A + i];
+        uint8_t got  = rd(0x2);
+        if (got != want) {
+            if (bad < 5)
+                printf("FAIL: ext read %d (addr %05X): want %02X got %02X\n",
+                       i, A + i, want, got);
+            bad++;
+        }
+    }
+    errors += bad;
+    printf("ext memory read: 32 bytes from 0x%05X, %d mismatches\n", A, bad);
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vymf271;
@@ -879,6 +934,7 @@ int main(int argc, char **argv) {
     test_all_algorithms();
     test_lfo_amplitude();
     test_lfo_pitch();
+    test_ext_memory_read();
 
     delete dut;
     if (errors) {

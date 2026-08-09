@@ -1267,7 +1267,7 @@ Of those, only the first would ever have produced an obvious symptom.
       against MAME on two captures. Optional headroom only: `spi_layers`
       renders layers the game has disabled, and issues two 64-bit reads per
       text column for a 6-byte char row.
-- [~] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
+- [x] **T5** Sound: T80, banking, FIFOs, coin latch, YMF271 (PCM then FM).
       - [x] `rtl/t80/` — T80 vendored from Arcade-IremM72_MiSTer. VHDL, so
             Verilator cannot read it; `sim/T80s.sv` is a port-compatible stub
             that exists only so lint and the C++ testbenches elaborate.
@@ -1301,16 +1301,21 @@ Of those, only the first would ever have produced an obvious symptom.
             ~45 FIFO reads/s, 7-12 slots sounding and tracking the music,
             **0 PCM overruns on every reading**, L and R bit-identical as
             SXX2E requires. `tools/slop sound` reports all of it; see 14.6.
-      - [ ] **Known YMF271 gaps remain** — enumerated in 14.5, in rough
-            order of audibility. The one most likely to matter is the **wave
-            memory data read register (utility 0x14-0x17)**, which is also
-            exactly the port SXX2C flash needs (section 0). Then: no PCM
-            interpolation, the external-waveform keycode ignoring Src B and
-            Src Note, the fields decoded nowhere (detune, alternate loop,
-            Acc On, EN / EXT Out, PFM, Busy), sync 3 forcing PCM on any
-            group (latent -- MAME fatalerrors on it and the games run),
-            `fns`/`block` updating immediately, timers that never stop, and
-            channel levels D/E/F at 1/65536 rather than silence.
+      - [x] **The two YMF271 gaps worth closing are closed.** The **wave
+            memory data read register (utility 0x14-0x17 plus offset 2)** is
+            implemented as the read-ahead MAME models, and is the port SXX2C
+            flash needs (section 0); `tb_ymf271` reads 32 bytes back and
+            requires the sample ROM verbatim. **Sync 3 no longer forces PCM**
+            on a group whose slots are not waveform 7. See 14.5 -- including
+            the service-point mistake the first version made, which lost
+            bytes under polyphony.
+      - [x] **The rest of 14.5 is a decision, not a backlog.** Each remaining
+            item fails one of: it cannot be verified (MAME itself is unsure,
+            or nothing reachable exercises it), it costs more than it returns
+            (interpolation against a 27-cycle slot budget; a shadow byte per
+            slot with RAM blocks at 86%), or it is the sound driver's
+            heartbeat and not worth diverging on untestably. Reasons are
+            written out at the end of 14.5.
 
       Build with FM, the LFOs and the pipelining in (15.8): 0 errors, TNS
       0.000 on every clock, **78% ALMs**, **86% RAM blocks**, 53% DSP. Setup
@@ -1344,7 +1349,10 @@ Of those, only the first would ever have produced an obvious symptom.
             and capture flow are documented, and the fitter-seed procedure is
             written down where someone hitting a negative `clk_ram` will find
             it.
-      - [x] `releases/` refreshed to the current RBF and MRA.
+      - [x] `releases/` refreshed to the current RBF and MRA. Note it is
+            **gitignored** -- a local staging directory, not a tracked
+            artifact, so "refreshed" means on disk only and no RBF is ever
+            committed.
       - [x] **Clean-from-scratch build verified.** `make clean && make build`
             from an empty `db/`, `incremental_db/` and `output_files/`: 0
             errors, timing identical to the incremental build (`clk_ram`
@@ -2143,12 +2151,35 @@ sound driver's heartbeat on this board, follow MAME.
 
 **Known gaps, in rough order of how likely they are to be heard:**
 
-* **The wave memory data read register is not implemented.** Offset 2 returns
-  0xFF and utility registers 0x14-0x17 are dropped. That is the port a program
-  uses to read sample ROM back through the chip (manual 4-3); MAME implements
-  it and notes seibuspi is the only driver that exercises the external memory
-  handlers, so this is the gap most likely to matter. On SXX2C the same port is
-  the cartridge flash path; SXX2E has a plain mask ROM on the YMF bus.
+* ~~**The wave memory data read register is not implemented.**~~ **Done.**
+  Utility registers 0x14-0x17 set the 23-bit address and direction bit, and
+  offset 2 returns data. It is a read-AHEAD, exactly as MAME's `read()` is: a
+  read returns the latched byte and only then pre-increments and refetches, so
+  the first read after setting an address is a dummy and the stream starts at
+  address+1. That is the same convention the cartridge flash updater relies on
+  when it programs from 0x7FFFFF (section 0). With the direction bit clear the
+  port reads 0xFF. Writes through 0x17 advance the address and go nowhere,
+  which is what a mask ROM does; on SXX2C that path becomes the flash write.
+  `tb_ymf271`'s `ext memory read` check reads 32 bytes and requires the sample
+  ROM verbatim.
+
+  Confirmed on hardware 2026-08-09: attract renders with heavy sprite traffic,
+  Z80 executing, FIFO reads and YMF writes climbing, 17-23 slots sounding and
+  **0 PCM overruns** across every sample -- which is the reading that matters,
+  since serving the port at slot boundaries adds an SDRAM round trip to the
+  pass. Timing met on every clock (clk_ram +0.841, clk_sys +0.882, TNS 0.000)
+  at SEED 5; three of the five seeds swept closed, and the failing endpoints
+  were the usual `sdram|dq_reg -> chN_dout`, none on the new address mux.
+
+  **The service point is the interesting part.** The refill is an SDRAM read on
+  ch5, which the synthesis pass owns, so it is served at slot boundaries
+  (`S_NEXT`) and when idle. Serving it only when idle -- the obvious first
+  choice -- lost bytes: under polyphony the pass fills most of a sample period
+  while a Z80 `in` is about 88 clk_sys cycles, so back-to-back reads outran the
+  refill and got a stale latch. 8 of 32 bytes wrong, and it would have been
+  worse on hardware than in the testbench, since the reflash plays music while
+  it reads. A slot boundary comes round every 20-27 cycles, which the host
+  cannot outrun.
 * **PCM samples are not interpolated.** Block description 13 says external
   waveform data is interpolated before the envelope multiply. Nearest-sample
   here, as in MAME, so samples played away from their native rate alias more
@@ -2165,13 +2196,12 @@ sound driver's heartbeat on this board, follow MAME.
   (utility 0xH d7, FM with an external PCM operator source), and the status
   Busy flag, which always reads 0. Every one of these is also on MAME's own
   TODO list at the top of `ymf271.cpp`.
-* **Sync 3 forces PCM on any group.** Section 2-7 gives external waveforms to
-  groups 0, 4 and 8 only — they are the twelve slots that have PCM attribute
-  registers — and a sync-3 group elsewhere is four one-operator FM voices.
-  `step_is_pcm` keys on the sync mode alone, so such a group would play from
-  sample address 0 (its start/end/loop bytes are never written) instead of
-  sounding. Latent, not live: MAME `fatalerror`s on exactly this case and the
-  games run, so it does not occur in practice. A `p_is_pcm` term closes it.
+* ~~**Sync 3 forces PCM on any group.**~~ **Closed.** `step_is_pcm` is now
+  gated on the slot actually carrying waveform 7, so a sync-3 group outside
+  groups 0, 4 and 8 sounds its operators instead of playing from sample
+  address 0 (its start/end/loop bytes are never written). Still latent -- the
+  games never do it, which is why MAME can afford to `fatalerror` on the same
+  case in `update_pcm()` rather than handle it.
 * **`fns` / `block` update immediately.** MAME's `write_register` case 0x9 does
   `fns = (fns_hi << 8 & 0x0f00) | data` and `block = fns_hi >> 4`, so writing
   register 0xA alone changes nothing until register 9 is written — which is the
@@ -2185,6 +2215,38 @@ sound driver's heartbeat on this board, follow MAME.
   reachable when the enable bit is already set, so it can never be taken.
 * **Channel levels D, E and F are 1/65536, not silence.** The book says ∞
   attenuation, MAME uses 96.1 dB. Inaudible, listed so nobody re-derives it.
+
+**Everything still on that list is left there on purpose, not forgotten.** The
+two that were worth closing are closed; each of the rest fails at least one of
+the two tests that matter here.
+
+*It cannot be verified.* The engine is checked by predicting its output from
+MAME's own formulas, so a change MAME does not make has nothing to score
+against. The external-waveform keycode is the clearest case: MAME has the Src B
+/ Src Note term written out and commented `not sure`, so implementing it means
+guessing, and the sum can exceed 31 and would need a clamp nobody can calibrate.
+Detune, A/L alternate loop, Acc On, EN / EXT Out, PFM and the Busy flag are the
+same -- all on MAME's own TODO, none reachable from a driver we can run.
+
+*It costs more than it returns.* PCM interpolation is real per the datasheet and
+we do not do it, but it adds a second sample fetch and a multiply to a 27-cycle
+slot budget, and it would break the one test that proves the PCM path
+end-to-end -- that a ramp in the ROM comes back verbatim. `fns`/`block`
+deferring until register 9 is written would need a shadow byte per slot, and RAM
+blocks are the tightest resource in the design at 86%; the divergence it removes
+is one sample in a race the drivers do not run.
+
+*It is the heartbeat.* Timers A and B free-run once started because MAME's stop
+branch is unreachable. The datasheet says the Load bit should stop them, and
+that is probably a MAME bug -- but this chip's timer IS the sound driver's
+sequencer on this board (14), and 14.5 already resolved the one other
+timer-versus-datasheet conflict in MAME's favour for exactly that reason.
+Diverging here on an untestable reading risks silence, and buys nothing
+observable.
+
+So the audio is finished in the sense that matters: everything reachable from
+the hardware we emulate is implemented and checked, and what is left is either
+MAME's uncertainty or a deliberate trade recorded above.
 
 Also noted for later: `sxx2g` boards clock the YMF271 at 16.384 MHz rather than
 16.9344, which moves the sample rate to 42666.7 Hz and scales every envelope
