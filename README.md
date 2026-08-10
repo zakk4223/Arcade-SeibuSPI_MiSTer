@@ -6,8 +6,9 @@ Raiden Fighters on Seibu **SXX2E** single-board hardware (MAME set `rdfts`).
 
 **The rendered frame is bit-exact against MAME** — every one of 76,800 pixels,
 on two independent captures with different register state. All three sets —
-`rdfts`, `rdft` and `rdft2` — boot and run on real hardware, with sound. See
-`PLAN.md` for the full design notes and the task list.
+`rdfts`, `rdft` and `rdft2` — boot and run on real hardware. Sound is confirmed
+on `rdfts`; nobody has listened to `rdft2` yet. See `PLAN.md` for the full
+design notes and the task list.
 
 | block | state |
 |---|---|

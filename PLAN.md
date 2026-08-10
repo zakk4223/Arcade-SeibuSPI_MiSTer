@@ -1972,15 +1972,55 @@ Traps worth remembering:
 
 Of those, only the first would ever have produced an obvious symptom.
 
-## 10a. RESUME HERE (2026-08-10): rdft2 boots in simulation; hardware is next
+## 10a. RESUME HERE (end of 2026-08-10): all three sets run on hardware
 
-The build meets timing on every clock and `make verify` passes. Nothing here has
-been on hardware.
+**rdfts, rdft and rdft2 all boot and run on the MiSTer at 192.168.1.125**, each
+confirmed by screenshot on the build at this commit: every clock positive
+(clk_ram +1.001, TNS 0.000) and `make verify` passing.
 
-### What got finished
+    rdfts   bytes_in 23,396,353  bytes_out 23,396,352   attract plays
+    rdft2   bytes_in 35,752,108  bytes_out 35,910,452   title screen, sprites
+            (+158,344 is the sample codec's expansion, 471,277 - 312,933)
+    rdft    the board's TEST MODE menu, rendering correctly
 
-rdft2 went from "the flash format is unknown" to "boots as far as anything can
-be simulated" across this arc, all of it in section 0 above:
+rdft came up in Test Mode because the Service Mode DIP is set for that MRA in
+the MiSTer's saved per-core config -- an OSD setting, not a core fault. Its
+attract has not been seen since the `ioctl_wr` fix; turn Service Mode off on
+the OSD's DIP page to check, which is the only thing still unconfirmed about
+that set.
+
+### What is NOT known yet, in the order it matters
+
+1. **Nobody has HEARD rdft2.** The sound01 window, which is the whole reason
+   rdft2 can boot, exists to get the Z80 its program -- and the only check of
+   the result is a byte compare in simulation plus the fact that the 386 gets
+   past the handover on hardware. Whether the YMF271 actually plays rdft2's
+   music has not been established. That is the first thing to do, and 14.6
+   lists what to look at if it is silent.
+2. **rdft2 has only been seen in attract.** No coin, no start, no gameplay, no
+   second loop. Sprite starvation and the RISE10 path have been exercised
+   against captures but not against a live game under load.
+3. **T-G, rdfts' SPRITES checksum**, which still mismatches while PRG, CHARS
+   and TILES are byte-exact. Could be the data or could be the checker's own
+   reads under sprite-engine contention -- 10c says how to tell.
+4. **T-F, the PEEK address bit**, which reads 32 MB high and is therefore
+   useless on the 64 MB module rdft2 needs. Fixing it is one line and it is
+   what would settle T-G directly.
+
+### How to get back to a running board
+
+    make && make timing                       # never trust "successful" alone
+    sshpass -p 1 scp output_files/SeibuSPI.rbf root@192.168.1.125:/media/fat/_Arcade/cores/
+    sshpass -p 1 ssh root@192.168.1.125 'echo "load_core /media/fat/_Arcade/rdft2.mra" > /dev/MiSTer_cmd'
+    sshpass -p 1 ssh root@192.168.1.125 'echo "screenshot s.png" > /dev/MiSTer_cmd'
+
+Take the screenshot BEFORE reading any JTAG counter. See the end of 10c for why
+that is not a stylistic preference.
+
+### What got finished in the rdft2 arc
+
+rdft2 went from "the flash format is unknown" to running on hardware, all of it
+in section 0 above and 10c below:
 
 * the sample-flash codec cracked (BPE over DPCM) and rebuilt offline bit-exact
 * an in-core decoder, with the MRA choosing which codec runs per part
@@ -1991,6 +2031,8 @@ be simulated" across this arc, all of it in section 0 above:
   sprite tile-code bit
 * sprite starvation eliminated by interleaving the sprite ROMs at load time
 * **the sound01 window, which is what had blocked booting** -- see (1)
+* **the `ioctl_wr` edge detector, which is what had blocked RUNNING** -- and it
+  turned out to be corrupting every set's download, not just rdft2's. 10c.
 
 ### (1) rdft2's Z80 program: the sound01 window -- DONE
 
@@ -2115,13 +2157,18 @@ do not judge a change by whether the next fit closed -- judge it by whether the
 logic it removed was really in the path. Reseeding is still the last resort, and
 it was not needed here.
 
-### (2b) Section 10a as of this build
+### (2b) Where timing ended up
 
-    make verify        passes
-    make build         0 errors, RBF written
-    make timing        every clock positive, TNS 0.000
+Each later build in this session re-fitted and stayed positive, so the three
+structural changes hold rather than having been one lucky seed:
 
-Since flashed and run: rdfts and rdft2 both boot. See 10c.
+    after the registering       clk_ram +0.927
+    + bytes_out on the probe    clk_ram +0.275
+    + the ioctl_wr edge         clk_ram +1.001   <- the build on the MiSTer
+
+The spread across those is the point: the same netlist plus a few flops moves
+clk_ram by 0.7 ns between fits. Anything under about +0.3 should be treated as
+"met by luck", not as headroom.
 
 ### Verification state, and how to re-run it
 
@@ -2350,21 +2397,46 @@ Two loose ends, neither blocking:
 ### Take screenshots. They are the cheapest instrument here
 
 This session spent a long time reasoning about what the hardware might be doing
-from JTAG counters, two of which were lying, when one screenshot would have
+from JTAG counters, THREE of which were lying, when one screenshot would have
 said "black screen" immediately and pointed straight at the ROM image. The
 command is one line over ssh and needs no capture card, no JTAG and no server:
 
     echo "screenshot slop.png" > /dev/MiSTer_cmd     # -> /media/fat/screenshots/
+    scp root@192.168.1.125:/media/fat/screenshots/slop.png .
 
-Take one FIRST, before reading a single counter.
+Take one FIRST, before reading a single counter. Reading it:
+
+* a ~1100-byte PNG at 320x240 is an all-black frame; real content is tens of KB,
+  so the file SIZE alone answers "is it drawing anything";
+* screenshot the menu core as a control if the mechanism itself is in doubt
+  (58 KB of content, from the same path);
+* when a counter and the screen disagree, suspect the counter. Every JTAG
+  reading this session that contradicted the screen was the instrument's fault.
+
+The capture card (Elgato 4K X, `/dev/video2` -- ALWAYS find it with
+`v4l2-ctl --list-devices`) is for motion and for what the analog path does. For
+"what is the core drawing", the MiSTer's own screenshot is better: no cable, no
+scaler in the way, and it is the core's native 320x240 rather than a 1080p
+rescale.
 
 ## 10b. Where the project stands (end of 2026-08-09, before the rdft2 arc)
 
-(Superseded in part by 10a above, which is the current state. This section is
-the rdfts/rdft picture and is still accurate for those two sets.)
+(Superseded by 10a above, which is the current state.)
+
+**CORRECTION, 2026-08-10.** Read the "verified on hardware" claims below with
+care: the build that was actually sitting on the MiSTer at the start of the
+next session rendered rdfts as an all-black frame, and its four ROM checksums
+all failed, because of the `ioctl_wr` double-sample in 10c. So a download that
+was silently corrupt was in place for at least part of the period this section
+describes. Either the earlier verification ran on a build that behaved
+differently, or "boots to attract with sprites and sound" was read off a
+picture nobody re-checked afterwards -- there is no way to tell now. What IS
+established is that both sets run correctly on the build at the head of this
+repo. Treat every dated hardware claim in this section as unconfirmed rather
+than as a baseline to reason from.
 
 Two mainboard revisions run on hardware, both deployed to the MiSTer at
-192.168.1.125 and both verified this session:
+192.168.1.125 and both said to be verified in that session:
 
 * **SXX2E** (`rdfts`) -- the original target. Frame is BIT-EXACT against MAME,
   0 of 76,800 pixels differing, on two independent captures. Sound plays with
@@ -2427,12 +2499,40 @@ rdft2 has never been run on hardware.
 
 ## 11. TASKS
 
-Open, in the order they block things (2026-08-10):
+Open, in the order they block things (end of 2026-08-10). All three sets run on
+hardware, so nothing below blocks a working board -- these are about knowing
+whether it is RIGHT.
 
-- [x] **T-A** clk_ram timing. Was -0.292; now **+0.927 with TNS 0.000 on every
-      clock**, by registering `rom_loader`'s part table and its destination and
-      `sdram.sv`'s emergency-refresh compare. Section 10a(2), which is worth
-      reading for the fit that got WORSE in the middle.
+- [ ] **T-J** rdft's attract. It boots and renders, but the MiSTer's saved DIP
+      for that MRA has Service Mode on, so what was actually seen is the board
+      TEST MODE menu. Turn it off on the OSD DIP page and screenshot the
+      attract; that closes the last gap left by 10b's unconfirmed claims.
+- [ ] **T-H** Listen to rdft2. The sound01 window exists to get its Z80 a
+      program, and that program has only been checked as bytes: verified
+      byte-exact into the Z80's memory in `run-boot`, and the 386 gets past the
+      handover on hardware. Whether the YMF271 plays rdft2's music is unknown,
+      and the Verilator Z80 is a stub so simulation cannot answer it. If it is
+      silent, 14.6 is the order to check things in and the vital signs panel
+      reports the Z80 PC and both FIFO counters.
+- [ ] **T-I** Play rdft2. It has only been seen in attract: no coin, no start,
+      no gameplay. Sprite starvation and the RISE10 fetch path have been
+      checked against captures, never against a live game under load, which is
+      exactly where 13b's starvation showed up on rdfts.
+- [ ] **T-F** The JTAG instrument, before anything else on hardware.
+      `spi_jtag_peek.sv`'s `addr` is `source[25:0]` where bit 25 IS the go bit,
+      so every PEEK reads 32 MB high -- harmless on a 32 MB module, useless on
+      the 64 MB one rdft2 needs. One line. Section 10c. (The probe width and
+      the Tcl offsets are fixed already; this is the third instrument bug and
+      the only one still standing.)
+- [ ] **T-G** rdfts' SPRITES checksum still mismatches while PRG, CHARS and
+      TILES are byte-exact. Data, or the checker's own reads under
+      sprite-engine contention -- read `passes` and `sum SPRITES` twice and see
+      whether the sum moves. T-F is what would settle it directly.
+- [x] **T-A** clk_ram timing. Was -0.292; every build since is positive with
+      TNS 0.000 (the deployed one is **+1.001**), by registering `rom_loader`'s
+      part table and its destination and `sdram.sv`'s emergency-refresh
+      compare. Section 10a(2), worth reading for the fit that got WORSE in the
+      middle and for how much clk_ram moves between fits.
 - [x] **T-B** rdft2's sound01 window, 128 KB at 386 address 0x1380000, so the
       386 can download the Z80 program. Section 10a(1). Verified by the game's
       own boot code in `run-boot`: 131,072 bytes into the Z80's memory, byte
@@ -2443,9 +2543,6 @@ Open, in the order they block things (2026-08-10):
       16. What had blocked it was not rdft2 at all but `ioctl_wr` being acted
       on twice in `rom_loader`, which was corrupting every set's download.
       Section 10c.
-- [ ] **T-G** rdfts' SPRITES checksum still mismatches while PRG, CHARS and
-      TILES are exact. Could be the data or could be the checker's own reads
-      under sprite-engine contention. Section 10c says how to tell them apart.
 - [ ] **T-D** Optional, ~10% of the sprite line budget: the line-buffer
       generation tag that replaces the 320-cycle clear. Tried and reverted --
       start by proving `bank_tag` actually toggles. Nothing needs it now that
@@ -2456,13 +2553,20 @@ Open, in the order they block things (2026-08-10):
       directions and checks the Z80 download. Worth re-reading `run-sdram`'s
       failure in the light of 10c: it is the ONE bench that drives the loader
       into a real `sdram.sv`, and it has been failing a readback compare the
-      whole time the hardware download has been suspect. That may not be a
-      coincidence.
-- [ ] **T-F** The JTAG instrument itself, before anything else on hardware.
-      `spi_jtag_peek.sv`'s `addr` includes the `go` bit, so every PEEK reads
-      32 MB high -- harmless on a 32 MB module, not on the 64 MB one rdft2
-      needs. Section 10c. The probe width and the Tcl field offsets are fixed
-      already; this one is not.
+      whole time the hardware download has been suspect. Retested after the
+      `ioctl_wr` fix and it still fails, but the failure is now pinned and it
+      is NOT the loader:
+
+          chip saw: 26,345,472 ACTIVE, 2,949,120 READ, 23,396,352 WRITE
+          checked 23,592,960 bytes, 22,893,589 differ, every one FF
+
+      23,396,352 writes is EXACTLY rdfts' image, so the loader and the
+      controller put the right number of bytes into the behavioural chip. The
+      readback then returns 0xFF for nearly all of it. So the fault is in the
+      read side -- the bench's readback loop or `sdram_model.sv`'s read path --
+      and this bench has never been proving anything about writes. Fix the
+      read side and it becomes the only test that drives `rom_loader` through a
+      real `sdram.sv`, which is exactly the gap 10c fell into.
 
 - [x] **T1** Repo skeleton: `sys/` from Template_MiSTer, `SeibuSPI.{qpf,qsf,sdc,sv}`,
       `files.qip`, PLL, Makefile, README.
