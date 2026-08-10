@@ -391,6 +391,38 @@ of the hardware. Something transforms or generates data here, and until that is
 understood a pre-flashed rdft2 MRA cannot be built -- an MRA can only assemble
 files that are in the ROM set.
 
+**Write-tap follow-up, same day.** Tapping the Z80's writes to the YMF271
+external port and the 386's reads of `sound01` together sharpened the picture
+considerably, and confirms the payload is not a copy.
+
+* **2,028,342 bytes written**, addresses 0x000000-0x1EF2F5, nothing at or above
+  0x200000. Both chips are written in lockstep -- the address sequence is
+  0x0, 0x100000, 0x1, 0x100001, ... -- and each datum is preceded by its 0x40
+  program-setup command to the same address, which is why the tap logs 4,056,752
+  writes for 2 MB. Replaying the log reproduces the nvram image, so the log is
+  complete.
+* **`flash[4..0x17C246]` is `pcm.u0217` verbatim at identity offset**, all
+  1,557,059 bytes of it.
+* **The remaining 471,215 bytes are not in the ROM set.** Not `pcm` (only
+  10,596 of 471,215 bytes coincide, which is chance), not `sound1.u0222` at any
+  alignment (best correlation 17 of 586 sampled bytes), not any other file.
+  High entropy: all 256 byte values present, 2.7% zeros.
+* The 386 read the **entire** 10 MB `sound01` window, 0xA00000-0x13FFFFC.
+
+So the updater copies verbatim for 1.5 MB and then produces half a megabyte of
+data from somewhere this analysis has not found. That is consistent with
+decompression or with assembly in main RAM from a source outside the tapped
+window; it is not consistent with any straight copy.
+
+**Disassembly is now worth doing, and it has a target.** The updater changes
+behaviour after writing exactly 0x17C243 bytes, so the code to read is whatever
+runs at that transition -- reachable by breaking on the write of flash address
+0x17C247, or by finding the 386 loop that feeds it. Both program images are
+available (the Z80's is `maincpu[0x1BB800]` for rdft; rdft2's offset needs
+finding), and this session already used disassembly successfully to pin the
+0x4009 bit in minutes. What it should answer: whether the tail is decompressed,
+and if so from where.
+
 **Three ways forward, and the third is the cheap one:**
 
 1. Do section 0's `install_write_tap` analysis properly for rdft2. It would say
