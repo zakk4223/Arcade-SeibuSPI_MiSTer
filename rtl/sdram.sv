@@ -175,6 +175,14 @@ always @(posedge clk) begin
     reg [15:0] dq_reg_d;
     reg  [3:0] state = STATE_STARTUP;
 
+    // The emergency-refresh test, one cycle old. It used to be a live 14-bit
+    // magnitude compare sitting at the TOP of the STATE_IDLE priority chain,
+    // so refresh_count[12] -> SDRAM_A[11] was the whole address mux deep and
+    // was the last endpoint failing clk_ram setup. Registering it is free: the
+    // threshold is on a counter that takes 880 cycles to reach it, so firing
+    // one cycle later changes nothing, and refresh_count is corrected by
+    // subtraction rather than by being cleared.
+    reg       refresh_due;
     reg       ch1_req_1, ch2_req_1, ch3_req_1, ch4_req_1, ch5_req_1;
     reg       ch1_rq, ch2_rq, ch3_rq, ch4_rq, ch5_rq;
     reg [2:0] ch;
@@ -212,6 +220,7 @@ always @(posedge clk) begin
     if (USE_CH5 && (ch5_req != ch5_req_1)) ch5_rq <= 1;
 
     refresh_count <= refresh_count+1'b1;
+    refresh_due   <= (refresh_count > cycles_per_refresh);
 
     data_ready_delay1 <= data_ready_delay1>>1;
     data_ready_delay2 <= data_ready_delay2>>1;
@@ -286,6 +295,12 @@ always @(posedge clk) begin
             if (!refresh_count) begin
                 state   <= STATE_IDLE;
                 refresh_count <= 0;
+                // Not redundant: refresh_due was computed a cycle ago from a
+                // counter that runs UP to a wrap during startup, so without
+                // this the very first idle cycle would see a stale 1 and fire
+                // an emergency refresh against a zeroed counter -- which then
+                // underflows and produces a burst of them.
+                refresh_due   <= 1'b0;
             end
         end
 
@@ -302,10 +317,11 @@ always @(posedge clk) begin
         end
 
         STATE_IDLE: begin
-            if (refresh_count > cycles_per_refresh) begin // emergency refresh, mainly for downloading rom/paused core
+            if (refresh_due) begin // emergency refresh, mainly for downloading rom/paused core
                 state         <= STATE_RFSH;
                 command       <= CMD_AUTO_REFRESH;
                 refresh_count <= refresh_count - cycles_per_refresh + 1'd1;
+                refresh_due   <= 1'b0;
                 chip          <= 0;
             end
             else if(ch2_rq) begin
@@ -361,6 +377,7 @@ always @(posedge clk) begin
                 state         <= STATE_RFSH;
                 command       <= CMD_AUTO_REFRESH;
                 refresh_count <= 0;
+                refresh_due   <= 1'b0;
                 chip          <= 0;
             end
         end
@@ -394,6 +411,7 @@ always @(posedge clk) begin
     if (init) begin
         state <= STATE_STARTUP;
         refresh_count <= startup_refresh_max - sdram_startup_cycles;
+        refresh_due   <= 1'b0;
     end
 end
 

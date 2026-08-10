@@ -160,15 +160,42 @@ module rom_loader
 	reg [25:0] in_off;     // bytes of this part taken from ioctl
 	reg [25:0] out_off;    // bytes of this part emitted into SDRAM
 
-	reg [25:0] part_base;
-	reg [25:0] part_size;
+	// The table's outputs are REGISTERED, and the table is read one part ahead
+	// so the registered copy is valid the same cycle `part` changes.
+	//
+	// Combinationally, the mux fed the adder that produces sdr_addr, which put
+	// a 17-way 26-bit select in the address path: clk_ram missed setup by
+	// 0.005 ns on part[1] -> sdr_addr[24] the moment `part` widened to 5 bits.
+	// Registering costs nothing here -- a part boundary is followed by the
+	// decoder's start pulse and at least one feed before anything can be
+	// emitted -- and it cuts the path in two, mux into a flop and flop into
+	// the adder.
+	reg [25:0] part_base,   part_size;
 	reg [4:0]  part_mode;
+	reg [25:0] part_base_r, part_size_r;
+	reg [4:0]  part_mode_r;
+
+	wire       part_done;
+	wire       last_part;
+	// Held at 0 during reset on purpose. `part_size_r` is not yet loaded there,
+	// so `part_in_full` reads true against a zero size and part_done fires
+	// spuriously -- harmless for `part`, which reset holds at 0, but it would
+	// otherwise leave the registered table pointing at part 1 on release.
+	wire [4:0] part_sel = reset                     ? 5'd0
+	                    : (part_done && !last_part) ? part + 5'd1
+	                                                : part;
+
+	always @(posedge clk) begin
+		part_base_r <= part_base;
+		part_size_r <= part_size;
+		part_mode_r <= part_mode;
+	end
 
 	always @* begin
 		case (set_id)
 
 		// ---- TABLE rdft: SPI cartridge, pre-flashed (SXX2C) ----
-		SET_RDFT: case (part)
+		SET_RDFT: case (part_sel)
 			//                                          base   size          mode
 			5'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
 			5'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
@@ -207,7 +234,7 @@ module rom_loader
 		//     SDRAM for spi_cpu to answer that window at all. Stored PACKED,
 		//     one byte per 386 dword; the window's other three byte lanes are
 		//     zero in MAME's region too.
-		SET_RDFT2: case (part)
+		SET_RDFT2: case (part_sel)
 		//                                                    base   size          mode
 		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.tun
 		5'd1 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B1;  end // prg1.bin
@@ -229,7 +256,7 @@ module rom_loader
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----
-		default: case (part)
+		default: case (part_sel)
 			//                                          base   size          mode
 			5'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
 			5'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
@@ -250,7 +277,7 @@ module rom_loader
 		endcase
 	end
 
-	wire last_part = (part == nparts - 5'd1);
+	assign last_part = (part == nparts - 5'd1);
 
 	// Destination offset within the part, per scatter mode. This indexes
 	// EMITTED bytes: for a decoded part the source offset is not the
@@ -263,7 +290,7 @@ module rom_loader
 	// tile*192 is tile*128 + tile*64 and row*12 is row*8 + row*4, so the whole
 	// thing is shifts and adds.
 	wire [25:0] sri  = {off[25:6], off[4:1], off[5], off[0]};
-	wire [25:0] siv  = (part_mode == M_SPR_ILV_R) ? sri : off;
+	wire [25:0] siv  = (part_mode_r == M_SPR_ILV_R) ? sri : off;
 	wire [25:0] ilv  = {siv[24:6], 7'd0} + {siv[25:6], 6'd0}
 	                 + {19'd0, siv[5:2], 3'd0} + {20'd0, siv[5:2], 2'd0}
 	                 + (siv[1] ? 26'd6 : 26'd0) + {25'd0, siv[0]};
@@ -274,7 +301,7 @@ module rom_loader
 		// by hand for a 25-bit address and each one needed a different patch
 		// when the map grew; `off_h` exists so the halved forms cannot drift
 		// from each other again.
-		case (part_mode)
+		case (part_mode_r)
 			M_LINEAR: scat =  off;
 			M_32_B0 : scat = {off[23:0], 2'b00};
 			M_32_B1 : scat = {off[23:0], 2'b00} + 26'd1;
@@ -291,7 +318,21 @@ module rom_loader
 		endcase
 	end
 
-	wire [25:0] dest = part_base + scat;
+	// REGISTERED, and `sdr_addr` is loaded from it rather than from the sum.
+	// The scatter is a 13-way mux over 26-bit shift-adds and then a 26-bit add
+	// against the base, and at 80% ALMs the fitter cannot reliably place all
+	// of that inside one clk_ram period -- every failing endpoint in the fit
+	// before this was out_off[N] -> sdr_addr[N].
+	//
+	// Registering is free because `out_off` only moves on `emit`, and two
+	// emits are always at least two cycles apart: the second waits for the
+	// first's write to retire, and `busy` is still set in the cycle the ack
+	// arrives. A part boundary is the same story -- out_off clears and
+	// part_base_r loads together, and the decoder cannot produce the new
+	// part's first byte until two cycles later.
+	wire [25:0] dest = part_base_r + scat;
+	reg  [25:0] dest_r;
+	always @(posedge clk) dest_r <= dest;
 
 	// ------------------------------------------------------------------
 	// Decoder
@@ -315,10 +356,10 @@ module rom_loader
 
 	// The part's input is spent. What ends a part is bytes IN, not bytes out:
 	// a decoded part's output length is a property of the data, not the table.
-	wire part_in_full = (in_off == part_size);
+	wire part_in_full = (in_off == part_size_r);
 	wire feed         = hold_valid && !part_in_full && dec_in_ready;
 	wire emit         = dec_out_valid && !busy;
-	wire part_done    = part_in_full && dec_idle && !busy;
+	assign part_done  = part_in_full && dec_idle && !busy;
 
 	wire [3:0] codec = part_codec[{part, 2'b00} +: 4];
 
@@ -371,9 +412,9 @@ module rom_loader
 			// part is still draining after the HPS drops ioctl_download, and
 			// those bytes are as real as the rest.
 			if (emit) begin
-				sdr_addr  <= {dest[25:1], 1'b0};
+				sdr_addr  <= {dest_r[25:1], 1'b0};
 				sdr_din   <= {dec_out_data, dec_out_data};
-				sdr_be    <= dest[0] ? 2'b10 : 2'b01;
+				sdr_be    <= dest_r[0] ? 2'b10 : 2'b01;
 				sdr_rnw   <= 1'b0;
 				sdr_req   <= ~sdr_req;
 				busy      <= 1'b1;

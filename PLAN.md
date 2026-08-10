@@ -1972,52 +1972,91 @@ Traps worth remembering:
 
 Of those, only the first would ever have produced an obvious symptom.
 
-## 10a. RESUME HERE (2026-08-10): rdft2 loads and renders, two things block it
+## 10a. RESUME HERE (2026-08-10): rdft2 boots in simulation; hardware is next
 
-A full Quartus compile of everything below succeeded and produced an RBF, but
-**clk_ram fails timing** -- see (2). Nothing here has run on hardware.
+The build meets timing on every clock and `make verify` passes. Nothing here has
+been on hardware.
 
 ### What got finished
 
-rdft2 went from "the flash format is unknown" to "renders frame-exact against
-MAME" across this arc, all of it in section 0 above:
+rdft2 went from "the flash format is unknown" to "boots as far as anything can
+be simulated" across this arc, all of it in section 0 above:
 
 * the sample-flash codec cracked (BPE over DPCM) and rebuilt offline bit-exact
 * an in-core decoder, with the MRA choosing which codec runs per part
-* rdft2's loader table and MRA, 34.0 MB, checked part by part against MAME
+* rdft2's loader table and MRA, 34.1 MB, checked part by part against MAME
 * the sprite chunk stride and the RISE10 crypt selected per set
 * the tile/text keys, and the fore-layer base that had to widen with them
 * ten captured scenes verified pixel-identical, which found rdft2's 17th
   sprite tile-code bit
 * sprite starvation eliminated by interleaving the sprite ROMs at load time
+* **the sound01 window, which is what had blocked booting** -- see (1)
 
-### (1) rdft2 has no Z80 program: the sound01 window
+### (1) rdft2's Z80 program: the sound01 window -- DONE
 
-The blocking item, and it is in the CORE, not the MRA. Measured: pre-flashed,
+The blocking item, and it was in the CORE, not the MRA. Measured: pre-flashed,
 rdft2 still issues 131,072 dword reads over 0x1380000-0x13FFFFC, which is
 `sound1.u0222[0x60000..0x7FFFF]` and nothing else -- its Z80 program, which the
-386 pushes through port 0x688 before releasing the Z80. `spi_cpu.sv` decodes
-main RAM, I/O and PRG ROM only, so today that download is 128 KB of zeros, and
-since the 386 waits on the Z80 during boot the expected symptom is a HANG, not
+386 pushes through port 0x688 before releasing the Z80. `spi_cpu.sv` decoded
+main RAM, I/O and PRG ROM only, so that download was 128 KB of zeros, and since
+the 386 waits on the Z80 during boot the symptom would have been a HANG, not
 silence.
 
-What it needs is a fourth 386 read window at 0x1380000 backed by SDRAM. Smaller
-than it sounds:
+What it needed was a fourth 386 read window at 0x1380000 backed by SDRAM, and it
+was smaller than it sounds:
 
-* only 128 KB of the 10 MB window is ever touched;
+* only 128 KB of the 10 MB window is ever touched, so only the 512 KB of 386
+  space at 0x1380000 is decoded (`byte_addr[31:19] == 13'h027`);
 * the 386 reads it as dwords with only byte 0 meaningful (`sound1` is
-  ROM_LOAD32_BYTE on lane 0), so store it PACKED and expand `{24'b0, byte}` on
-  the way out -- a 4-dword cache-line burst is then four consecutive bytes, one
-  64-bit SDRAM read;
-* the PCM region has 512 KB spare above rdft2's 2 MB flash image, so the map
-  does not move;
-* it needs a loader part (a 17th for rdft2) and an MRA part carrying
-  `sound1.u0222` offset 0x60000 length 0x20000.
+  ROM_LOAD32_BYTE on lane 0), so it is stored PACKED and expanded to
+  `{24'b0, byte}` on the way out. A 4-dword cache-line burst is then four
+  consecutive bytes, one 64-bit SDRAM read, and eight dwords come out of each
+  group instead of two;
+* the PCM region had 512 KB spare above rdft2's 2 MB flash image, so
+  `SDR_SND01_BASE` is 0x0480000 and the map did not move. The YMF271 masks its
+  address to the low 2 MB of `SDR_PCM_BASE`, so the two cannot collide;
+* one more loader part (a 17th for rdft2) and an MRA part carrying
+  `sound1.u0222` offset 0x60000 length 0x20000 -- the same file twice, since
+  the other slice is the compressed sample tail.
 
-### (2) clk_ram misses timing by 0.292 ns
+It shares `spi_cpu`'s program-ROM fetch states rather than adding its own; the
+only differences are where the group address comes from, how the dword is cut
+out of the group, and where the group ends (`cur_dw[2:0] == 7` instead of
+`cur_dw[0]`). `snd01_en` gates the whole window on rdft2: rdft and rdfts never
+read it and have nothing loaded behind it.
 
-`make build` succeeds -- 0 errors, RBF written -- but a successful compile does
-NOT mean timing met, and this one does not:
+**Verified by running the game's own code.** `run-boot` was revived for this
+(it was 19 pins behind `spi_top`) and now takes a set, models ch3 in both
+directions, and ends by comparing what the download put in the Z80's memory
+against the ROM:
+
+    make -C sim run-boot GAME=rdft2 SDRAM=/tmp/sdram_rdft2.bin STEPS=400000000
+
+    sound01 fetches        : 444294
+    Z80 download writes    : 131072
+    Z80 RAM bytes written  : 131072, 0x0..0x1FFFF
+    Z80 program matches the ROM byte for byte over that range
+
+That covers the loader part, the window and port 0x688 in one pass, with
+nothing modelled by hand except the SDRAM. The 386 releases the Z80 at ~56M
+steps and then spins on the sound FIFO forever -- correctly, because the
+Verilator T80 is a stub with no CPU in it. So a cartridge `run-boot` always
+ends on a black screen; judge it by the download check and the register log,
+never by the picture.
+
+### (2) clk_ram missed timing by 0.292 ns -- FIXED, and now +0.927
+
+**The current build meets timing on every clock**, TNS 0.000 everywhere:
+
+    clk_ram   (general[0])  +0.927      clk_sys (general[1])  +1.088
+    clk_cpu   (general[2])  +3.085      HDMI PLL              +0.268
+    worst hold                          +0.188
+
+87% RAM blocks, 53% DSP, 62% block memory bits. The rest of this section is how
+it got there, because the shape of the problem is the useful part.
+
+`make build` succeeded -- 0 errors, RBF written -- but a successful compile does
+NOT mean timing met, and that one did not:
 
     clk_ram (general[0], 96.9 MHz)   slack -0.292   TNS -0.448
     everything else                  positive (worst other +0.117)
@@ -2036,25 +2075,71 @@ that mux was always there -- but the design is at 80% ALMs and 87% RAM blocks
 now, so the fitter has less room. `sdram.sv:52` already carries a note that this
 mux "costs a level in the STATE_IDLE priority mux that feeds SDRAM_A".
 
-Do not flash this build. Fix ideas, cheapest first: register `part_base` /
-`part_size` in `rom_loader` so the table mux is not in the address path (the
-loader has cycles to spare); and pipeline `cas_addr` in `sdram.sv` the way
-`dq_reg`'s fanout was pipelined for the same clock earlier (commit a8ba853,
--0.690 -> +0.301).
+#### Chased down, one fit at a time (2026-08-10)
+
+Three fits, and the interesting part is that the failing endpoint MOVED each
+time. At this occupancy the design has several paths within a tenth of a
+nanosecond of each other, so fixing the worst one just promotes the next -- and
+a "fix" that only shuffles the placement makes things worse. What worked was
+cutting real logic out of clk_ram paths, twice:
+
+* **`rom_loader`'s part table is registered**, and read one part ahead
+  (`part_sel`) so the registered copy is valid the same cycle `part` changes.
+  That is the fix predicted above, and it worked: `part[1] -> sdr_addr[24]`
+  went from -0.005 to +0.083. It also has a trap -- during reset `part_size_r`
+  is not loaded yet, so `part_in_full` reads true against a zero size and
+  `part_done` fires spuriously, which would leave the table pointing at part 1
+  on release. `part_sel` is forced to 0 while reset is held.
+* **`sdram.sv`'s emergency-refresh test is registered.** With the loader fixed,
+  the single remaining endpoint was `refresh_count[12] -> SDRAM_A[11]`: a live
+  14-bit magnitude compare at the TOP of the STATE_IDLE priority chain, so it
+  sat in front of the entire address mux. Firing one cycle later is nothing on
+  an 880-cycle threshold. This one also has a startup trap: `refresh_count`
+  runs UP to a wrap during STATE_STARTUP, so a stale `refresh_due` would fire
+  against a freshly zeroed counter and underflow it into a burst of refreshes.
+  It is cleared everywhere the counter is.
+* **`rom_loader`'s destination is registered.** After the two above, every
+  failing endpoint was `out_off[4] -> sdr_addr[N]` -- the scatter itself, a
+  13-way mux over 26-bit shift-adds and then a 26-bit add. Registering `dest`
+  is free: `out_off` only moves on `emit`, and two emits are always at least
+  two cycles apart because the second waits for the first's write to retire.
+  `tb_rom_loader` reports the same cycle count to the cycle afterwards, which
+  is the evidence that nothing was slowed down.
+
+The `sdram.sv` change goes nowhere near `dq_reg` or the DQ capture path, which
+is the thing section 15.8 says must not be touched.
+
+Result: -0.292 -> -0.348 (worse, and on a different endpoint) -> +0.927. The
+middle fit is the lesson. Do not read one fit's worst path as "the" problem, and
+do not judge a change by whether the next fit closed -- judge it by whether the
+logic it removed was really in the path. Reseeding is still the last resort, and
+it was not needed here.
+
+### (2b) Section 10a as of this build
+
+    make verify        passes
+    make build         0 errors, RBF written
+    make timing        every clock positive, TNS 0.000
+
+Still not flashed to anything. T-C is a hardware run.
 
 ### Verification state, and how to re-run it
 
     make verify                      lint + check-mra + the unit tests
     make -C sim run-bpe ROMS=...     the rdft2 codec against real ROM data
     make -C sim run-video CAP=... SDRAM=...
+    make -C sim run-boot GAME=rdft2 SDRAM=... STEPS=400000000
 
 rdfts and all ten rdft2 captures render 0/76,800 pixels different. Regenerating
 an rdft2 capture needs a rompath whose `rdft2.zip` carries three 0x117-byte PAL
 placeholders and an already-flashed `-nvram_directory`; `make capture GAME=rdft2`
 documents both. `SECONDS` must cover `FRAME` at 53.99 Hz, not 60.
 
+`run-boot` needs only an SDRAM image, no capture -- 400M steps is about 80
+seconds and reaches well past the Z80 download.
+
 Known-broken and NOT from this work: `make -C sim run-sdram` fails its readback
-compare, and `run-boot` is 19 pins behind `spi_top`. Neither is in `make verify`.
+compare. It is not in `make verify`.
 
 ## 10b. Where the project stands (end of 2026-08-09, before the rdft2 arc)
 
@@ -2097,9 +2182,11 @@ per part by the MRA, verified against the real rdft2 stream (section 0). The
 controller still needs a writable ch5, a save file and a long first boot, and
 remains the fallback for any game whose packer is not worth cracking.
 
-**What rdft2 still needs: the sound01 window, for its Z80 program.** The video
-path is done -- ten captured scenes match MAME exactly, sprite starvation
-included (section 0). Sound is not, and the gap is in the CORE, not the MRA.
+**What rdft2 still needs: the sound01 window, for its Z80 program.** (Built
+since, and verified -- 10a(1). The measurement below is what it was built to,
+and is why it is still worth reading.) The video path is done -- ten captured
+scenes match MAME exactly, sprite starvation included (section 0). Sound is
+not, and the gap is in the CORE, not the MRA.
 
 rdft2 keeps its Z80 program in `sound1.u0222[0x60000..0x7FFFF]` and the 386
 reads it through the sound01 window before releasing the Z80 from reset. rdft
@@ -2125,22 +2212,27 @@ rdft2 has never been run on hardware.
 
 Open, in the order they block things (2026-08-10):
 
-- [ ] **T-A** clk_ram timing: -0.292 ns, a couple of endpoints, `sdram.sv`'s
-      STATE_IDLE mux into `SDRAM_A` plus `rom_loader`'s widened part mux into
-      `sdr_addr`. Blocks flashing ANY build. Section 10a(2) has the numbers and
-      two fix ideas.
-- [ ] **T-B** rdft2's sound01 window, 128 KB at 386 address 0x1380000, so the
-      386 can download the Z80 program. Blocks rdft2 booting at all.
-      Section 10a(1).
-- [ ] **T-C** Run rdft2 on hardware once T-A and T-B are done. Everything about
-      it so far is simulation.
+- [x] **T-A** clk_ram timing. Was -0.292; now **+0.927 with TNS 0.000 on every
+      clock**, by registering `rom_loader`'s part table and its destination and
+      `sdram.sv`'s emergency-refresh compare. Section 10a(2), which is worth
+      reading for the fit that got WORSE in the middle.
+- [x] **T-B** rdft2's sound01 window, 128 KB at 386 address 0x1380000, so the
+      386 can download the Z80 program. Section 10a(1). Verified by the game's
+      own boot code in `run-boot`: 131,072 bytes into the Z80's memory, byte
+      for byte the ROM they came from.
+- [ ] **T-C** Run rdft2 on hardware once T-A is done. Everything about it so
+      far is simulation, and simulation stops at the Z80 handover -- the
+      Verilator T80 is a stub, so whether the sound program actually RUNS is
+      a hardware question. First things to look at: the vital signs panel's
+      Z80 PC and FIFO counters (section 14.6).
 - [ ] **T-D** Optional, ~10% of the sprite line budget: the line-buffer
       generation tag that replaces the 320-cycle clear. Tried and reverted --
       start by proving `bank_tag` actually toggles. Nothing needs it now that
       the sprite ROMs are interleaved.
-- [ ] **T-E** Bench rot, neither in `make verify`: `run-sdram` fails its
-      readback compare (identically before this work), `run-boot` is 19 pins
-      behind `spi_top`.
+- [ ] **T-E** Bench rot: `run-sdram` fails its readback compare (identically
+      before this work) and is not in `make verify`. `run-boot` was the other
+      half of this and is fixed -- it now takes a set, drives ch3 in both
+      directions and checks the Z80 download.
 
 - [x] **T1** Repo skeleton: `sys/` from Template_MiSTer, `SeibuSPI.{qpf,qsf,sdc,sv}`,
       `files.qip`, PLL, Makefile, README.
