@@ -39,7 +39,7 @@ are to be heard.
 |---|---|---|---|---|
 | `rdfts.mra` | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | runs on hardware |
 | `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
-| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.1 MB | verified in simulation, never run on hardware |
+| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.1 MB | verified in simulation; **does not boot on hardware yet**, see below |
 
 The two cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
 several-minute "techno music" reflash the real cartridge does on first boot is
@@ -47,14 +47,22 @@ skipped. rdft's image is assembled by the MRA; rdft2's cannot be, because half a
 megabyte of it is compressed — the core decompresses that during the download
 (`rtl/spi_rom_decode.sv`).
 
-**rdft2 has never been run on hardware.** What is verified, all in simulation:
-its frame is pixel-identical to MAME on ten captured scenes, and its 386 boots,
-reads its Z80 program out of the `sound01` window and downloads all 128 KB of
-it into the Z80's memory byte-exactly (`make -C sim run-boot GAME=rdft2`). That
-window is the one thing rdft does not need — rdft keeps its copy of the program
-in `maincpu`, already loaded — and it was what stood between rdft2 and booting
-at all. Whether the game then plays is a hardware question: the Z80 is a stub
-under Verilator, so nothing past the handover can be simulated.
+**rdft2 does not boot on hardware yet — its ROM download deadlocks.** It stops
+65,483 bytes into part 15, the one part that is decompressed rather than copied,
+and never finishes, so the 386 is never released. Worse, it takes the machine
+with it: the core holds `ioctl_wait` high, the ARM blocks waiting for the SPI
+ack that `sys_top` gates on that line, and `MiSTer_Main` hangs — it will not
+even switch cores. Recovery is `reboot` over ssh. `PLAN.md` section 10c has the
+measurement and what to check first. **Do not load `rdft2.mra` expecting to
+play; expect to reboot.**
+
+In simulation everything about it passes: the frame is pixel-identical to MAME
+on ten captured scenes, and the 386 boots, reads its Z80 program out of the
+`sound01` window and downloads all 128 KB of it into the Z80's memory
+byte-exactly (`make -C sim run-boot GAME=rdft2`). That window is the one thing
+rdft does not need — rdft keeps its copy of the program in `maincpu`, already
+loaded — and it was what had stood between rdft2 and booting at all. The
+download path is the one thing no testbench reaches, and it is where this fails.
 
 SDRAM: **32 MB is enough for rdfts and rdft** (both reach 29 MB in the map).
 **rdft2 needs 64 MB** — its sprites are 18 MB rather than 12, which puts the top

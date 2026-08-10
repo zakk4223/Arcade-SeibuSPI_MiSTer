@@ -39,6 +39,11 @@ module spi_jtag_peek
 	input      [15:0] passes,
 	input      [15:0] fails,
 	input      [25:0] bytes_in,
+	// What reached SDRAM. Equal to bytes_in for a straight copy, so a mismatch
+	// on a set with no decoded part means the loader is losing or repeating
+	// ioctl bytes; on a decoded part it is the only way to tell a decoder that
+	// is working slowly from one that has stopped.
+	input      [25:0] bytes_out,
 	input       [4:0] part_end,
 
 	// Live counters from the board, so the vital signs can be read over JTAG
@@ -93,6 +98,22 @@ module spi_jtag_peek
 	output      [7:0] ctrl
 );
 
+	// Width of the SUMS probe, written as the sum of its fields rather than as a
+	// number. It was a literal 193 while the concatenation had grown to 195 --
+	// part_end went 4 bits to 5 and bytes_in 25 to 26 -- so the top two bits of
+	// `fails` were truncated away and tools/jtag_peek.tcl, which slices from the
+	// MSB, misread EVERY field after it. The instrument reported a part index
+	// and a byte count that were simply not the ones in the hardware. Keep this
+	// expression and the concatenation below in step; the Tcl prints the width
+	// it actually got, so a future mismatch announces itself.
+	localparam SUMS_W = 16    // fails
+	                  + 16    // passes
+	                  + 5     // part_end
+	                  + 26    // bytes_in
+	                  + 26    // bytes_out
+	                  + 4     // ok
+	                  + 32*4; // sum_sprites, sum_tiles, sum_chars, sum_prg
+
 	wire [25:0] source;
 	wire        go   = source[25];
 	wire [25:0] addr = source[25:0];
@@ -129,14 +150,14 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (1),
 		.instance_id             ("SUMS"),
-		.probe_width             (193),
+		.probe_width             (SUMS_W),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
 	)
 	sums_issp
 	(
-		.probe  ({fails, passes, part_end, bytes_in, ok, sum_sprites, sum_tiles, sum_chars, sum_prg}),
+		.probe  ({fails, passes, part_end, bytes_in, bytes_out, ok, sum_sprites, sum_tiles, sum_chars, sum_prg}),
 		.source ()
 	);
 

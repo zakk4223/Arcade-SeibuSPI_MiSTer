@@ -2141,6 +2141,157 @@ seconds and reaches well past the Z80 download.
 Known-broken and NOT from this work: `make -C sim run-sdram` fails its readback
 compare. It is not in `make verify`.
 
+## 10c. rdft2's FIRST HARDWARE RUN: the download deadlocks in part 15 (2026-08-10)
+
+Deployed to 192.168.1.125 and loaded. **It does not boot: the ROM download
+stops part-way through part 15 and never finishes.** The 386 never starts,
+because `rom_ready` never asserts.
+
+The symptom is not subtle once you know where to look. `MiSTer_Main` HANGS --
+`echo load_core > /dev/MiSTer_cmd` blocks forever and the machine will not
+switch cores, because the ARM is spinning inside `fpga_spi()` waiting for an
+SSPI ack that `sys_top.v` gates on `io_wait`, which is the core's `ioctl_wait`.
+So a core that never lowers `ioctl_wait` wedges the whole MiSTer, not just
+itself. Recovery is a reboot over ssh.
+
+Measured over JTAG, stable across minutes:
+
+    part_end  = 15
+    bytes_in  = 35,373,586      of 35,752,108 for the whole image
+    parts 0..14 total           35,308,103
+    => 65,483 bytes into part 15, of its 312,933
+
+Part 15 is the CODEC_BPE_DPCM part. So the first set with a decoded part is the
+first set whose download stops.
+
+### Why a stalled decoder wedges everything
+
+`rom_loader` holds one byte of skid and raises `ioctl_wait` while it is full.
+`feed` needs `dec_in_ready`, and `spi_rom_decode` only asserts that in states
+that want a byte. Two of its states never do and never leave on their own:
+
+* **S_DONE**, which it parks in after the last block. If the decoder finishes
+  EARLY -- fewer input bytes than the table says the part has -- `in_ready`
+  goes low forever, `part_in_full` is never reached, `part_done` never fires,
+  and the loader waits for a byte it will not accept while the HPS waits for
+  the wait line to drop. Deadlock, both sides blaming the other.
+* **S_EMIT**, if `out_ready` never comes -- which would mean an SDRAM write
+  that never acked.
+
+Both fit the evidence. Distinguishing them is what `bytes_out` is for, which is
+now wired to the JTAG probe (see below).
+
+### The instrument was lying, and had been for two sessions
+
+`spi_jtag_peek.sv` declared `probe_width(193)` while its concatenation had
+grown to 195 -- `part_end` 4 bits to 5, `bytes_in` 25 to 26. The top two bits
+of `fails` were truncated, and `tools/jtag_peek.tcl`, which slices from the
+MSB, therefore misread EVERY field: it reported `part_end = 0x1E` (a part that
+cannot exist) and a `bytes_in` off by a factor of five. The numbers above come
+from decoding the raw 193 bits by hand.
+
+Fixed: the width is now built by adding up the field widths, the Tcl prints the
+width it got and says loudly when it is not what it expects, and `bytes_out` is
+wired in -- exactly as `SeibuSPI.sv`'s own comment said to do "when a decoded
+set first runs on hardware, because bytes_in alone cannot tell a stalled
+decoder from a working one".
+
+### What is NOT the cause
+
+* **Not the codec.** `make -C sim run-bpe ROMS=...` decodes the real
+  `sound1.u0222` against `build_soundflash.py`'s reference, under randomised
+  output backpressure, and consumes exactly 312,933 bytes. It does not stop
+  early on this stream.
+* **Not the MRA or the zip.** `check_mra.py --zip` against the archive on the
+  MiSTer passes on all 17 parts, and rebuilds the flash image to the sha256
+  MAME's own flash devices hold.
+* **Not the new part 16.** The download never reaches it.
+* **Not timing.** This build meets timing on every clock.
+
+### The download is wrong for rdfts TOO, and always has been
+
+This is the real finding, and it reframes everything above. With the probe
+fixed, rdfts -- the set that has been "working" for a week -- reports:
+
+    part_end  = 13          (correct, its last part)
+    bytes_in  = 46,792,704  = EXACTLY 2 x 23,396,352
+    bytes_out = 46,792,704
+    ok        = 0000        all four regions MISMATCH
+    fails     = 1 of 1 pass
+
+    region    hardware    reference image
+    PRG       146E86E4    741393AF
+    CHARS     3CBDE728    79A0EB60
+    TILES     CFE42328    D3E9E887
+    SPRITES   2AD8C8C3    DCD037DA
+
+The four constants in `spi_romcheck.sv` are NOT stale -- recomputing them from
+`tools/build_sdram_image.py`'s output reproduces them exactly, all four. So the
+checker is right and what is in SDRAM is not the reference image.
+
+**It is not a regression from this session.** Reflashing the previous build
+(the one taken off the MiSTer before this session's RBF went on) and reading
+the raw probe by hand gives the SAME four wrong sums, to the digit, and the
+same doubled `bytes_in`. This has been true for as long as the misaligned probe
+has been hiding it: `ok` was being read from the wrong bit position, so
+"check fails = 0" was never a statement about the hardware.
+
+Two candidates, and `bytes_in` = exactly 2x is the clue:
+
+1. **The ROM image is sent twice** and the second pass is harmless (same bytes,
+   same addresses) -- in which case the sums must be explained some other way,
+   and the checker or its read path is the thing at fault.
+2. **`ioctl_wr` is sampled twice.** It is a one-`clk_sys`-cycle pulse and
+   `rom_loader` samples it on `clk_ram`, which is exactly 2x `clk_sys` and
+   phase aligned from the same VCO, and there is NO edge detector on it. Two
+   samples per byte would double `bytes_in`, double `bytes_out`, and re-hold a
+   byte that was already fed -- writing each source byte to two consecutive
+   destinations, which would scramble every region exactly as observed.
+
+(2) explains all four numbers with one mechanism and (1) explains none of them,
+so (2) is where to start. The fix is an edge detector on `ioctl_wr` in
+`rom_loader`, and the test is this same telemetry: `bytes_in` must land on
+23,396,352 and `ok` on 1111.
+
+What makes this worth being careful about is that rdfts nonetheless BOOTS and
+plays on this hardware, which a scrambled image should not allow. So one of the
+two stories is incomplete.
+
+### A SECOND instrument bug: PEEK reads 32 MB too high
+
+The obvious next step is `tools/jtag_peek.tcl dump 0x0 8`, to read the start of
+the 386 program straight out of SDRAM and compare. It returns bytes that are
+not the reference image and that show a duplication pattern -- which looks like
+confirmation of (2), and **is not usable as evidence**, because the peek's own
+address is wrong:
+
+    rtl/spi_jtag_peek.sv:118    wire        go   = source[25];
+    rtl/spi_jtag_peek.sv:119    wire [25:0] addr = source[25:0];   // <-- includes go
+
+`source` is 26 bits and the Tcl sends `{go, addr[24:0]}`, so bit 25 of the
+address IS the go bit and is 1 for every request. Every peek therefore reads at
+`addr + 0x2000000`. On a 32 MB module that bit lands on A[9], a don't-care
+column bit on a 512-column part, and aliases harmlessly back -- which is why
+this has never been noticed. **On the 64 MB module rdft2 needs, it does not
+alias: it reads 32 MB higher, off the end of the image.** The header comment
+says `source = {go, addr[25:0]}`, 27 bits, which is what the code should have
+been.
+
+So: fix `addr` to `source[24:0]` (and widen `source` if the map ever needs the
+full 26), THEN take the dump. Three separate things were being read through a
+broken instrument this session -- the probe width, the field offsets, and this
+-- and each one produced a confident wrong number. Fix the instrument first.
+
+### Order of work for the next session
+
+1. Fix the PEEK address bit above. It is one line.
+2. Dump PRG+0 on rdfts and compare against the reference image. This decides
+   between "image is fine, checker is wrong" and "image is scrambled".
+3. If scrambled: edge-detect `ioctl_wr` in `rom_loader` and re-measure --
+   `bytes_in` must land on 23,396,352 and `ok` on 1111.
+4. Only then go back to rdft2's part 15, which may simply be the first place
+   where a corrupted stream cannot be survived rather than a bug of its own.
+
 ## 10b. Where the project stands (end of 2026-08-09, before the rdft2 arc)
 
 (Superseded in part by 10a above, which is the current state. This section is
@@ -2220,11 +2371,12 @@ Open, in the order they block things (2026-08-10):
       386 can download the Z80 program. Section 10a(1). Verified by the game's
       own boot code in `run-boot`: 131,072 bytes into the Z80's memory, byte
       for byte the ROM they came from.
-- [ ] **T-C** Run rdft2 on hardware once T-A is done. Everything about it so
-      far is simulation, and simulation stops at the Z80 handover -- the
-      Verilator T80 is a stub, so whether the sound program actually RUNS is
-      a hardware question. First things to look at: the vital signs panel's
-      Z80 PC and FIFO counters (section 14.6).
+- [ ] **T-C** rdft2 on hardware. RUN, and it does not boot: the ROM download
+      deadlocks 65,483 bytes into part 15, the decoded one, and wedges
+      MiSTer_Main with it. Section 10c has the measurement, why a stalled
+      decoder hangs the whole machine, and the one experiment to run first
+      (rdfts `bytes_in` vs `bytes_out`, which the JTAG probe now reports).
+      This is the top item.
 - [ ] **T-D** Optional, ~10% of the sprite line budget: the line-buffer
       generation tag that replaces the 320-cycle clear. Tried and reverted --
       start by proving `bank_tag` actually toggles. Nothing needs it now that
@@ -2232,7 +2384,16 @@ Open, in the order they block things (2026-08-10):
 - [ ] **T-E** Bench rot: `run-sdram` fails its readback compare (identically
       before this work) and is not in `make verify`. `run-boot` was the other
       half of this and is fixed -- it now takes a set, drives ch3 in both
-      directions and checks the Z80 download.
+      directions and checks the Z80 download. Worth re-reading `run-sdram`'s
+      failure in the light of 10c: it is the ONE bench that drives the loader
+      into a real `sdram.sv`, and it has been failing a readback compare the
+      whole time the hardware download has been suspect. That may not be a
+      coincidence.
+- [ ] **T-F** The JTAG instrument itself, before anything else on hardware.
+      `spi_jtag_peek.sv`'s `addr` includes the `go` bit, so every PEEK reads
+      32 MB high -- harmless on a 32 MB module, not on the 64 MB one rdft2
+      needs. Section 10c. The probe width and the Tcl field offsets are fixed
+      already; this one is not.
 
 - [x] **T1** Repo skeleton: `sys/` from Template_MiSTer, `SeibuSPI.{qpf,qsf,sdc,sv}`,
       `files.qip`, PLL, Makefile, README.

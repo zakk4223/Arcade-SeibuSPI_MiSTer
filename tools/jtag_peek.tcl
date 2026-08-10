@@ -90,27 +90,42 @@ if {$mode eq "list"} {
     foreach inst $raw { puts "instance: $inst" }
 } elseif {$mode eq "sums"} {
     set p [read_probe_data -instance_index [index_of "SUMS"]]
-    # 195 bits, MSB first, matching spi_jtag_peek.sv's concatenation:
-    #   0..15   fails        16..31  passes      32..36   part_end[4:0]
-    #   37..62  bytes_in[25:0]       63..66  ok  67..98   sum_sprites
-    #   99..130 sum_tiles    131..162 sum_chars  163..194 sum_prg
+    # 221 bits, MSB first, matching spi_jtag_peek.sv's concatenation:
+    #   0..15    fails       16..31   passes      32..36   part_end[4:0]
+    #   37..62   bytes_in[25:0]       63..88   bytes_out[25:0]
+    #   89..92   ok          93..124  sum_sprites 125..156 sum_tiles
+    #   157..188 sum_chars   189..220 sum_prg
     #
     # These offsets were stale twice over before this: bytes_in was read as 25
     # bits after the address map went to 26, and part_end as 4 after the part
     # tables grew past sixteen. Every field after a widened one moves, so
     # re-derive the whole list rather than patching one entry.
+    #
+    # And the RTL's own probe_width had been left at 193 while the
+    # concatenation reached 195, which truncated the top two bits of `fails`
+    # and shifted EVERY field read here -- silently, since a shifted field is
+    # still a number. That is what the width line below is for: if it does not
+    # say 221, nothing under it means anything. spi_jtag_peek.sv now builds the
+    # width by adding up its fields so the two cannot drift apart again.
     set n [string length $p]
-    puts "raw width   = $n  (expected 195)"
+    puts "raw width   = $n  (expected 221)"
+    if {$n != 221} {
+        puts "WIDTH MISMATCH -- the fields below are shifted and meaningless."
+    }
     puts "check fails = [expr 0b[string range $p 0 15]]"
     puts "check passes= [expr 0b[string range $p 16 31]]"
     puts "part_end    = [bin2hex [string range $p 32 36]]"
     set bi [string range $p 37 62]
     puts "bytes_in    = [expr 0b$bi]  (expected 23396352 for rdfts)"
-    puts "ok bits     = [string range $p 63 66]"
-    puts "sum SPRITES = [bin2hex [string range $p 67 98]]"
-    puts "sum TILES   = [bin2hex [string range $p 99 130]]"
-    puts "sum CHARS   = [bin2hex [string range $p 131 162]]"
-    puts "sum PRG     = [bin2hex [string range $p 163 194]]"
+    # For a set with no decoded part these must be EQUAL. A shortfall means the
+    # loader is still working (or stuck); an excess means it emitted more than
+    # it took, which for a straight copy means bytes are being repeated.
+    puts "bytes_out   = [expr 0b[string range $p 63 88]]"
+    puts "ok bits     = [string range $p 89 92]"
+    puts "sum SPRITES = [bin2hex [string range $p 93 124]]"
+    puts "sum TILES   = [bin2hex [string range $p 125 156]]"
+    puts "sum CHARS   = [bin2hex [string range $p 157 188]]"
+    puts "sum PRG     = [bin2hex [string range $p 189 220]]"
 } elseif {$mode eq "vitals"} {
     set p [read_probe_data -instance_index [index_of "VITL"]]
     # 254 bits, MSB first: 0..15 spr_starved, 16..31 spr_tiles,

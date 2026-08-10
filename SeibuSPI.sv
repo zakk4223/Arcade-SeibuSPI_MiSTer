@@ -410,6 +410,7 @@ wire        rom_ready;
 
 wire [25:0] ldr_addr;
 wire [25:0] ldr_bytes;
+wire [25:0] ldr_bytes_out;
 wire [15:0] v_prg, v_iowr, v_tm, v_pal, v_vbl;
 wire  [3:0] v_why;
 wire [31:0] v_eip;
@@ -500,12 +501,10 @@ rom_loader rom_loader
 
 	.rom_ready      (rom_ready),
 	.bytes_in       (ldr_bytes),
-	// Deliberately unconnected. bytes_out only differs from bytes_in when a
-	// part is decoded, and no MRA does that yet; surfacing it means widening
-	// spi_jtag_peek's probe vector, which tools/jtag_peek.tcl decodes by bit
-	// position. Wire both together when a decoded set first runs on hardware,
-	// because bytes_in alone cannot tell a stalled decoder from a working one.
-	.bytes_out      (),
+	// Wired now, for the reason this comment used to predict: rdft2 is the
+	// first set with a decoded part to reach hardware, and bytes_in alone
+	// cannot tell a stalled decoder from a working one.
+	.bytes_out      (ldr_bytes_out),
 	.part_end       (ldr_part_end)
 );
 
@@ -555,6 +554,7 @@ spi_jtag_peek peek
 	.passes   (chk_passes),
 	.fails    (chk_fails),
 	.bytes_in (ldr_bytes),
+	.bytes_out(ldr_bytes_out),
 	.part_end (ldr_part_end),
 	.c_prg(v_prg), .c_iowr(v_iowr), .c_dma_tm(v_tm),
 	.c_dma_pal(v_pal), .c_vbl(v_vbl), .why(v_why),
