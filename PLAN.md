@@ -542,10 +542,8 @@ The image is derivable, so a pre-flashed rdft2 is back on the table -- but an
 MRA can only concatenate files that are in the ROM set, and this needs a
 decompressor. So one of:
 
-* **run the decoder in the core at ROM-load time.** BPE+DPCM is small: a 512-byte
-  pair table, a 64-byte stack, an 8-bit accumulator. Needs the variable-rate
-  loader part mode already sketched below (destination advances by bytes
-  emitted, `ioctl_wait` held while draining).
+* **run the decoder in the core at ROM-load time** -- DONE, see the next
+  section. `rtl/spi_rom_decode.sv`.
 * **ship a derived image** built by `tools/build_soundflash.py`, outside the MRA.
 * **the authentic flash path below**, which needs no decoder at all.
 
@@ -557,6 +555,78 @@ rfjet is now cheap to check rather than a fresh reverse-engineering job: find it
 job table the same way (PC tap -> callers -> the `0x2A1F2B` equivalent) and read
 the jobs off. The codec and the fetcher are library code and will very likely be
 identical.
+
+### The decoder is in the core, and the MRA chooses it (2026-08-09)
+
+`rtl/spi_rom_decode.sv` sits between ioctl and the SDRAM writer in
+`rom_loader`, so a part can be DECODED on the way in. It is the 386 routine at
+0x2A1D20 transcribed: a 256 x 16 pair table, a 256-byte expansion stack, an
+8-bit accumulator, an 18-state machine. Two M9Ks and a few hundred cells.
+
+**The MRA picks the codec, not the RTL.** That was the point of doing it this
+way: adding rfjet's codec later should not mean editing the loader. Index 1
+grew from one mod byte into a config blob -- byte 0 is the mod byte as before,
+and everything after it is a list of `{part index, codec id}` PAIRS:
+
+    <rom index="1">
+      <part>01</part>        mod byte: SXX2C
+      <part>0E 01</part>     part 14 is CODEC_BPE_DPCM
+    </rom>
+
+Ids are in `rtl/spi_defs.vh` (0 = RAW, 1 = BPE_DPCM). Everything defaults to
+RAW, so both existing MRAs are unchanged and behave identically. `make
+check-mra` rejects a pair naming a part that does not exist, an id with no
+decoder behind it, or a dangling byte -- nothing at runtime would.
+
+**What actually changed in the loader.** A decoded part breaks the assumption
+the whole module was built on, that one byte in is one byte out:
+
+* `off` split into `in_off` (bytes ARRIVING -- what `part_size` means and what
+  ends the part) and `out_off` (bytes EMITTED -- what the scatter addresses).
+* a part ends when its input is spent AND the decoder has drained AND no write
+  is in flight, not when a byte count is reached.
+* emitting moved OUT of the `if (download)` arm. A decoded part is still
+  expanding after the HPS drops `ioctl_download`, and those bytes are as real
+  as the rest. `rom_ready` now waits for the drain too.
+* a one-byte skid between ioctl and the decoder. The old loader consumed
+  `ioctl_wr` in the cycle it arrived and SILENTLY DROPPED the byte if a write
+  was in flight; `ioctl_wait` has a cycle of latency, so that only ever worked
+  because the HPS is slower than the SDRAM. A decoded part stalls for hundreds
+  of cycles.
+
+One bug worth remembering, because it was silent and cost exactly one byte per
+part boundary: the decoder's `start` pulse takes the reset arm, which does not
+consume input, so `in_ready` has to close for that cycle. Otherwise the loader
+hands over a byte that the decoder throws away. The symptom was 23,396,339
+bytes written instead of 23,396,352 -- thirteen short, one per boundary.
+
+**Verification.** Three levels, and the middle one is the one that matters:
+
+* `make -C sim run-rom_decode` -- hand-written streams with hand-derived
+  expected output, checking the RTL against the DISASSEMBLY rather than against
+  another implementation. Covers the skip code, the unused-entry encoding
+  (left byte == index, no right byte follows), LE block count vs BE block size,
+  the stack walk, and DPCM wrapping across a block boundary.
+* `make -C sim run-bpe ROMS=...` -- the real `sound1.u0222` through the RTL,
+  compared against `tools/build_soundflash.py`, which is itself verified
+  bit-for-bit against MAME's flash image. RTL == script == MAME. **312,933 in
+  -> 471,277 out, exact, and it stops after exactly the right number of input
+  bytes** -- reading one byte too many would misplace every following part.
+  6.36 cycles per output byte, so rdft2's tail costs ~31 ms at clk_ram.
+* `make -C sim run-rom_loader` -- a decoded part inside a real part table, to
+  check the loader plumbing rather than the codec: 2 MB in, 2,363,022 out,
+  every other part still exact, and `bytes_in`/`bytes_out` telemetry agreeing.
+
+**What is still missing for rdft2 itself** is unchanged and is NOT this: a
+third part table and MRA, `SPR_CHUNK_STRIDE` as a port, the tile-key select and
+the RISE10 mux. The decoder is the piece that had no known answer; the rest is
+known work.
+
+Unrelated, found while running this: `make -C sim run-sdram` has not elaborated
+since the 26-bit address widening (`ldr_addr` was still 25 bits). Widening it
+lets the bench build, and it then fails its readback compare -- IDENTICALLY at
+HEAD with the decoder reverted, 15,908,067 bytes differing either way, so that
+is an older regression in the bench or the SDRAM model and not the loader.
 
 ### The authentic flash path is still the general answer
 
@@ -1616,6 +1686,10 @@ clean for the first time.
 
 **Built but not yet wired to anything:**
 
+* `spi_rom_decode.sv` -- the ROM-download codec unit. CODEC_RAW passes bytes
+  through; CODEC_BPE_DPCM is rdft2's sample-flash decompressor, verified exact
+  against the real stream. Wired into `rom_loader` and into `files.qip`; the
+  MRA selects it per part through the index-1 config.
 * `spi_rise10_decrypt.sv` -- RISE10 sprite decryption for rdft2/rdft2us,
   verified against MAME over 2048 words including `sprite_reorder`. NOT in
   `files.qip` yet and `spi_sprite` still instantiates the SEI252 unit
@@ -1625,10 +1699,10 @@ clean for the first time.
 
 **The immediate decision** is recorded in section 0: an in-core decoder that
 builds the flash contents from raw ROM at load time, versus the authentic flash
-controller. The codec is now cracked (BPE over DPCM, section 0) and
-`tools/build_soundflash.py` reproduces rdft2's 2 MB image bit-for-bit offline,
-so the decoder path is unblocked; the controller still needs a writable ch5, a
-save file and a long first boot. The decoder remains the preferred path.
+controller. **The decoder path is built** -- `rtl/spi_rom_decode.sv`, chosen
+per part by the MRA, verified against the real rdft2 stream (section 0). The
+controller still needs a writable ch5, a save file and a long first boot, and
+remains the fallback for any game whose packer is not worth cracking.
 
 **What rdft2 still needs beyond the codec:** `SPR_CHUNK_STRIDE` as a port on
 `spi_sprite` (6 MB for rdft2, currently a 4 MB constant), a third loader table

@@ -42,7 +42,9 @@ module tb_sdram_top
 	wire        SDRAM_CLK;   // the chip model is clocked from clk instead
 	/* verilator lint_on UNUSEDSIGNAL */
 
-	wire [24:0] ldr_addr;
+	// 26 bits: the core's map outgrew 32 MB (PLAN.md section 4). This was 25
+	// and silently stopped this bench elaborating at all.
+	wire [25:0] ldr_addr;
 	wire [15:0] ldr_din;
 	wire  [1:0] ldr_be;
 	wire        ldr_req, ldr_rnw, ldr_ack;
@@ -57,6 +59,7 @@ module tb_sdram_top
 		.ioctl_dout     (ioctl_dout),
 		.ioctl_wait     (ioctl_wait),
 		.set_sxx2c      (1'b0),      // this bench drives the rdfts layout
+		.part_codec     (64'd0),     // every part a straight copy
 		.sdr_addr       (ldr_addr),
 		.sdr_din        (ldr_din),
 		.sdr_be         (ldr_be),
@@ -68,6 +71,7 @@ module tb_sdram_top
 		// rom_loader long after tb_sdram_top was written and never wired, which
 		// left run-sdram failing to elaborate.
 		.bytes_in       (),
+		.bytes_out      (),
 		.part_end       ()
 	);
 
@@ -99,7 +103,7 @@ module tb_sdram_top
 		.ch2_req    (1'b0),
 		.ch2_ack    (),
 
-		.ch3_addr   ({2'b00, ldr_addr}),
+		.ch3_addr   ({1'b0, ldr_addr}),
 		.ch3_dout   (),
 		.ch3_din    (ldr_din),
 		.ch3_be     (ldr_be),

@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound capture run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-video run-dma run-boot run-sdram
+.PHONY: all clean lint lint-top lint-sound capture run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-video run-dma run-boot run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-ymf271-math run-ymf271
+all: run-rom_decode run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-ymf271-math run-ymf271
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -61,6 +61,31 @@ $(RTL)/ymf271_tables.vh: $(TOOLS)/gen_ymf271_tables.py
 
 run-rom_loader: obj_dir/Vrom_loader
 	@./obj_dir/Vrom_loader
+
+# The codec on its own: hand vectors from the disassembly, no ROM needed.
+run-rom_decode: obj_dir/Vspi_rom_decode
+	@./obj_dir/Vspi_rom_decode
+
+# The same decoder against the REAL rdft2 stream. The reference comes from
+# tools/build_soundflash.py, which is verified bit-for-bit against the flash
+# image MAME's hardware model writes, so this is RTL == script == MAME.
+#     make run-bpe ROMS=~/Downloads/roms
+BPE_IN  ?= $(CAP)/../rdft2_sound1.bin
+BPE_REF ?= $(CAP)/../rdft2_decoded.bin
+run-bpe: obj_dir/Vspi_rom_decode $(BPE_REF)
+	@./obj_dir/Vspi_rom_decode $(BPE_IN) $(BPE_REF)
+
+$(BPE_REF):
+	@mkdir -p $(dir $(BPE_REF))
+	python3 -c "import zipfile,sys; \
+	    open(sys.argv[2],'wb').write(zipfile.ZipFile(sys.argv[1]).read('sound1.u0222'))" \
+	    "$(ROMS)/rdft2.zip" $(BPE_IN)
+	python3 $(TOOLS)/build_soundflash.py "$(ROMS)/rdft2.zip" $(BPE_REF).flash \
+	    --verify --decoded-out $(BPE_REF)
+
+obj_dir/Vspi_rom_decode: $(RTL)/spi_rom_decode.sv $(RTL)/spi_defs.vh tb_rom_decode.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_rom_decode \
+	    $(RTL)/spi_rom_decode.sv tb_rom_decode.cpp
 
 run-tile_decrypt: obj_dir/Vspi_tile_decrypt
 	@./obj_dir/Vspi_tile_decrypt
@@ -116,8 +141,10 @@ obj_dir/Vtb_video_top: tb_video_top.sv tb_video.cpp lint.vlt \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
 	    $(RTL)/seibu_partial_add.sv tb_video.cpp
 
-obj_dir/Vrom_loader: $(RTL)/rom_loader.sv $(RTL)/spi_defs.vh tb_rom_loader.cpp lint.vlt
-	$(VERILATOR) $(VFLAGS) --top-module rom_loader $(RTL)/rom_loader.sv tb_rom_loader.cpp
+obj_dir/Vrom_loader: $(RTL)/rom_loader.sv $(RTL)/spi_rom_decode.sv $(RTL)/spi_defs.vh \
+                     tb_rom_loader.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module rom_loader \
+	    $(RTL)/rom_loader.sv $(RTL)/spi_rom_decode.sv tb_rom_loader.cpp
 
 obj_dir/Vspi_tile_decrypt: $(RTL)/spi_tile_decrypt.sv $(RTL)/seibu_partial_add.sv tb_tile_decrypt.cpp spi_ref.h lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module spi_tile_decrypt \
@@ -162,7 +189,7 @@ lint-top:
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
 	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
-	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv 2>&1 | \
+	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_rom_decode.sv 2>&1 | \
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 
 
@@ -187,10 +214,11 @@ run-sdram: obj_dir/Vtb_sdram_top
 	@./obj_dir/Vtb_sdram_top $(SDRAM) $(CONCAT)
 
 obj_dir/Vtb_sdram_top: tb_sdram_top.sv tb_sdram.cpp sdram_model.sv altddio_out.sv \
-                       $(RTL)/sdram.sv $(RTL)/rom_loader.sv $(RTL)/spi_defs.vh lint.vlt
+                       $(RTL)/sdram.sv $(RTL)/rom_loader.sv $(RTL)/spi_rom_decode.sv \
+                       $(RTL)/spi_defs.vh lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module tb_sdram_top \
 	    tb_sdram_top.sv sdram_model.sv altddio_out.sv \
-	    $(RTL)/sdram.sv $(RTL)/rom_loader.sv tb_sdram.cpp
+	    $(RTL)/sdram.sv $(RTL)/rom_loader.sv $(RTL)/spi_rom_decode.sv tb_sdram.cpp
 
 
 # spi_romcheck is the instrument that reports whether the hardware download

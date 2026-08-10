@@ -39,6 +39,21 @@ localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
 localparam [25:0] SPR_CHUNK_STRIDE = 26'h040_0000;
 
 // --------------------------------------------------------------------------
+// ROM download codecs (rtl/spi_rom_decode.sv).
+//
+// A part can be decoded on its way into SDRAM instead of copied. WHICH parts
+// is the MRA's call, not the RTL's: the MRA's index-1 config carries
+// {part index, codec id} pairs and rom_loader applies them by part number.
+// Everything defaults to CODEC_RAW, so an MRA that says nothing behaves
+// exactly as before.
+//
+// Keep these ids in step with the table in the MRA comment block; they are the
+// contract between the two.
+// --------------------------------------------------------------------------
+localparam [3:0] CODEC_RAW      = 4'd0;  // straight copy
+localparam [3:0] CODEC_BPE_DPCM = 4'd1;  // rdft2 sample flash: BPE over DPCM
+
+// --------------------------------------------------------------------------
 // Video timing (seibuspi.cpp:898)
 //   dot clock 28.63636 MHz / 4 = 7.1590909 MHz = clk_sys / 8
 //   448 x 296 total, 320 x 240 visible => 53.99 Hz

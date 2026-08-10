@@ -290,15 +290,41 @@ always @(posedge clk_sys) begin
 	if (ioctl_wr && (ioctl_index == 8'd254) && ~|ioctl_addr[24:1]) dsw[ioctl_addr[0]] <= ioctl_dout;
 end
 
-// MRA mod byte (ioctl index 1). Bit 0 selects the SXX2C cartridge board: a
-// different ROM part table, the Z80 program arriving over port 0x688 instead
-// of from a ROM, and the second FIFO. The HPS sends this before the index-0
-// ROM image, so it is stable by the time the loader walks its table -- but it
-// is latched on clk_sys and read by the loader on clk_ram, so it crosses as a
-// static value that is settled long before rom_ready.
-reg [7:0] mod_byte = 8'd0;
+// MRA config (ioctl index 1). Byte 0 is the mod byte; bit 0 of it selects the
+// SXX2C cartridge board: a different ROM part table, the Z80 program arriving
+// over port 0x688 instead of from a ROM, and the second FIFO. The HPS sends
+// this before the index-0 ROM image, so it is stable by the time the loader
+// walks its table -- but it is latched on clk_sys and read by the loader on
+// clk_ram, so it crosses as a static value that is settled long before
+// rom_ready.
+//
+// Everything after byte 0 is a list of {part index, codec id} PAIRS, which is
+// how an MRA says "decode this part on the way in" without the RTL having to
+// know which set is loading. Codec ids are in rtl/spi_defs.vh; 0 is a straight
+// copy, so an MRA that sends only the mod byte behaves exactly as before.
+//
+//     <rom index="1">
+//       <part>01</part>          <!-- mod byte: SXX2C                     -->
+//       <part>0E 01</part>       <!-- part 14 uses CODEC_BPE_DPCM         -->
+//     </rom>
+//
+// A part index above 15 is ignored, so 'FF' works as a terminator for anyone
+// who wants one. Writing byte 0 clears the whole codec table, so a stale
+// assignment cannot survive into the next MRA.
+reg  [7:0] mod_byte   = 8'd0;
+reg [63:0] part_codec = 64'd0;
+reg  [7:0] cfg_part   = 8'hFF;
 always @(posedge clk_sys) begin
-	if (ioctl_wr && (ioctl_index == 8'd1) && ~|ioctl_addr[25:0]) mod_byte <= ioctl_dout;
+	if (ioctl_wr && (ioctl_index == 8'd1)) begin
+		if (~|ioctl_addr[25:0]) begin
+			mod_byte   <= ioctl_dout;
+			part_codec <= 64'd0;
+			cfg_part   <= 8'hFF;
+		end
+		else if (ioctl_addr[0]) cfg_part <= ioctl_dout;
+		else if (cfg_part < 8'd16)
+			part_codec[{cfg_part[3:0], 2'b00} +: 4] <= ioctl_dout[3:0];
+	end
 end
 
 wire set_sxx2c = mod_byte[0];
@@ -455,6 +481,7 @@ rom_loader rom_loader
 	.ioctl_dout     (ioctl_dout),
 	.ioctl_wait     (ioctl_wait),
 	.set_sxx2c      (set_sxx2c),
+	.part_codec     (part_codec),
 
 	.sdr_addr       (ldr_addr),
 	.sdr_din        (ldr_din),
@@ -465,6 +492,12 @@ rom_loader rom_loader
 
 	.rom_ready      (rom_ready),
 	.bytes_in       (ldr_bytes),
+	// Deliberately unconnected. bytes_out only differs from bytes_in when a
+	// part is decoded, and no MRA does that yet; surfacing it means widening
+	// spi_jtag_peek's probe vector, which tools/jtag_peek.tcl decodes by bit
+	// position. Wire both together when a decoded set first runs on hardware,
+	// because bytes_in alone cannot tell a stalled decoder from a working one.
+	.bytes_out      (),
 	.part_end       (ldr_part_end)
 );
 

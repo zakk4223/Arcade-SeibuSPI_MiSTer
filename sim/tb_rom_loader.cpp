@@ -106,19 +106,102 @@ static uint8_t src_byte(int pi, uint32_t i)
     return (uint8_t)((i & 0xFF) ^ (uint8_t)(pi * 0x37 + 0x5A));
 }
 
-static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label)
+// ---------------------------------------------------------------------------
+// A synthetic CODEC_BPE_DPCM stream for the loader test.
+//
+// The codec itself is checked against the real rdft2 data in tb_rom_decode.cpp;
+// what needs checking HERE is the loader plumbing around it -- that the part
+// ends on bytes IN while the scatter advances on bytes OUT, that the boundary
+// into the next part still lands right, and that a stalled decoder does not
+// drop an ioctl byte. So the stream is built to make the expected output
+// obvious without a second decoder model to disagree with:
+//
+//   every block defines exactly one pair, left[0x80] = right[0x80] = 0x00, so
+//   a data byte of 0x80 expands to two ZERO deltas -- it emits the running
+//   accumulator twice and leaves it alone. Every other byte is a literal delta.
+//
+// Expansion therefore comes out at 1 + (fraction of 0x80 bytes), and the
+// expected output is four lines of C rather than a BPE implementation.
+static void make_bpe_part(uint32_t in_len, std::vector<uint8_t> &stream,
+                          std::vector<uint8_t> &expect)
+{
+    const uint32_t NBLOCKS  = 512;
+    const uint32_t OVERHEAD = 6;          // 4 table bytes + 2 size bytes
+    uint32_t budget = in_len - 2 - NBLOCKS * OVERHEAD;
+    uint32_t base   = budget / NBLOCKS;
+    uint32_t extra  = budget % NBLOCKS;
+
+    stream.push_back(NBLOCKS & 0xFF);          // block count is LITTLE-endian
+    stream.push_back((NBLOCKS >> 8) & 0xFF);
+
+    uint8_t  acc  = 0;
+    uint32_t seed = 0x1234567;
+    for (uint32_t b = 0; b < NBLOCKS; b++) {
+        uint32_t n = base + (b < extra ? 1 : 0);
+
+        stream.push_back(0xFF);   // skip 255-127 = 128 entries, then one entry
+        stream.push_back(0x00);   // left[128]  = 0x00, != 128 so a right follows
+        stream.push_back(0x00);   // right[128] = 0x00
+        stream.push_back(0xFE);   // skip 254-127 = 127: index hits 256, done
+
+        stream.push_back((n >> 8) & 0xFF);     // block size is BIG-endian
+        stream.push_back(n & 0xFF);
+
+        for (uint32_t k = 0; k < n; k++) {
+            seed = seed * 1103515245u + 12345u;
+            uint8_t d = ((seed >> 16) & 7) == 0 ? 0x80 : (uint8_t)(seed >> 8);
+            stream.push_back(d);
+            if (d == 0x80) { expect.push_back(acc); expect.push_back(acc); }
+            else           { acc = (uint8_t)(acc + d); expect.push_back(acc); }
+        }
+    }
+}
+
+static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label,
+                   int codec_part = -1)
 {
     printf("--- %s ---\n", label);
     Vrom_loader *dut = new Vrom_loader;
-    dut->set_sxx2c = sxx2c;
+    dut->set_sxx2c  = sxx2c;
+    dut->part_codec = 0;   // every part a straight copy unless told otherwise
+
+    std::vector<uint8_t> cstream, cexpect;
+    if (codec_part >= 0) {
+        if (parts[codec_part].mode != LINEAR) {
+            printf("FAIL: the codec part must be LINEAR\n");
+            return 1;
+        }
+        make_bpe_part(parts[codec_part].size, cstream, cexpect);
+        if (cstream.size() != parts[codec_part].size) {
+            printf("FAIL: synthetic stream is %zu bytes, part is %u\n",
+                   cstream.size(), parts[codec_part].size);
+            return 1;
+        }
+        dut->part_codec = 1ull << (codec_part * 4);   // CODEC_BPE_DPCM
+        printf("part %d decoded: %u in -> %zu out (%.3fx)\n", codec_part,
+               parts[codec_part].size, cexpect.size(),
+               (double)cexpect.size() / (double)parts[codec_part].size);
+    }
 
     std::vector<uint8_t> mem(SDR_SIZE, 0xFF);
     std::vector<uint8_t> ref(SDR_SIZE, 0xFF);
     std::vector<uint8_t> written(SDR_SIZE, 0);
 
     // ---- reference model -------------------------------------------------
-    uint64_t total = 0;
+    // `total` is bytes fed in, `total_out` bytes expected in SDRAM. They differ
+    // by exactly the decoded part's expansion.
+    uint64_t total = 0, total_out = 0;
     for (int pi = 0; pi < NPARTS; pi++) {
+        if (pi == codec_part) {
+            for (size_t j = 0; j < cexpect.size(); j++) ref[parts[pi].base + j] = cexpect[j];
+            if (parts[pi].base + cexpect.size() > SDR_SIZE) {
+                printf("FAIL: decoded part runs off the end of SDRAM\n");
+                return 1;
+            }
+            total     += parts[pi].size;
+            total_out += cexpect.size();
+            continue;
+        }
         for (uint32_t i = 0; i < parts[pi].size; i++) {
             uint32_t d = dest_of(parts[pi], i);
             if (d >= SDR_SIZE) {
@@ -128,9 +211,11 @@ static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label)
             }
             ref[d] = src_byte(pi, i);
             total++;
+            total_out++;
         }
     }
-    printf("image: %llu bytes across %d parts\n", (unsigned long long)total, NPARTS);
+    printf("image: %llu bytes in, %llu bytes out, across %d parts\n",
+           (unsigned long long)total, (unsigned long long)total_out, NPARTS);
 
     // ---- drive the DUT ---------------------------------------------------
     uint64_t tick = 0;
@@ -190,7 +275,7 @@ static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label)
         // feed the next byte when the loader is ready for it
         dut->ioctl_wr = 0;
         if (!dut->ioctl_wait && sent < total) {
-            dut->ioctl_dout = src_byte(pi, i);
+            dut->ioctl_dout = (pi == codec_part) ? cstream[i] : src_byte(pi, i);
             dut->ioctl_wr   = 1;
             sent++;
             if (++i == parts[pi].size) { i = 0; pi++; }
@@ -201,11 +286,15 @@ static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label)
         if (tick > 400ull * 1000 * 1000) { printf("FAIL: timeout\n"); return 1; }
     }
 
-    // Drain: the last write may still be in flight after the final byte is fed.
+    // Drain. A decoded part is still expanding after the last byte arrives, so
+    // this waits rather than counting a fixed number of cycles.
     dut->ioctl_wr = 0;
-    for (int k = 0; k < 64; k++) { if (!service_sdram()) return 1; clock(); }
+    for (int k = 0; k < 4096; k++) { if (!service_sdram()) return 1; clock(); }
     dut->ioctl_download = 0;
-    for (int k = 0; k < 64; k++) { if (!service_sdram()) return 1; clock(); }
+    for (int k = 0; k < 4096 && !dut->rom_ready; k++) {
+        if (!service_sdram()) return 1;
+        clock();
+    }
 
     if (!dut->rom_ready) { printf("FAIL: rom_ready not asserted after download\n"); return 1; }
 
@@ -220,9 +309,15 @@ static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label)
     printf("cycles: %llu, bytes written: %llu\n",
            (unsigned long long)tick, (unsigned long long)nwritten);
 
-    if (nwritten != total) {
+    if (nwritten != total_out) {
         printf("FAIL: %llu bytes written, expected %llu\n",
-               (unsigned long long)nwritten, (unsigned long long)total);
+               (unsigned long long)nwritten, (unsigned long long)total_out);
+        return 1;
+    }
+    if (dut->bytes_in != (total & 0x3FFFFFF) || dut->bytes_out != (total_out & 0x3FFFFFF)) {
+        printf("FAIL: telemetry says in=%u out=%u, expected in=%llu out=%llu\n",
+               (unsigned)dut->bytes_in, (unsigned)dut->bytes_out,
+               (unsigned long long)total, (unsigned long long)total_out);
         return 1;
     }
     if (bad) {
@@ -244,5 +339,10 @@ int main(int argc, char **argv)
     if (rc) return rc;
     rc = run_set(parts_sxx2c, (int)(sizeof(parts_sxx2c) / sizeof(parts_sxx2c[0])),
                  1, "rdft pre-flashed (SXX2C)");
+    if (rc) return rc;
+    // The same set again with the sample part decoded, which is the shape
+    // rdft2 needs: fourteen copied parts and one that expands.
+    rc = run_set(parts_sxx2c, (int)(sizeof(parts_sxx2c) / sizeof(parts_sxx2c[0])),
+                 1, "SXX2C with a CODEC_BPE_DPCM sample part", 14);
     return rc;
 }

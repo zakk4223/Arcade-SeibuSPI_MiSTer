@@ -49,6 +49,13 @@ BASES = {
     "sprites": 0x1100000,
 }
 
+# rtl/spi_defs.vh. The MRA names one of these per part; anything else is a typo
+# that would load a part as noise.
+CODECS = {
+    0: "CODEC_RAW",
+    1: "CODEC_BPE_DPCM",
+}
+
 REGION = {
     "maincpu": "prg", "audiocpu": "z80", "chars": "chars",
     "tiles": "tiles", "sprites": "sprites", "ymf": "pcm",
@@ -151,6 +158,44 @@ def parse_mra(path):
     return out
 
 
+def parse_codecs(path, nparts):
+    """The MRA's index-1 config: the mod byte, then {part, codec} pairs.
+
+    Nothing at runtime rejects a codec aimed at a part that does not exist, or
+    an id the core has no decoder for -- the part simply loads as garbage. So
+    check it here, where the part count is already known.
+    """
+    src = open(path, encoding="utf-8").read()
+    m = re.search(r'<rom index="1".*?>(.*?)</rom>', src, re.S)
+    if not m:
+        return None, {}
+
+    data = []
+    for pm in re.finditer(r"<part\b[^>]*>(.*?)</part>", m.group(1), re.S):
+        data += [int(b, 16) for b in pm.group(1).split()]
+    if not data:
+        fail("empty <rom index=\"1\"> in %s" % path)
+
+    pairs = data[1:]
+    if len(pairs) % 2:
+        fail("%s: index-1 config has a dangling byte after the {part, codec} "
+             "pairs (%d bytes after the mod byte)" % (path, len(pairs)))
+    codecs = {}
+    for i in range(0, len(pairs), 2):
+        part, codec = pairs[i], pairs[i + 1]
+        if part == 0xFF:            # documented terminator
+            break
+        if part >= nparts:
+            fail("%s: index-1 assigns a codec to part %d, but the table has "
+                 "only %d parts" % (path, part, nparts))
+        if codec not in CODECS:
+            fail("%s: part %d asks for codec %d, which rtl/spi_defs.vh does not "
+                 "define (have: %s)" % (path, part, codec,
+                                        ", ".join(sorted(CODECS.values()))))
+        codecs[part] = CODECS[codec]
+    return data[0], codecs
+
+
 def parse_loader(path, table):
     """One of rom_loader.sv's part tables, plus its part count."""
     src = open(path, encoding="utf-8").read()
@@ -220,6 +265,15 @@ def check_set(setname, cfg, args):
     mame = parse_mame(drv, setname, cfg["skip"])
     mra = parse_mra(mra_path)
     rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"), cfg["table"])
+    mod_byte, codecs = parse_codecs(mra_path, nparts)
+
+    want_mod = 1 if cfg["table"] == "sxx2c" else 0
+    if (mod_byte or 0) & 1 != want_mod:
+        fail("%s: mod byte %s selects the %s table, but this set needs %s"
+             % (cfg["mra"], "absent" if mod_byte is None else hex(mod_byte),
+                "sxx2c" if (mod_byte or 0) & 1 else "sxx2e", cfg["table"]))
+    for part, codec in sorted(codecs.items()):
+        print("  part %d decoded by %s" % (part, codec))
 
     roms = [r for r in mame if not r.get("skipped")]
     skipped = [r for r in mame if r.get("skipped")]

@@ -17,7 +17,10 @@ Nothing here is a magic number: the copy lengths, source addresses and byte-lane
 modes are read out of the job table in the game's own program image.
 
 Usage:
-    tools/build_soundflash.py rdft2.zip out.bin [--verify]
+    tools/build_soundflash.py rdft2.zip out.bin [--verify] [--decoded-out FILE]
+
+--decoded-out writes just the decoded jobs' output, which is what the RTL
+decoder in rtl/spi_rom_decode.sv is checked against (sim/tb_rom_decode.cpp).
 """
 
 import sys
@@ -149,8 +152,9 @@ def expand(fetch, out):
             out.append(acc)
 
 
-def build(zf, game):
+def build(zf, game, decoded_out=None):
     g = GAMES[game]
+    decoded = bytearray()
     prg = load_prg(zf, g["prg"])
     region = load_sound01(zf, g["sound01"])
 
@@ -179,6 +183,7 @@ def build(zf, game):
         else:
             out = bytearray()
             expand(fetch, out)
+            decoded += out
             img[pos:pos + len(out)] = out
             pos += len(out)
             if len(out) != length:
@@ -190,12 +195,22 @@ def build(zf, game):
         job += 0xC
 
     print(f"  payload ends at {pos - 1:#x}, rest is erased 0xFF", file=sys.stderr)
+    if decoded_out:
+        with open(decoded_out, "wb") as f:
+            f.write(decoded)
+        print(f"  decoded output -> {decoded_out} ({len(decoded)} bytes)", file=sys.stderr)
     return bytes(img)
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    verify = "--verify" in sys.argv
+    argv = sys.argv[1:]
+    decoded_out = None
+    if "--decoded-out" in argv:
+        k = argv.index("--decoded-out")
+        decoded_out = argv[k + 1]
+        del argv[k:k + 2]
+    args = [a for a in argv if not a.startswith("--")]
+    verify = "--verify" in argv
     if len(args) != 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
@@ -209,7 +224,7 @@ def main():
             print(f"{src}: no supported game (have: {sorted(GAMES)})", file=sys.stderr)
             return 1
         print(f"{game}:", file=sys.stderr)
-        img = build(zf, game)
+        img = build(zf, game, decoded_out)
 
     if verify:
         import hashlib

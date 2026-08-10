@@ -67,8 +67,31 @@
     -->
 
     <!--
-      Mod byte: bit 0 selects the SXX2C part table and board wiring in the core.
-      rdfts.mra leaves this at 0.
+      Index 1 is the core's config blob. Byte 0 is the mod byte: bit 0 selects
+      the SXX2C part table and board wiring in the core. rdfts.mra leaves this
+      at 0.
+
+      Everything AFTER byte 0 is a list of {part index, codec id} pairs, which
+      is how an MRA says "decode this part on the way into SDRAM" instead of
+      copying it. Parts default to CODEC_RAW, so this file needs none.
+
+        id  name             what it is
+        --  ---------------  --------------------------------------------------
+        0   CODEC_RAW        straight copy (the default)
+        1   CODEC_BPE_DPCM   byte pair encoding over DPCM -- rdft2's sample
+                             flash, the format its own 386 decompresses at
+                             first boot (PLAN.md section 0)
+
+      The ids live in rtl/spi_defs.vh and the decoders in rtl/spi_rom_decode.sv;
+      `make check-mra` rejects a pair naming a part that does not exist or an id
+      with no decoder behind it. For a decoded part the loader's part_size is
+      the COMPRESSED length -- what arrives -- while the destination advances by
+      what comes out. An example, for the rdft2 MRA this makes possible:
+
+        <rom index="1">
+          <part>01</part>       mod byte: SXX2C
+          <part>0E 01</part>    part 14 is BPE+DPCM compressed
+        </rom>
 
       IT MUST COME BEFORE THE index="0" ROM. Main_MiSTer sends the <rom>
       elements in file order, so an index-1 that follows the image arrives
