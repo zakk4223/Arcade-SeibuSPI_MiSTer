@@ -17,17 +17,17 @@ module tb_boot_top
 	input             rom_ready,
 
 	// SDRAM services, driven by the C++ model
-	output     [24:0] sdr_prg_addr,
+	output     [25:0] sdr_prg_addr,
 	input      [63:0] sdr_prg_dout,
 	output            sdr_prg_req,
 	input             sdr_prg_ack,
 
-	output     [24:0] sdr_gfx_addr,
+	output     [25:0] sdr_gfx_addr,
 	input      [63:0] sdr_gfx_dout,
 	output            sdr_gfx_req,
 	input             sdr_gfx_ack,
 
-	output     [24:0] sdr_spr_addr,
+	output     [25:0] sdr_spr_addr,
 	input      [63:0] sdr_spr_dout,
 	output            sdr_spr_req,
 	input             sdr_spr_ack,
@@ -63,7 +63,7 @@ module tb_boot_top
 );
 
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire [24:0] sdr_pcm_addr;
+	wire [25:0] sdr_pcm_addr;   // 26 bits since the map outgrew 32 MB
 	wire        sdr_pcm_req;
 	/* verilator lint_on UNUSEDSIGNAL */
 

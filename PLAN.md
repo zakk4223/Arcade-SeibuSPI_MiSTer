@@ -729,6 +729,52 @@ the loader produces, and that muxing the units changed nothing for rdfts.
 `spi_layers` hardwires the SEI252 triple; `TKEY*_RDFT2` are defined in
 spi_defs.vh and all three key sets are already verified against MAME.
 
+### The tile keys, and the fore-layer base that came with them (2026-08-10)
+
+`spi_layers` hardwired `TKEY*_SEI252`. It now takes `tkey1/2/3` as ports and
+`spi_top` picks the triple from `set_id`. One triple covers both layers: MAME's
+`text_decrypt` and `bg_decrypt` take the same three constants, and
+`rdft2_text_decrypt` / `rdft2_bg_decrypt` are those same functions with
+0x823146 / 0x4DE2F8 / 0x157ADC. `spi_tile_decrypt` already took keys as inputs
+and all three sets are already checked against MAME (73,728 vectors), so this
+is a selection, not new arithmetic.
+
+**A second per-set difference turned up while wiring it, and it is not cosmetic.**
+`m_bg_fore_layer_position` (seibuspi_v.cpp:585) follows the SIZE of the tile
+region, not the game: 0x2000 up to 3 MB, 0x4000 up to 6 MB, **0x8000 beyond**.
+Every set until now has exactly 6 MB of tiles, so 0x4000 was hardcoded and the
+tile code was 15 bits wide -- which cannot hold 0x8000 at all. rdft2 has 12 MB,
+0x10000 tiles, and needs the 16th bit.
+
+So `tcode` is 16 bits, `bg_fore_pos` is 16 bits and selected per set, and the
+`tile_off = tcode * 0xC0` terms widened with it. Nothing else moved: the back
+and midl d14 bits are still 0x4000 whatever the set, `dec_tileno` is still
+`tcode[11:0]` (which is the code within its 0xC0000 decrypt block, and stays
+right for 16 blocks as it was for 8), and `char_off` still uses twelve bits.
+
+Left alone, rdft2's fore layer would have indexed the wrong half of a 12 MB
+tile ROM, with correct keys. Worth knowing that the two are coupled.
+
+**Regression evidence.** `make -C sim run-video` still has the rdfts frame
+matching MAME exactly, 0 of 76,800 pixels, with the keys arriving through ports
+and the tile code a bit wider.
+
+**rdft2 is now wired end to end, and still unverified end to end.** Every
+per-set difference findable in the driver is selected -- part table, sample
+flash codec, sprite stride, sprite crypt, sprite reorder, tile and text keys,
+fore base. What does not exist is an rdft2 golden capture, so nothing has
+compared an rdft2 frame against MAME. That is the next thing worth doing and it
+is a real piece of work, not a formality: `tools/build_sdram_image.py` needs
+rdft2's layout (including M_SPR_R10 and the derived flash) before
+`make capture` can produce a reference to compare against.
+
+Unrelated rot noted while running the benches: `sim/tb_boot_top.sv` is 19 pins
+behind `spi_top` -- the whole SXX2C Z80 and sound plumbing -- so `run-boot` has
+not elaborated for some time. Its 25-bit address declarations are widened here
+because they are the same debt as tb_sdram_top's, but reconnecting it needs
+models for the Z80 SDRAM read and download ports and is its own change. It is
+not in `make verify`.
+
 ### The authentic flash path is still the general answer
 
 The codec being cracked weakens this argument but does not kill it. rdft's
@@ -1795,9 +1841,10 @@ clean for the first time.
   verified against MAME over 2048 words including `sprite_reorder`. In
   `files.qip`, and `spi_sprite` now muxes it against SEI252 on `set_id`, with
   the chunk stride arriving as a port alongside it.
-* Tile keys for all three families are defined and all three verified, but
-  `spi_layers` hardwires the SEI252 triple. This is the last thing rdft2
-  needs.
+* Tile keys for all three families are defined, all three verified, and
+  `spi_layers` now takes them as ports with `spi_top` selecting on `set_id` --
+  along with the fore-layer tile base, which depends on the tile region size
+  and needed the tile code widened to 16 bits.
 
 **The immediate decision** is recorded in section 0: an in-core decoder that
 builds the flash contents from raw ROM at load time, versus the authentic flash
@@ -1806,11 +1853,12 @@ per part by the MRA, verified against the real rdft2 stream (section 0). The
 controller still needs a writable ch5, a save file and a long first boot, and
 remains the fallback for any game whose packer is not worth cracking.
 
-**What rdft2 still needs:** the tile and text key select in `spi_layers`, and
-nothing else. The loader table, the MRA, the sample-flash decoder, the sprite
-chunk stride port and the RISE10 mux are all done and checked against MAME
-(section 0), as is the 26-bit address widening that made its 34.0 MB
-reachable.
+**What rdft2 still needs:** a golden capture, and whatever that turns up. Every
+per-set difference in the driver is now wired -- loader table, MRA,
+sample-flash decoder, sprite chunk stride, RISE10 crypt, sprite reorder, tile
+and text keys, fore-layer base. None of it has been compared against an rdft2
+frame, because producing one needs `tools/build_sdram_image.py` to learn
+rdft2's layout first (section 0).
 
 ## 11. TASKS
 

@@ -488,9 +488,23 @@ module spi_top
 	// ------------------------------------------------------------------
 	// Tile layers
 	//
-	// bg_fore_pos is 0x4000 for a 6 MB tile region (seibuspi_v.cpp:580); rdfts
-	// has exactly 0x600000 of tiles.
+	// Two things here are per GAME rather than per board.
+	//
+	// bg_fore_pos is the fore layer's tile base and it follows the SIZE of the
+	// tile region (seibuspi_v.cpp:585): 0x2000 up to 3 MB, 0x4000 up to 6 MB,
+	// 0x8000 beyond. rdfts and rdft have exactly 0x600000 of tiles; rdft2 has
+	// 0xC00000, which is the only case that needs the 16th code bit.
+	//
+	// The decryption keys are simply per game. The same triple does text and
+	// background -- MAME's text_decrypt and bg_decrypt take the same three
+	// constants -- so one selection covers both layers.
 	// ------------------------------------------------------------------
+	wire [15:0] bg_fore_pos = (set_id == SET_RDFT2) ? 16'h8000 : 16'h4000;
+
+	wire [23:0] tkey1 = (set_id == SET_RDFT2) ? TKEY1_RDFT2 : TKEY1_SEI252;
+	wire [23:0] tkey2 = (set_id == SET_RDFT2) ? TKEY2_RDFT2 : TKEY2_SEI252;
+	wire [23:0] tkey3 = (set_id == SET_RDFT2) ? TKEY3_RDFT2 : TKEY3_SEI252;
+
 	// Lead the line-buffer read by one pixel: the mixer's composite is only
 	// stable a pixel after its palette lookups finish.
 	// The mixer's palette sequence and composite take two pixel-times, so the
@@ -518,7 +532,10 @@ module spi_top
 		.layer_off        (layer_en_dbg[3:0]),
 		.fore_layer_d13   (fore_d13_s),
 		.rf2_layer_bank   (bank_s2),
-		.bg_fore_pos      (15'h4000),
+		.bg_fore_pos      (bg_fore_pos),
+		.tkey1            (tkey1),
+		.tkey2            (tkey2),
+		.tkey3            (tkey3),
 
 		.tm_addr          (tm_ra),
 		.tm_data          (tm_rd),

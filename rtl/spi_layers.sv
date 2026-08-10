@@ -60,7 +60,16 @@ module spi_layers
 
 	input             fore_layer_d13,
 	input       [2:0] rf2_layer_bank,   // {fore d14, midl d14, back d14}
-	input      [14:0] bg_fore_pos,      // 0x4000 for a 6 MB tile region
+	// The fore layer's tile base, which depends on the SIZE of the tile region
+	// (seibuspi_v.cpp:585): 0x2000 up to 3 MB, 0x4000 up to 6 MB, 0x8000 beyond.
+	// 16 bits because of that last case -- rdft2's 12 MB of tiles is 0x10000
+	// tiles and needs the whole code space, where every 6 MB set fits in 15.
+	input      [15:0] bg_fore_pos,
+
+	// Tile and text decryption keys. Per GAME, not per board, and the same
+	// triple serves both layers -- MAME's text_decrypt and bg_decrypt take the
+	// same three constants. spi_defs.vh has all three sets; spi_top picks.
+	input      [23:0] tkey1, tkey2, tkey3,
 
 	// Tilemap RAM read port
 	output reg [11:0] tm_addr,
@@ -89,7 +98,7 @@ module spi_layers
 
 	// Debug taps for the golden-reference testbench.
 	output      [1:0] dbg_layer,
-	output     [14:0] dbg_tcode,
+	output     [15:0] dbg_tcode,
 	output     [25:0] dbg_gfx_addr,
 	output            dbg_emit,
 	output            dbg_busy,
@@ -200,26 +209,26 @@ module spi_layers
 	// ------------------------------------------------------------------
 	reg [15:0] tword;
 	reg  [3:0] tcolor;
-	reg [14:0] tcode;
+	reg [15:0] tcode;
 
 	// rf2_layer_bank supplies bit 14 of the code (0x4000) per layer; it is only
 	// written on SXX2F / SYS386I, so it stays 0 here.
 	always @* begin
 		case (layer)
 			L_BACK: begin
-				tcode  = {rf2_layer_bank[0], 1'b0, tword[12:0]};
+				tcode  = {1'b0, rf2_layer_bank[0], 1'b0, tword[12:0]};
 				tcolor = {1'b0, tword[15:13]};
 			end
 			L_MIDL: begin
-				tcode  = {rf2_layer_bank[1], 1'b1, tword[12:0]};          // | 0x2000
+				tcode  = {1'b0, rf2_layer_bank[1], 1'b1, tword[12:0]};    // | 0x2000
 				tcolor = {1'b0, tword[15:13]};
 			end
 			L_FORE: begin
-				tcode  = {rf2_layer_bank[2], fore_layer_d13, tword[12:0]} | bg_fore_pos;
+				tcode  = {1'b0, rf2_layer_bank[2], fore_layer_d13, tword[12:0]} | bg_fore_pos;
 				tcolor = {1'b0, tword[15:13]};
 			end
 			default: begin
-				tcode  = {3'd0, tword[11:0]};
+				tcode  = {4'd0, tword[11:0]};
 				tcolor = tword[15:12];
 			end
 		endcase
@@ -234,7 +243,7 @@ module spi_layers
 	// code*192 = code*128 + code*64    fine_y*12 = fine_y*8 + fine_y*4
 	wire [25:0] char_off = {8'd0, tcode[11:0], 5'd0} + {9'd0, tcode[11:0], 4'd0}
 	                     + {19'd0, fine_y, 2'd0}     + {20'd0, fine_y, 1'b0};
-	wire [25:0] tile_off = {3'd0, tcode[14:0], 7'd0} + {4'd0, tcode[14:0], 6'd0}
+	wire [25:0] tile_off = {3'd0, tcode, 7'd0} + {4'd0, tcode, 6'd0}
 	                     + {18'd0, fine_y, 3'd0}     + {19'd0, fine_y, 2'd0};
 
 	wire [25:0] gfx_base = is_text ? (SDR_CHARS_BASE + char_off)
@@ -314,9 +323,9 @@ module spi_layers
 			(
 				.din    (dec_in[gi]),
 				.tileno (dec_tileno),
-				.key1   (TKEY1_SEI252),
-				.key2   (TKEY2_SEI252),
-				.key3   (TKEY3_SEI252),
+				.key1   (tkey1),
+				.key2   (tkey2),
+				.key3   (tkey3),
 				.dout   (dec_out[gi])
 			);
 		end
