@@ -2121,7 +2121,7 @@ it was not needed here.
     make build         0 errors, RBF written
     make timing        every clock positive, TNS 0.000
 
-Still not flashed to anything. T-C is a hardware run.
+Since flashed and run: rdfts and rdft2 both boot. See 10c.
 
 ### Verification state, and how to re-run it
 
@@ -2141,11 +2141,24 @@ seconds and reaches well past the Z80 download.
 Known-broken and NOT from this work: `make -C sim run-sdram` fails its readback
 compare. It is not in `make verify`.
 
-## 10c. rdft2's FIRST HARDWARE RUN: the download deadlocks in part 15 (2026-08-10)
+## 10c. rdft2 RUNS ON HARDWARE, and what stood in the way (2026-08-10)
 
-Deployed to 192.168.1.125 and loaded. **It does not boot: the ROM download
-stops part-way through part 15 and never finishes.** The 386 never starts,
-because `rom_ready` never asserts.
+**rdft2 boots on the MiSTer.** Story intro, then the title screen with the
+jungle background and sprites: "RAIDEN FIGHTERS 2 / OPERATION HELL DIVE",
+(c)1997 Seibu Kaihatsu, INSERT COIN(S). Its download is byte-perfect --
+`bytes_in` = 35,752,108 exactly, `bytes_out` = 35,910,452, which is exactly
++158,344, the sample codec's expansion (471,277 - 312,933) to the byte -- and
+`part_end` = 16, the sound01 slice.
+
+Getting there took finding a bug that had nothing to do with rdft2 and had been
+breaking rdfts too. The rest of this section is that hunt, in the order it
+happened, because the wrong turns are the useful part.
+
+### The first run: the download deadlocked in part 15
+
+Deployed and loaded. It did not boot: the ROM download stopped part-way through
+part 15 and never finished, so `rom_ready` never asserted and the 386 never
+started.
 
 The symptom is not subtle once you know where to look. `MiSTer_Main` HANGS --
 `echo load_core > /dev/MiSTer_cmd` blocks forever and the machine will not
@@ -2257,6 +2270,31 @@ What makes this worth being careful about is that rdfts nonetheless BOOTS and
 plays on this hardware, which a scrambled image should not allow. So one of the
 two stories is incomplete.
 
+### SETTLED: `ioctl_wr` was being acted on twice. Screenshots decided it.
+
+The MiSTer takes its own screenshots -- `echo "screenshot name.png" >
+/dev/MiSTer_cmd`, and the file lands in `/media/fat/screenshots/`. That is a
+far better instrument than anything over JTAG, and it settled the contradiction
+in one shot: **rdfts renders a 320x240 all-black frame**, on this build and on
+the pre-session build alike. It is not playing. The menu core screenshots at
+58 KB of real content from the same mechanism, so the capture works.
+
+So the checksums were telling the truth and the "but rdfts works" objection was
+simply out of date. Which makes hypothesis (2) the answer, and it reproduces in
+simulation the moment the bench models the real pulse:
+
+    tb_rom_loader, rdfts, ioctl_wr held 2 clocks:
+      FAIL: telemetry says in=46792704 out=23396367
+
+46,792,704 is the number the hardware reported, to the byte.
+
+The fix is an edge detector on `ioctl_wr` in `rom_loader`. The bench now runs
+every set BOTH ways, one clock and two, and the two must agree -- which also
+required fixing the bench's producer model: it never let `ioctl_wr` fall
+between bytes, so with an edge detector only the first byte was ever seen. A
+byte is now `pulse` clocks high followed by `pulse` low, which is one cycle of
+the producer's clock each way.
+
 ### A SECOND instrument bug: PEEK reads 32 MB too high
 
 The obvious next step is `tools/jtag_peek.tcl dump 0x0 8`, to read the start of
@@ -2282,15 +2320,43 @@ full 26), THEN take the dump. Three separate things were being read through a
 broken instrument this session -- the probe width, the field offsets, and this
 -- and each one produced a confident wrong number. Fix the instrument first.
 
-### Order of work for the next session
+### Confirmed on hardware
 
-1. Fix the PEEK address bit above. It is one line.
-2. Dump PRG+0 on rdfts and compare against the reference image. This decides
-   between "image is fine, checker is wrong" and "image is scrambled".
-3. If scrambled: edge-detect `ioctl_wr` in `rom_loader` and re-measure --
-   `bytes_in` must land on 23,396,352 and `ok` on 1111.
-4. Only then go back to rdft2's part 15, which may simply be the first place
-   where a corrupted stream cannot be survived rather than a bug of its own.
+With the edge detector in:
+
+    rdfts   bytes_in  23,396,353   bytes_out  23,396,352   ok 0111
+            sum PRG, CHARS, TILES all match the reference EXACTLY
+            screenshot: the Raiden Fighters attract plane. It plays.
+
+    rdft2   bytes_in  35,752,108   bytes_out  35,910,452   part_end 16
+            screenshot: story intro, then the title screen with sprites
+
+So part 15 was never a bug of its own -- it was the first place a corrupted
+stream could not be survived. A BPE stream with a duplicated byte reads a bogus
+block count, finishes early, and parks the decoder in S_DONE with `in_ready`
+low, which is the hang. Every other part just took the wrong bytes quietly.
+
+Two loose ends, neither blocking:
+
+* **rdfts' SPRITES sum still mismatches** (76809831 vs DCD037DA) while the
+  other three regions are exact. It may be real, or it may be the checker's
+  own reads: `spi_romcheck` loops forever and later passes run while the sprite
+  engine is hammering ch4, which is the contention case those repeat passes
+  exist to catch (13c). Read `passes` and `sum SPRITES` twice: if the sum moves
+  between passes it is the read path, if it is stable the data is wrong.
+* The PEEK address bit (T-F), so SDRAM can be read back on a 64 MB module --
+  which is what would settle the above directly.
+
+### Take screenshots. They are the cheapest instrument here
+
+This session spent a long time reasoning about what the hardware might be doing
+from JTAG counters, two of which were lying, when one screenshot would have
+said "black screen" immediately and pointed straight at the ROM image. The
+command is one line over ssh and needs no capture card, no JTAG and no server:
+
+    echo "screenshot slop.png" > /dev/MiSTer_cmd     # -> /media/fat/screenshots/
+
+Take one FIRST, before reading a single counter.
 
 ## 10b. Where the project stands (end of 2026-08-09, before the rdft2 arc)
 
@@ -2371,12 +2437,15 @@ Open, in the order they block things (2026-08-10):
       386 can download the Z80 program. Section 10a(1). Verified by the game's
       own boot code in `run-boot`: 131,072 bytes into the Z80's memory, byte
       for byte the ROM they came from.
-- [ ] **T-C** rdft2 on hardware. RUN, and it does not boot: the ROM download
-      deadlocks 65,483 bytes into part 15, the decoded one, and wedges
-      MiSTer_Main with it. Section 10c has the measurement, why a stalled
-      decoder hangs the whole machine, and the one experiment to run first
-      (rdfts `bytes_in` vs `bytes_out`, which the JTAG probe now reports).
-      This is the top item.
+- [x] **T-C** rdft2 on hardware. **It boots and runs** -- story intro and the
+      title screen with sprites. Its download is byte-perfect: bytes_in
+      35,752,108, bytes_out exactly +158,344 (the codec's expansion), part_end
+      16. What had blocked it was not rdft2 at all but `ioctl_wr` being acted
+      on twice in `rom_loader`, which was corrupting every set's download.
+      Section 10c.
+- [ ] **T-G** rdfts' SPRITES checksum still mismatches while PRG, CHARS and
+      TILES are exact. Could be the data or could be the checker's own reads
+      under sprite-engine contention. Section 10c says how to tell them apart.
 - [ ] **T-D** Optional, ~10% of the sprite line budget: the line-buffer
       generation tag that replaces the 320-cycle clear. Tried and reverted --
       start by proving `bank_tag` actually toggles. Nothing needs it now that

@@ -354,6 +354,21 @@ module rom_loader
 
 	wire download = ioctl_download && (ioctl_index == 8'd0);
 
+	// ioctl_wr is a ONE-clk_sys-cycle pulse and this module runs on clk_ram,
+	// which is exactly 2x clk_sys and phase aligned from the same VCO -- so the
+	// pulse is high across TWO of our clock edges and the level cannot be used
+	// as "a byte arrived". Acting on it twice counted every byte twice and, when
+	// `feed` fell between the two edges, re-armed hold_valid on a byte that had
+	// already been consumed and emitted it a second time, to the next
+	// destination. That is a stretched, wrong ROM image, and it is what a MiSTer
+	// was measurably doing: bytes_in = 46,792,704, exactly twice rdfts' image,
+	// with all four region checksums failing (PLAN.md 10c).
+	//
+	// Nothing simulated it because the testbench drove one-cycle pulses.
+	// tb_rom_loader now runs every set both ways.
+	reg  ioctl_wr_d;
+	wire ioctl_wr_rise = ioctl_wr && !ioctl_wr_d;
+
 	// The part's input is spent. What ends a part is bytes IN, not bytes out:
 	// a decoded part's output length is a property of the data, not the table.
 	wire part_in_full = (in_off == part_size_r);
@@ -397,13 +412,15 @@ module rom_loader
 			hold_valid    <= 1'b0;
 			part_step     <= 1'b0;
 			dl_d          <= 1'b0;
+			ioctl_wr_d    <= 1'b0;
 			bytes_in      <= 26'd0;
 			bytes_out     <= 26'd0;
 			part_end      <= 5'd0;
 		end
 		else begin
-			part_step <= 1'b0;
-			dl_d      <= download;
+			part_step  <= 1'b0;
+			dl_d       <= download;
+			ioctl_wr_d <= ioctl_wr;
 
 			// A write retires when ack catches up with req.
 			if (busy && (sdr_ack == sdr_req)) busy <= 1'b0;
@@ -442,7 +459,7 @@ module rom_loader
 
 				// Capture last so a byte arriving in the same cycle the held
 				// one is consumed replaces it rather than being dropped.
-				if (ioctl_wr) begin
+				if (ioctl_wr_rise) begin
 					bytes_in   <= bytes_in + 26'd1;
 					hold_data  <= ioctl_dout;
 					hold_valid <= 1'b1;

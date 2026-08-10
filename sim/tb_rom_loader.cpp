@@ -259,10 +259,24 @@ static void make_bpe_part(uint32_t in_len, std::vector<uint8_t> &stream,
     }
 }
 
+// `pulse` is how many loader clocks each ioctl_wr is held high for. It is 1 in
+// the obvious model and 2 on real hardware, and that difference is a bug this
+// bench could not see for months.
+//
+// hps_io drives ioctl_wr for one clk_sys cycle. rom_loader runs on clk_ram,
+// which is EXACTLY 2x clk_sys and phase aligned from the same VCO, so one pulse
+// spans two loader clocks. With no edge detector the loader would act on it
+// twice: count the byte twice, and -- because the ioctl arm re-arms hold_valid
+// after `feed` has already consumed it -- emit it twice, to two consecutive
+// destinations. The download then writes a stretched, wrong image.
+//
+// Run every set both ways. pulse=2 is the hardware, and it must produce the
+// same SDRAM image as pulse=1 or the core cannot load a ROM correctly.
 static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
-                   int codec_part = -1)
+                   int codec_part = -1, int pulse = 1)
 {
-    printf("--- %s ---\n", label);
+    printf("--- %s (ioctl_wr held %d clock%s) ---\n",
+           label, pulse, pulse == 1 ? "" : "s");
     Vrom_loader *dut = new Vrom_loader;
     dut->set_id     = set_id;
     for (int i = 0; i < 4; i++) dut->part_codec[i] = 0;   // all straight copies
@@ -347,6 +361,7 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
     uint8_t  last_req = dut->sdr_req;
     int      ack_delay = 0;
     bool     ack_pending = false;
+    int      wr_hold = 0, wr_gap = 0;
 
     // Model the SDRAM: a write retires a few cycles after req toggles.
     auto service_sdram = [&]() -> bool {
@@ -374,11 +389,21 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
     while (sent < total || ack_pending) {
         if (!service_sdram()) return 1;
 
-        // feed the next byte when the loader is ready for it
-        dut->ioctl_wr = 0;
-        if (!dut->ioctl_wait && sent < total) {
+        // Feed the next byte when the loader is ready for it. A byte is
+        // `pulse` clocks of ioctl_wr high followed by at least `pulse` low --
+        // one cycle of the producer's clock each way. The low half matters as
+        // much as the high one: hps_io always returns ioctl_wr to 0 between
+        // bytes, so an edge detector in the loader has something to detect.
+        if (wr_hold > 0) {
+            if (--wr_hold == 0) { dut->ioctl_wr = 0; wr_gap = pulse; }
+        }
+        else if (wr_gap > 0) {
+            wr_gap--;
+        }
+        else if (!dut->ioctl_wait && sent < total) {
             dut->ioctl_dout = (pi == codec_part) ? cstream[i] : src_byte(pi, i);
             dut->ioctl_wr   = 1;
+            wr_hold         = pulse;
             sent++;
             if (++i == parts[pi].size) { i = 0; pi++; }
         }
@@ -455,5 +480,16 @@ int main(int argc, char **argv)
     // a part whose output length is not its input length.
     rc = run_set(parts_rdft2, (int)(sizeof(parts_rdft2) / sizeof(parts_rdft2[0])),
                  2, "rdft2 (SXX2C, decoded sample flash)", 15);
+    if (rc) return rc;
+
+    // The same two sets again with ioctl_wr held for TWO loader clocks, which
+    // is what hps_io's one-clk_sys pulse looks like on clk_ram. This is the
+    // real hardware timing and nothing here modelled it until rdfts was found
+    // downloading twice its own image on a MiSTer (PLAN.md 10c).
+    rc = run_set(parts_sxx2e, (int)(sizeof(parts_sxx2e) / sizeof(parts_sxx2e[0])),
+                 0, "rdfts (SXX2E)", -1, 2);
+    if (rc) return rc;
+    rc = run_set(parts_rdft2, (int)(sizeof(parts_rdft2) / sizeof(parts_rdft2[0])),
+                 2, "rdft2 (SXX2C, decoded sample flash)", 15, 2);
     return rc;
 }
