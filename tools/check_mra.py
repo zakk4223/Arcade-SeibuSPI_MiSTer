@@ -67,28 +67,31 @@ SETS = {
     # synth:  logical parts with no single MAME ROM behind them
     # mod:  the exact index-1 mod byte this set must send. bit 0 = SXX2C board,
     #       bits 3:1 = set within that board (rtl/spi_defs.vh).
-    "rdfts": dict(mra="rdfts.mra", table="rdfts", mod=0x00, skip=()),
+    # spr_mode / spr_chunk: sprites are INTERLEAVED in SDRAM (rom_loader
+    # M_SPR_ILV), so their scatter mode and destination cannot be derived from
+    # MAME's plain ROM_LOAD. Chunk k lands at sprites_base + 2k.
+    "rdfts": dict(mra="rdfts.mra", table="rdfts", mod=0x00, skip=(),
+                  spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     "rdft":  dict(mra="rdft.mra",  table="rdft",  mod=0x01,
                   # audiocpu is RAM the 386 fills through 0x688; sound01 is the
                   # updater's window and is measurably untouched once the flash
                   # is programmed; soundflash1 is the blank flash we replace.
-                  skip=("audiocpu", "sound01", "soundflash1")),
+                  skip=("audiocpu", "sound01", "soundflash1"),
+                  spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     # rdft2 skips the same three, plus the PAL dumps, which are not ROM data.
     # Its sound01 IS read -- that is where the compressed tail comes from -- but
     # the MRA carries sound1.u0222 directly rather than the assembled window.
     "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x03,
                   skip=("audiocpu", "sound01", "soundflash1", "pals"),
-                  # RISE10 sets carry MAME's sprite_reorder(), which the loader
-                  # folds into the destination instead of the fetch. MAME's
-                  # macro is a plain ROM_LOAD, so the expected mode has to be
-                  # overridden here rather than derived from it.
-                  spr_mode="M_SPR_R10",
+                  # RISE10 sets carry MAME's sprite_reorder() as well as the
+                  # interleave, and the loader folds both into the destination.
+                  spr_mode="M_SPR_ILV_R", spr_chunk=0x600000,
                   # The sample flash is DERIVED, so with --zip it can be rebuilt
                   # from the MRA's own slices and compared against the image
                   # MAME's flash devices end up holding. That is the only thing
                   # tying these offsets and lengths to reality: an off-by-one in
                   # either would otherwise load quietly shifted samples.
-                  flash=dict(parts=(12, 13), decoded=13, size=0x200000,
+                  flash=dict(parts=(14, 15), decoded=15, size=0x200000,
                              sha256="c0da4614a8d07a7bce24b7712b756435f2c5f"
                                     "d1ef74dc44333657afdecc6c67c")),
 }
@@ -244,7 +247,7 @@ def parse_loader(path, table):
     body = bodies[table]
 
     out = {}
-    for e in re.finditer(r"4'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
+    for e in re.finditer(r"5'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
                          r"\s*part_size\s*=\s*26'h([0-9a-fA-F_]+);"
                          r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(.+)", body):
         idx, base, size, mode, name = e.groups()
@@ -260,7 +263,7 @@ def parse_loader(path, table):
                       "mode": mode, "name": name.strip()}
 
     sym = "NPARTS_" + table.upper()
-    n = re.search(r"localparam \[3:0\] %s\s*=\s*4'd(\d+)" % sym, src)
+    n = re.search(r"localparam \[4:0\] %s\s*=\s*5'd(\d+)" % sym, src)
     if not n:
         fail("cannot find %s in %s" % (sym, path))
     return out, int(n.group(1))
@@ -271,9 +274,10 @@ def resolve_base(expr):
     for k, v in (("SDR_PRG_BASE", BASES["prg"]), ("SDR_Z80_BASE", BASES["z80"]),
                  ("SDR_CHARS_BASE", BASES["chars"]), ("SDR_PCM_BASE", BASES["pcm"]),
                  ("SDR_TILES_BASE", BASES["tiles"]), ("SDR_SPRITES_BASE", BASES["sprites"]),
-                 ("SPR_CHUNK_STRIDE", 0x400000)):
+                 ("SPR_CHUNK_SIZE", 0x400000)):
         e = e.replace(k, hex(v))
     e = re.sub(r"26'h([0-9a-fA-F_]+)", lambda m: hex(int(m.group(1).replace("_", ""), 16)), e)
+    e = re.sub(r"26'd(\d+)", lambda m: m.group(1), e)
     return eval(e, {"__builtins__": {}}, {})
 
 
@@ -371,6 +375,9 @@ def check_set(setname, cfg, args):
         for r in mame:
             if r.get("sdram") == "sprites":
                 r["mode"] = cfg["spr_mode"]
+                # Chunk k of three, from where MAME puts the ROM; the loader
+                # writes that chunk at sprites_base + 2k.
+                r["spr_base"] = BASES["sprites"] + 2 * (r["off"] // cfg["spr_chunk"])
     mra = parse_mra(mra_path)
     rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"), cfg["table"])
     mod_byte, codecs = parse_codecs(mra_path, nparts)
@@ -457,7 +464,10 @@ def check_set(setname, cfg, args):
             if ent["mode"] != rom["mode"]:
                 fail("part %d (%s): table mode %s, MAME %s at region offset 0x%X"
                      % (idx, rom["name"], ent["mode"], rom["mode"], rom["off"]))
-            want_base, disp = expected_base(rom)
+            if "spr_base" in rom:
+                want_base, disp = rom["spr_base"], rom["off"]
+            else:
+                want_base, disp = expected_base(rom)
             got_base = resolve_base(ent["base"])
             if got_base != want_base:
                 fail("part %d (%s): table base 0x%X != expected 0x%X (%s + 0x%X)"

@@ -32,17 +32,14 @@ localparam [25:0] SDR_TILES_BASE   = 26'h050_0000;  //  12 MB  background tiles
 localparam [25:0] SDR_SPRITES_BASE = 26'h110_0000;  //  24 MB  sprites (3 chunks)
 localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
 
-// The three sprite plane-pair chunks. The stride is PER SET -- 4 MB for the
-// SEI252 games, 6 MB for rdft2, 8 MB for rfjet -- because it is the chunk size,
-// which is the sprite region divided by three.
-//
-// rom_loader already LAYS OUT rdft2 at the 6 MB stride (its six sprite ROMs are
-// contiguous from SDR_SPRITES_BASE, which is the same thing). spi_sprite still
-// FETCHES at the 4 MB constant, so it needs this as a port before rdft2's
-// sprites are right on screen. That is the one piece of rdft2 the loader work
-// does not cover.
-localparam [25:0] SPR_CHUNK_STRIDE       = 26'h040_0000;  // SEI252 sets
-localparam [25:0] SPR_CHUNK_STRIDE_RDFT2 = 26'h060_0000;
+// Size of ONE sprite plane-pair chunk in the ROM set -- 4 MB for the SEI252
+// games, 6 MB for rdft2, 8 MB for rfjet. It used to be the address stride
+// between the three chunks in SDRAM; since rom_loader interleaves them
+// (M_SPR_ILV) there is no stride, and what survives is the tile count this
+// implies: elements = chunk / 64, which is what MAME's sprite extra-bank rule
+// is stated in terms of.
+localparam [25:0] SPR_CHUNK_SIZE       = 26'h040_0000;  // SEI252 sets
+localparam [25:0] SPR_CHUNK_SIZE_RDFT2 = 26'h060_0000;
 
 // --------------------------------------------------------------------------
 // Which ROM set is loading. The MRA's mod byte says so: bit 0 picks the SXX2C

@@ -26,11 +26,9 @@
       MAME, including the sprite-heavy title screen. See PLAN.md "rdft2 verified
       against MAME frame by frame".
 
-      One caveat that is not rdft2's: the densest demo-play scene differs by
-      0.17% because the sprite engine runs out of SDRAM bandwidth and drops
-      sprites on nine lines. It matches exactly with the bandwidth limit
-      removed, so the graphics are right and the budget is the constraint --
-      the same budget every set shares.
+      Every scene matches, with no sprites dropped anywhere. The densest one
+      tested runs 16,572 sprite y-hits in a frame and still comes out exact,
+      which it did not before the sprite ROMs were interleaved.
     -->
 
     <!--
@@ -93,7 +91,7 @@
       board, set 0) and rdfts.mra sends nothing at all.
 
       The second element is the codec config: pairs of {part index, codec id}.
-      Part 13 is the compressed sample tail, and codec 1 is CODEC_BPE_DPCM.
+      Part 15 is the compressed sample tail, and codec 1 is CODEC_BPE_DPCM.
       Parts default to codec 0, a straight copy, so nothing else is listed.
       Ids live in rtl/spi_defs.vh and the decoders in rtl/spi_rom_decode.sv.
 
@@ -104,7 +102,7 @@
     -->
     <rom index="1">
         <part>03</part>
-        <part>0D 01</part>
+        <part>0F 01</part>
     </rom>
 
     <rom index="0" zip="rdft2.zip" md5="none">
@@ -129,6 +127,9 @@
           Sprites: 18 MB in three 6 MB plane-pair chunks, and MAME's order is
           obj3, obj2, obj1 -- chunk 0 is obj3, not obj1. The chunks are
           contiguous at this stride, so the loader places all six as one run.
+          One loader part per chunk, two ROMs each; the loader INTERLEAVES the
+          three so a 16-pixel row is twelve contiguous bytes and costs two
+          SDRAM reads instead of three.
         -->
         <part name="obj3.u0434"  crc="e08f42dc"/>
         <part name="obj3b.u0433" crc="1b6a523c"/>
@@ -138,7 +139,7 @@
         <part name="obj1b.u0430" crc="5259321f"/>
 
         <!--
-          YMF271 sample flash, pre-programmed. Loader part 12: the region stamp
+          YMF271 sample flash, pre-programmed. Loader part 14: the region stamp
           plus 0x17C243 bytes of pcm.u0217 at identity offset, 4 + 0x17C243 =
           0x17C247.
         -->
@@ -146,7 +147,7 @@
         <part name="pcm.u0217" crc="2edc30b5" offset="0x000004" length="0x17C243"/>
 
         <!--
-          Loader part 13, CODEC_BPE_DPCM: the compressed tail. 0x4C665 bytes in,
+          Loader part 15, CODEC_BPE_DPCM: the compressed tail. 0x4C665 bytes in,
           0x730ED out. This is a LENGTH-LIMITED slice on purpose -- the rest of
           sound1.u0222 is not sample data. 0x60000-0x7FFFF is rdft2's Z80
           program, which the 386 downloads over port 0x688 at runtime rather

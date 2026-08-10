@@ -582,11 +582,11 @@ module spi_top
 	wire        spr_busy;
 
 	// rdft2 is the RISE10 set: 6 MB plane-pair chunks instead of 4, and the
-	// address-independent crypt instead of SEI252's keyed one. The two always
-	// change together here, but spi_sprite takes them separately because
-	// rdft2us pairs RISE10 with a different board.
+	// address-independent crypt instead of SEI252's keyed one. The chunk size
+	// is no longer an address stride -- the loader interleaves the chunks -- it
+	// is what MAME's extra-bank rule counts tiles with.
 	wire        spr_rise10 = (set_id == SET_RDFT2);
-	wire [25:0] spr_stride = spr_rise10 ? SPR_CHUNK_STRIDE_RDFT2 : SPR_CHUNK_STRIDE;
+	wire [25:0] spr_chunk  = spr_rise10 ? SPR_CHUNK_SIZE_RDFT2 : SPR_CHUNK_SIZE;
 
 	spi_sprite sprites
 	(
@@ -595,7 +595,7 @@ module spi_top
 		.vcnt       (vcnt),
 		.line_start (line_start),
 		.enable     (~layer_en_dbg[4]),
-		.spr_chunk_stride(spr_stride),
+		.spr_chunk_size(spr_chunk),
 		.rise10     (spr_rise10),
 		.spr_addr   (spr_ra),
 		.spr_data   (spr_rd),

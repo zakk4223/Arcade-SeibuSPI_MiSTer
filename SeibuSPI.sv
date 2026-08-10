@@ -312,18 +312,18 @@ end
 // who wants one. Writing byte 0 clears the whole codec table, so a stale
 // assignment cannot survive into the next MRA.
 reg  [7:0] mod_byte   = 8'd0;
-reg [63:0] part_codec = 64'd0;
+reg [127:0] part_codec = 128'd0;
 reg  [7:0] cfg_part   = 8'hFF;
 always @(posedge clk_sys) begin
 	if (ioctl_wr && (ioctl_index == 8'd1)) begin
 		if (~|ioctl_addr[25:0]) begin
 			mod_byte   <= ioctl_dout;
-			part_codec <= 64'd0;
+			part_codec <= 128'd0;
 			cfg_part   <= 8'hFF;
 		end
 		else if (ioctl_addr[0]) cfg_part <= ioctl_dout;
-		else if (cfg_part < 8'd16)
-			part_codec[{cfg_part[3:0], 2'b00} +: 4] <= ioctl_dout[3:0];
+		else if (cfg_part < 8'd32)
+			part_codec[{cfg_part[4:0], 2'b00} +: 4] <= ioctl_dout[3:0];
 	end
 end
 
@@ -473,7 +473,7 @@ wire  [17:2] v_ssrc;
 wire  [15:0] v_wspr, v_wtm;
 wire [15:0] v_spc, v_sfr, v_syw, v_sst, v_yov, v_yac;
 wire [15:0] v_f2w, v_f2r;
-wire  [3:0] ldr_part_end;
+wire  [4:0] ldr_part_end;
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
 wire        ldr_req, ldr_rnw;

@@ -46,10 +46,10 @@ module rom_loader
 	// index-0 download starts, which it is: the HPS sends the mod byte first.
 	input       [1:0] set_id,
 
-	// Codec per part, 4 bits each, part 0 in the low nibble. Comes from the
-	// MRA's index-1 config the same way set_id does, and is all zero
+	// Codec per part, 4 bits each, part 0 in the low nibble, 32 parts. Comes
+	// from the MRA's index-1 config the same way set_id does, and is all zero
 	// (CODEC_RAW) unless the MRA says otherwise. See rtl/spi_rom_decode.sv.
-	input      [63:0] part_codec,
+	input     [127:0] part_codec,
 
 	// SDRAM write port (channel 3, toggle handshake)
 	output reg [25:0] sdr_addr,
@@ -69,7 +69,7 @@ module rom_loader
 	// part is decoded, and then by exactly the expansion.
 	output reg [25:0] bytes_in,
 	output reg [25:0] bytes_out,
-	output reg  [3:0] part_end
+	output reg  [4:0] part_end
 );
 
 `include "spi_defs.vh"
@@ -77,17 +77,17 @@ module rom_loader
 	// ------------------------------------------------------------------
 	// Scatter modes
 	// ------------------------------------------------------------------
-	localparam [3:0] M_LINEAR  = 4'd0;   // dest = base + i
-	localparam [3:0] M_32_B0   = 4'd1;   // dest = base + i*4 + 0
-	localparam [3:0] M_32_B1   = 4'd2;   // dest = base + i*4 + 1
-	localparam [3:0] M_32_B2   = 4'd3;   // dest = base + i*4 + 2
-	localparam [3:0] M_32_B3   = 4'd4;   // dest = base + i*4 + 3
-	localparam [3:0] M_32_W01  = 4'd5;   // dest = base + (i>>1)*4 + 0 + (i&1)
-	localparam [3:0] M_32_W23  = 4'd6;   // dest = base + (i>>1)*4 + 2 + (i&1)
-	localparam [3:0] M_24_B0   = 4'd7;   // dest = base + i*3 + 0
-	localparam [3:0] M_24_B1   = 4'd8;   // dest = base + i*3 + 1
-	localparam [3:0] M_24_B2   = 4'd9;   // dest = base + i*3 + 2
-	localparam [3:0] M_24_W01  = 4'd10;  // dest = base + (i>>1)*3 + (1 - (i&1))
+	localparam [4:0] M_LINEAR  = 5'd0;   // dest = base + i
+	localparam [4:0] M_32_B0   = 5'd1;   // dest = base + i*4 + 0
+	localparam [4:0] M_32_B1   = 5'd2;   // dest = base + i*4 + 1
+	localparam [4:0] M_32_B2   = 5'd3;   // dest = base + i*4 + 2
+	localparam [4:0] M_32_B3   = 5'd4;   // dest = base + i*4 + 3
+	localparam [4:0] M_32_W01  = 5'd5;   // dest = base + (i>>1)*4 + 0 + (i&1)
+	localparam [4:0] M_32_W23  = 5'd6;   // dest = base + (i>>1)*4 + 2 + (i&1)
+	localparam [4:0] M_24_B0   = 5'd7;   // dest = base + i*3 + 0
+	localparam [4:0] M_24_B1   = 5'd8;   // dest = base + i*3 + 1
+	localparam [4:0] M_24_B2   = 5'd9;   // dest = base + i*3 + 2
+	localparam [4:0] M_24_W01  = 5'd10;  // dest = base + (i>>1)*3 + (1 - (i&1))
 	// LINEAR, plus MAME's sprite_reorder() rotated into the destination: within
 	// each 64-byte group the 32 words are permuted so that output word 2j comes
 	// from input word j and output word 2j+1 from input word j+16. As an index
@@ -101,7 +101,26 @@ module rom_loader
 	// row 32 bytes apart instead of 2, so a row would cost six SDRAM reads
 	// instead of three, doubling sprite bandwidth on the one set that already
 	// has the most sprite data.
-	localparam [3:0] M_SPR_R10 = 4'd11;
+	// SPRITE INTERLEAVE. The three plane-pair chunks used to sit megabytes
+	// apart, so a 16-pixel row -- two 16-bit words from each -- cost THREE
+	// SDRAM round trips. Interleaved, a row's twelve bytes are contiguous:
+	//
+	//   dest = base + tile*192 + row*12 + half*6 + byte
+	//
+	// and twelve bytes from a 4- or 8-aligned start never span more than two
+	// 8-byte reads, so a row costs TWO. That is a third off the sprite engine's
+	// bus demand, which is what it starves on (PLAN.md, sprite starvation).
+	//
+	// Which chunk a part carries is folded into its BASE, as +0, +2 or +4 --
+	// the three chunks' words alternate inside each 6-byte half -- so no extra
+	// table field is needed.
+	//
+	// M_SPR_ILV_R is the same with MAME's sprite_reorder() applied to the
+	// source index first, for the RISE10 sets. The two permutations compose:
+	// reorder moves words inside a 64-byte group, which is one tile, so it
+	// changes row and half but never the tile.
+	localparam [4:0] M_SPR_ILV   = 5'd11;
+	localparam [4:0] M_SPR_ILV_R = 5'd12;
 
 	// Part indices are 4 bits, and part_end (which spi_jtag_peek reports by bit
 	// position) is 4 bits with it. That is the reason rdft2's six sprite ROMs
@@ -109,11 +128,11 @@ module rom_loader
 	// contiguous from SDR_SPRITES_BASE, so one LINEAR run places all of them,
 	// and 19 parts would not have fit. check_mra.py still checks all six
 	// individually, by walking that part's MRA members.
-	localparam [3:0] NPARTS_RDFTS = 4'd14;
-	localparam [3:0] NPARTS_RDFT  = 4'd15;
-	localparam [3:0] NPARTS_RDFT2 = 4'd14;
+	localparam [4:0] NPARTS_RDFTS = 5'd14;
+	localparam [4:0] NPARTS_RDFT  = 5'd15;
+	localparam [4:0] NPARTS_RDFT2 = 5'd16;
 
-	reg [3:0] nparts;
+	reg [4:0] nparts;
 	always @* case (set_id)
 		SET_RDFT : nparts = NPARTS_RDFT;
 		SET_RDFT2: nparts = NPARTS_RDFT2;
@@ -136,13 +155,13 @@ module rom_loader
 	// measured, the 386 never reads that window once the flash is programmed
 	// (section 0).
 	// ------------------------------------------------------------------
-	reg [3:0]  part;
+	reg [4:0]  part;
 	reg [25:0] in_off;     // bytes of this part taken from ioctl
 	reg [25:0] out_off;    // bytes of this part emitted into SDRAM
 
 	reg [25:0] part_base;
 	reg [25:0] part_size;
-	reg [3:0]  part_mode;
+	reg [4:0]  part_mode;
 
 	always @* begin
 		case (set_id)
@@ -150,20 +169,20 @@ module rom_loader
 		// ---- TABLE rdft: SPI cartridge, pre-flashed (SXX2C) ----
 		SET_RDFT: case (part)
 			//                                          base   size          mode
-			4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
-			4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
-			4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
-			4'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
-			4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
-			4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
-			4'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
-			4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
-			4'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
-			4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
-			4'd10: begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
-			4'd11: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
-			4'd12: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
-			4'd13: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+			5'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
+			5'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
+			5'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
+			5'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
+			5'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
+			5'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
+			5'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
+			5'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
+			5'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
+			5'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
+			5'd10: begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
+			5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-1.u0322
+			5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-2.u0324
+			5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-3.u0323
 			default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
 		endcase
 
@@ -172,61 +191,74 @@ module rom_loader
 		// Differences from rdft, all read off MAME's ROM_START(rdft2):
 		//   * twice the tiles (12 MB), so the second bg group sits at +6 MB
 		//   * text lanes come in the order fix0(1), fix1(0), fixp(2)
-		//   * 18 MB of sprites as three 6 MB plane-pair chunks, which are
-		//     contiguous and so load as ONE part -- obj3 first, then obj2,
-		//     then obj1, which is MAME's order and not the numeric one. It is
-		//     M_SPR_R10, not M_LINEAR: RISE10 sets carry sprite_reorder()
+		//   * 18 MB of sprites as three 6 MB plane-pair chunks, one loader part
+		//     each -- obj3 first, then obj2, then obj1, which is MAME's order
+		//     and not the numeric one. M_SPR_ILV_R, not M_SPR_ILV: RISE10 sets
+		//     carry sprite_reorder() as well as the interleave
 		//   * the sample flash is two parts: the region stamp plus a verbatim
 		//     slice of pcm.u0217, then sound1.u0222 COMPRESSED. The MRA marks
 		//     that last part CODEC_BPE_DPCM, so its size here is the
 		//     compressed length -- 0x4C665 in, 0x730ED out (PLAN.md 0).
 		SET_RDFT2: case (part)
 		//                                                    base   size          mode
-		4'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.tun
-		4'd1 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B1;  end // prg1.bin
-		4'd2 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B2;  end // prg2.bin
-		4'd3 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B3;  end // prg3.bin
-		4'd4 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B1;  end // fix0.u0524
-		4'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B0;  end // fix1.u0518
-		4'd6 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // fixp.u0514
-		4'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-1d.u0535
-		4'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0537
-		4'd9 : begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-2d.u0536
-		4'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-2p.u0538
-		4'd11: begin part_base = SDR_SPRITES_BASE;                  part_size = 26'h120_0000; part_mode = M_SPR_R10; end // sprites: obj3 obj3b obj2 obj2b obj1 obj1b
-		4'd12: begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
+		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.tun
+		5'd1 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B1;  end // prg1.bin
+		5'd2 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B2;  end // prg2.bin
+		5'd3 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B3;  end // prg3.bin
+		5'd4 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B1;  end // fix0.u0524
+		5'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B0;  end // fix1.u0518
+		5'd6 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // fixp.u0514
+		5'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-1d.u0535
+		5'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0537
+		5'd9 : begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-2d.u0536
+		5'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-2p.u0538
+		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 0: obj3.u0434 + obj3b.u0433
+		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 1: obj2.u0431 + obj2b.u0432
+		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 2: obj1.u0429 + obj1b.u0430
+		5'd14: begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
 		default:begin part_base = SDR_PCM_BASE + 26'h017_C247;      part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----
 		default: case (part)
 			//                                          base   size          mode
-			4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
-			4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
-			4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h010_0000; part_mode = M_32_W23; end // raiden-f_prg34.u0262
-			4'd3 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h002_0000; part_mode = M_LINEAR; end // seibu_zprg.u1139
-			4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h002_0000; part_mode = M_24_W01; end // raiden-f_fix.u0535
-			4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_fix2.u0528
-			4'd6 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0526
-			4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0531
-			4'd8 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0534
-			4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u0530
-			4'd10: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
-			4'd11: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
-			4'd12: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+			5'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
+			5'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
+			5'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h010_0000; part_mode = M_32_W23; end // raiden-f_prg34.u0262
+			5'd3 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h002_0000; part_mode = M_LINEAR; end // seibu_zprg.u1139
+			5'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h002_0000; part_mode = M_24_W01; end // raiden-f_fix.u0535
+			5'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_fix2.u0528
+			5'd6 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0526
+			5'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0531
+			5'd8 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0534
+			5'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u0530
+			5'd10: begin part_base = SDR_SPRITES_BASE + 26'd0;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-1.u0322
+			5'd11: begin part_base = SDR_SPRITES_BASE + 26'd2;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-2.u0324
+			5'd12: begin part_base = SDR_SPRITES_BASE + 26'd4;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-3.u0323
 			default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // raiden-f_pcm2.u0975
 		endcase
 
 		endcase
 	end
 
-	wire last_part = (part == nparts - 4'd1);
+	wire last_part = (part == nparts - 5'd1);
 
 	// Destination offset within the part, per scatter mode. This indexes
 	// EMITTED bytes: for a decoded part the source offset is not the
 	// destination offset, and it is the output that has to land in order.
 	wire [25:0] off   = out_off;
 	wire [25:0] off_h = {1'b0, out_off[25:1]};   // off >> 1
+
+	// Sprite interleave. `sri` is the source index with sprite_reorder applied
+	// (a rotate inside each 64-byte group); `siv` picks it or the raw index.
+	// tile*192 is tile*128 + tile*64 and row*12 is row*8 + row*4, so the whole
+	// thing is shifts and adds.
+	wire [25:0] sri  = {off[25:6], off[4:1], off[5], off[0]};
+	wire [25:0] siv  = (part_mode == M_SPR_ILV_R) ? sri : off;
+	wire [25:0] ilv  = {siv[24:6], 7'd0} + {siv[25:6], 6'd0}
+	                 + {19'd0, siv[5:2], 3'd0} + {20'd0, siv[5:2], 2'd0}
+	                 + (siv[1] ? 26'd6 : 26'd0) + {25'd0, siv[0]};
+
 	reg [25:0] scat;
 	always @* begin
 		// Every term is written out at the full 26 bits. These used to be sized
@@ -245,7 +277,7 @@ module rom_loader
 			M_24_B1 : scat = {off[24:0], 1'b0} + off + 26'd1;
 			M_24_B2 : scat = {off[24:0], 1'b0} + off + 26'd2;
 			M_24_W01: scat = {off_h[24:0], 1'b0} + off_h + {25'd0, ~off[0]};
-			M_SPR_R10: scat = {off[25:6], off[4:1], off[5], off[0]};
+			M_SPR_ILV, M_SPR_ILV_R: scat = ilv;
 			default : scat =  off;
 		endcase
 	end
@@ -303,7 +335,7 @@ module rom_loader
 
 	always @(posedge clk) begin
 		if (reset) begin
-			part          <= 4'd0;
+			part          <= 5'd0;
 			in_off        <= 26'd0;
 			out_off       <= 26'd0;
 			busy          <= 1'b0;
@@ -317,7 +349,7 @@ module rom_loader
 			dl_d          <= 1'b0;
 			bytes_in      <= 26'd0;
 			bytes_out     <= 26'd0;
-			part_end      <= 4'd0;
+			part_end      <= 5'd0;
 		end
 		else begin
 			part_step <= 1'b0;
@@ -350,7 +382,7 @@ module rom_loader
 				in_off    <= 26'd0;
 				out_off   <= 26'd0;
 				part_step <= 1'b1;
-				if (!last_part) part <= part + 4'd1;
+				if (!last_part) part <= part + 5'd1;
 			end
 
 			if (download) begin
@@ -372,7 +404,7 @@ module rom_loader
 				// write has retired.
 				if (!busy && dec_idle && !hold_valid) begin
 					if (seen_download) rom_ready <= 1'b1;
-					part    <= 4'd0;
+					part    <= 5'd0;
 					in_off  <= 26'd0;
 					out_off <= 26'd0;
 				end

@@ -834,7 +834,7 @@ seconds reflashing. Two traps worth keeping: `SECONDS` must cover `FRAME` at
 just empty; and the capture now writes its set name into `regs.txt`, so the
 bench cannot be pointed at an rdft2 capture with rdfts's keys.
 
-### Sprite starvation: measured, improved 2.8x, not eliminated (2026-08-10)
+### Sprite starvation: measured, then eliminated by interleaving (2026-08-10)
 
 The one scene that did not match, rdft2 frame 5400, is down from **377 wrong
 pixels to 133** (0.49% -> 0.17%). Everything else still matches exactly. The
@@ -865,7 +865,8 @@ the ack cycle: `F_REQ` is gone and requests chain straight out of `F_WAIT`.
 That is ~4 cycles a column, ~340 of a 3200-cycle budget on a dense line, and it
 is what took 377 down to 133.
 
-**What was tried and reverted.** The 320-cycle clear pass at the top of every
+**What was tried and reverted, and did not turn out to be needed.** The
+320-cycle clear pass at the top of every
 line is 10% of the budget, and the standard way to remove it is a generation
 tag: give each line-buffer entry the bank's tag, flip the tag when the bank is
 re-rendered, treat a mismatch as invalid. Implemented, it lost every sprite on
@@ -887,10 +888,49 @@ contiguous, and interleaving needs one part per chunk, which puts the table at
 16. `part` and `part_end` are 4 bits and `part_end` is decoded by bit position
 in `tools/jtag_peek.tcl`, so it is a wider change than it looks.
 
-**Is 133 pixels worth more work?** It is one scene of ten, transient sprites on
-a busy demo-play frame, and the same budget constrains every set. The honest
-position is that the sprite engine is bandwidth-bound at ~85 columns a line and
-the next real gain is the interleave, not another micro-optimisation.
+**Then the interleave, and starvation is gone.** All ten rdft2 scenes and rdfts
+now match MAME exactly with **0 starved lines**, including a scene at 16,572
+y-hits -- denser than the 12,981 one that used to fail.
+
+The three plane-pair chunks used to sit megabytes apart, so a 16-pixel row cost
+three round trips. `rom_loader` now interleaves them:
+
+    dest = sprites_base + 2k + tile*192 + row*12 + half*6 + byte
+
+A tile becomes 192 contiguous bytes holding c0.w0 c1.w0 c2.w0 c0.w1 c1.w1 c2.w1
+per row, and twelve bytes from a 4- or 8-aligned start never span more than two
+8-byte reads -- so a row costs TWO. Measured on the worst line: **263 sprite
+requests down to 184 (-30%)**, stall cycles 705 down to ~535.
+
+Three things made this cheap where it looked expensive:
+
+* **The chunk index folds into the part BASE**, as +0/+2/+4, so no new table
+  field is needed -- the three chunks' words simply alternate.
+* **It composes with sprite_reorder.** Both are permutations inside one 64-byte
+  group, which is one tile, so `M_SPR_ILV_R` applies the reorder to the source
+  index and then the interleave. rdft2 needs both; the fetch sees neither.
+* **The fetch got simpler, not harder.** No chunk base mux, no per-chunk data
+  mux -- two reads joined into 96 bits and sliced six ways. `spr_chunk_stride`
+  is gone; what remains is `spr_chunk_size`, kept only because MAME's
+  extra-bank rule counts tiles with it.
+
+The cost was the part index. rdft2's sprites had to become one part per chunk,
+which puts its table at 16, so `part`, `part_end`, `NPARTS_*` and the codec
+vector all widened -- and `spi_jtag_peek`'s probe with them. Its TCL decoder was
+re-derived rather than patched, because it was ALREADY wrong twice over: it read
+`bytes_in` as 25 bits after the map went to 26, and `part_end` as 4 bits. Every
+field after a widened one moves, so the whole offset list is now written out
+with the widths beside it.
+
+**What is checked.** `tb_rom_loader` proves `M_SPR_ILV_R` is MAME's own
+`sprite_reorder` composed with the interleave (by inverting the interleave to
+isolate the permutation), that three chunks pack into 192 bytes with no
+collision, and that no row spans three reads. `tb_video`'s sprite reference
+de-interleaves the SDRAM image before handing it to MAME's decryptor, so a wrong
+split would show up as wrong pixels rather than passing quietly.
+
+**The clear pass is still there.** The generation-tag attempt above stays
+reverted and stays worth ~10%, but nothing needs it now.
 
 ### The authentic flash path is still the general answer
 

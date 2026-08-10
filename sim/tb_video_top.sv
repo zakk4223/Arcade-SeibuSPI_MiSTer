@@ -16,7 +16,7 @@ module tb_video_top
 	// the tile region SIZE), and the sprite chunk stride and crypt.
 	input      [15:0] bg_fore_pos,
 	input      [23:0] tkey1, tkey2, tkey3,
-	input      [25:0] spr_chunk_stride,
+	input      [25:0] spr_chunk_size,
 	input             rise10,
 
 	// CRTC state
@@ -177,7 +177,7 @@ module tb_video_top
 		.clk(clk), .reset(reset),
 		.vcnt(vcnt), .line_start(line_start),
 		.enable(~layer_enable[4]),
-		.spr_chunk_stride(spr_chunk_stride), .rise10(rise10),
+		.spr_chunk_size(spr_chunk_size), .rise10(rise10),
 		.spr_addr(spr_ra), .spr_data(spr_rd),
 		.sdr_addr(spr_sdr_addr), .sdr_dout(spr_sdr_dout),
 		.sdr_req(spr_sdr_req), .sdr_ack(spr_sdr_ack),

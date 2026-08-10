@@ -150,12 +150,12 @@ int main(int argc, char **argv)
     dut->tkey1            = is_rdft2 ? 0x823146 : 0x5A3845;
     dut->tkey2            = is_rdft2 ? 0x4DE2F8 : 0x77CF5B;
     dut->tkey3            = is_rdft2 ? 0x157ADC : 0x1378DF;
-    dut->spr_chunk_stride = is_rdft2 ? 0x600000 : 0x400000;
+    dut->spr_chunk_size   = is_rdft2 ? 0x600000 : 0x400000;
     dut->rise10           = is_rdft2;
     printf("set: %s  (fore_base %04X, keys %06X/%06X/%06X, chunk %06X, %s)\n",
            game.c_str(), (unsigned)dut->bg_fore_pos, (unsigned)dut->tkey1,
            (unsigned)dut->tkey2, (unsigned)dut->tkey3,
-           (unsigned)dut->spr_chunk_stride, is_rdft2 ? "RISE10" : "SEI252");
+           (unsigned)dut->spr_chunk_size, is_rdft2 ? "RISE10" : "SEI252");
 
     dut->layer_enable     = regs["layer_enable"].at(0);
     dut->rowscroll_enable = regs["rowscroll"].at(0);
@@ -627,13 +627,24 @@ int main(int argc, char **argv)
     static std::vector<uint8_t> sprrom;
     const size_t SPR_CHUNK = is_rdft2 ? 0x600000 : 0x400000;
     if (sprrom.empty()) {
+        // The SDRAM image is interleaved (rom_loader M_SPR_ILV), so pull the
+        // three chunks back apart before handing them to MAME's decryptor,
+        // which expects them laid end to end. This is the inverse of
+        //   dest = 2k + tile*192 + row*12 + half*6 + byte
+        // and it doubles as a check on the interleave: if the split were wrong
+        // the decrypted pixels would not match what the RTL emits.
         // SDR_SPRITES_BASE in rtl/spi_defs.vh. This said 0x0A80000 until now,
         // which is where the sprites lived before the map was re-laid for the
         // 26-bit widening -- so this whole check has been comparing against
         // tile data for a while and reporting mismatches nobody read.
         const size_t SPR_BASE = 0x1100000;
-        sprrom.assign(sdram.begin() + SPR_BASE,
-                      sdram.begin() + SPR_BASE + 3 * SPR_CHUNK);
+        sprrom.assign(3 * SPR_CHUNK, 0);
+        for (size_t k = 0; k < 3; k++)
+            for (size_t i = 0; i < SPR_CHUNK; i++) {
+                size_t d = 2 * k + (i >> 6) * 192 + ((i >> 2) & 15) * 12
+                                 + ((i >> 1) & 1) * 6 + (i & 1);
+                sprrom[k * SPR_CHUNK + i] = sdram[SPR_BASE + d];
+            }
         if (is_rdft2) {
             // The SDRAM image is ALREADY sprite_reorder()ed -- rom_loader does
             // it at load time (M_SPR_R10). MAME's decryptor reorders at the

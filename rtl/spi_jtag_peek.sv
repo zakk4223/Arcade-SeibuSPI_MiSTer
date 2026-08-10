@@ -39,7 +39,7 @@ module spi_jtag_peek
 	input      [15:0] passes,
 	input      [15:0] fails,
 	input      [25:0] bytes_in,
-	input       [3:0] part_end,
+	input       [4:0] part_end,
 
 	// Live counters from the board, so the vital signs can be read over JTAG
 	// instead of squinting at bars on a capture card.

@@ -38,7 +38,7 @@ static const uint32_t SPRITES_BASE = 0x1100000;
 static const uint32_t SDR_SIZE     = 0x2900000;
 
 enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
-            W24_B0, W24_B1, W24_B2, W24_W01, SPR_R10 };
+            W24_B0, W24_B1, W24_B2, W24_W01, SPR_ILV, SPR_ILV_R };
 
 struct Part { const char *name; uint32_t base; uint32_t size; Mode mode; };
 
@@ -56,9 +56,9 @@ static const Part parts_sxx2e[] = {
     { "gun_dogs_bg1-p.u0531", TILES_BASE,                0x100000, W24_B2  },
     { "gun_dogs_bg2-d.u0534", TILES_BASE   + 0x300000,   0x200000, W24_W01 },
     { "gun_dogs_bg2-p.u0530", TILES_BASE   + 0x300000,   0x100000, W24_B2  },
-    { "gun_dogs_obj-1.u0322", SPRITES_BASE + 0x000000,   0x400000, LINEAR  },
-    { "gun_dogs_obj-2.u0324", SPRITES_BASE + 0x400000,   0x400000, LINEAR  },
-    { "gun_dogs_obj-3.u0323", SPRITES_BASE + 0x800000,   0x400000, LINEAR  },
+    { "gun_dogs_obj-1.u0322", SPRITES_BASE + 0,          0x400000, SPR_ILV },
+    { "gun_dogs_obj-2.u0324", SPRITES_BASE + 2,          0x400000, SPR_ILV },
+    { "gun_dogs_obj-3.u0323", SPRITES_BASE + 4,          0x400000, SPR_ILV },
     { "raiden-f_pcm2.u0975",  PCM_BASE,                  0x200000, LINEAR  },
 };
 
@@ -79,9 +79,9 @@ static const Part parts_sxx2c[] = {
     { "gun_dogs_bg1-p.u0410",        TILES_BASE,              0x100000, W24_B2  },
     { "gun_dogs_bg2-d.u0424",        TILES_BASE + 0x300000,   0x200000, W24_W01 },
     { "gun_dogs_bg2-p.u049",         TILES_BASE + 0x300000,   0x100000, W24_B2  },
-    { "gun_dogs_obj-1.u0322",        SPRITES_BASE + 0x000000, 0x400000, LINEAR  },
-    { "gun_dogs_obj-2.u0324",        SPRITES_BASE + 0x400000, 0x400000, LINEAR  },
-    { "gun_dogs_obj-3.u0323",        SPRITES_BASE + 0x800000, 0x400000, LINEAR  },
+    { "gun_dogs_obj-1.u0322",        SPRITES_BASE + 0,        0x400000, SPR_ILV },
+    { "gun_dogs_obj-2.u0324",        SPRITES_BASE + 2,        0x400000, SPR_ILV },
+    { "gun_dogs_obj-3.u0323",        SPRITES_BASE + 4,        0x400000, SPR_ILV },
     { "pre-programmed flash image",  PCM_BASE,                0x200000, LINEAR  },
 };
 
@@ -102,7 +102,9 @@ static const Part parts_rdft2[] = {
     { "bg-1p.u0537",                 TILES_BASE,              0x200000,  W24_B2  },
     { "bg-2d.u0536",                 TILES_BASE + 0x600000,   0x400000,  W24_W01 },
     { "bg-2p.u0538",                 TILES_BASE + 0x600000,   0x200000,  W24_B2  },
-    { "sprites, six ROMs",           SPRITES_BASE,            0x1200000, SPR_R10 },
+    { "sprites chunk 0",             SPRITES_BASE + 0,        0x600000,  SPR_ILV_R },
+    { "sprites chunk 1",             SPRITES_BASE + 2,        0x600000,  SPR_ILV_R },
+    { "sprites chunk 2",             SPRITES_BASE + 4,        0x600000,  SPR_ILV_R },
     { "flash head: stamp + pcm",     PCM_BASE,                0x17C247,  LINEAR  },
     { "flash tail: sound1, packed",  PCM_BASE + 0x17C247,     0x04C665,  LINEAR  },
 };
@@ -121,11 +123,15 @@ static uint32_t dest_of(const Part &p, uint32_t i)
     case W24_B1:  return p.base + i * 3 + 1;
     case W24_B2:  return p.base + i * 3 + 2;
     case W24_W01: return p.base + (i >> 1) * 3 + (1 - (i & 1));
-    // LINEAR with MAME's sprite_reorder() folded into the destination: inside
-    // each 64-byte group the word index rotates left by one bit.
-    case SPR_R10: return p.base + ((i & ~0x3Fu) | ((i & 0x1Eu) << 1)
-                                                | ((i & 0x20u) >> 4)
-                                                | (i & 1u));
+    // Sprite interleave: tile*192 + row*12 + half*6 + byte, so the three
+    // plane-pair chunks' words alternate and a 16-pixel row is contiguous.
+    // SPR_ILV_R additionally folds in MAME's sprite_reorder(), which rotates
+    // the word index inside each 64-byte group.
+    case SPR_ILV_R: i = (i & ~0x3Fu) | ((i & 0x1Eu) << 1)
+                                     | ((i & 0x20u) >> 4) | (i & 1u);
+                    /* fall through */
+    case SPR_ILV:   return p.base + (i >> 6) * 192 + ((i >> 2) & 15) * 12
+                                  + ((i >> 1) & 1) * 6 + (i & 1);
     }
     return 0;
 }
@@ -138,17 +144,53 @@ static int check_spr_r10()
     for (int i = 0; i < 64; i++) want[i] = (uint8_t)i;
     sprite_reorder(want);
 
-    Part p = { "reorder", 0, 64, SPR_R10 };
-    for (int i = 0; i < 64; i++) got[dest_of(p, (uint32_t)i)] = (uint8_t)i;
-
+    // SPR_ILV_R is sprite_reorder composed with the interleave, so undo the
+    // interleave to isolate the reorder and compare that against MAME's copy.
+    Part pr = { "reorder", 0, 64, SPR_ILV_R };
+    Part pi = { "interleave", 0, 64, SPR_ILV };
+    for (int i = 0; i < 64; i++) {
+        // dest_of(SPR_ILV, j) is a bijection on a 64-byte group, so inverting
+        // it turns the composed mapping back into the plain permutation.
+        uint32_t d = dest_of(pr, (uint32_t)i);
+        int j = 0;
+        while (j < 64 && dest_of(pi, (uint32_t)j) != d) j++;
+        if (j == 64) { printf("FAIL: SPR_ILV is not a bijection on a group\n"); return 1; }
+        got[j] = (uint8_t)i;
+    }
     for (int i = 0; i < 64; i++) {
         if (got[i] != want[i]) {
-            printf("FAIL: SPR_R10 byte %d -> %d, MAME's sprite_reorder says %d\n",
+            printf("FAIL: SPR_ILV_R byte %d -> %d, MAME's sprite_reorder says %d\n",
                    i, got[i], want[i]);
             return 1;
         }
     }
-    printf("PASS: the SPR_R10 scatter is MAME's sprite_reorder, all 64 bytes\n");
+
+    // And the interleave itself: one tile from each of three chunks must fill
+    // exactly 192 contiguous bytes with no collisions, and a 16-pixel row's
+    // twelve bytes must never span three 8-byte reads -- which is the entire
+    // point of the layout.
+    int slot[192];
+    for (int i = 0; i < 192; i++) slot[i] = -1;
+    for (int k = 0; k < 3; k++) {
+        Part pk = { "chunk", (uint32_t)(2 * k), 64, SPR_ILV };
+        for (int i = 0; i < 64; i++) {
+            uint32_t d = dest_of(pk, (uint32_t)i);
+            if (d >= 192 || slot[d] >= 0) {
+                printf("FAIL: interleave collision at %u (chunk %d byte %d)\n", d, k, i);
+                return 1;
+            }
+            slot[d] = k;
+        }
+    }
+    for (int r = 0; r < 16; r++) {
+        uint32_t start = (uint32_t)r * 12;
+        if (((start + 11) >> 3) - (start >> 3) + 1 > 2) {
+            printf("FAIL: row %d spans more than two 8-byte reads\n", r);
+            return 1;
+        }
+    }
+    printf("PASS: SPR_ILV_R is MAME's sprite_reorder, and the interleave packs\n"
+           "      three chunks into 192 bytes with every row inside two reads\n");
     return 0;
 }
 
@@ -217,7 +259,7 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
     printf("--- %s ---\n", label);
     Vrom_loader *dut = new Vrom_loader;
     dut->set_id     = set_id;
-    dut->part_codec = 0;   // every part a straight copy unless told otherwise
+    for (int i = 0; i < 4; i++) dut->part_codec[i] = 0;   // all straight copies
 
     std::vector<uint8_t> cstream, cexpect;
     if (codec_part >= 0) {
@@ -231,7 +273,7 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
                    cstream.size(), parts[codec_part].size);
             return 1;
         }
-        dut->part_codec = 1ull << (codec_part * 4);   // CODEC_BPE_DPCM
+        dut->part_codec[codec_part / 8] = 1u << ((codec_part % 8) * 4);  // CODEC_BPE_DPCM
         printf("part %d decoded: %u in -> %zu out (%.3fx)\n", codec_part,
                parts[codec_part].size, cexpect.size(),
                (double)cexpect.size() / (double)parts[codec_part].size);
@@ -406,6 +448,6 @@ int main(int argc, char **argv)
     // region layout says, across a 6 MB tile stride, a six-ROM sprite run and
     // a part whose output length is not its input length.
     rc = run_set(parts_rdft2, (int)(sizeof(parts_rdft2) / sizeof(parts_rdft2[0])),
-                 2, "rdft2 (SXX2C, decoded sample flash)", 13);
+                 2, "rdft2 (SXX2C, decoded sample flash)", 15);
     return rc;
 }

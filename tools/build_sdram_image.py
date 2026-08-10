@@ -51,9 +51,11 @@ PARTS_RDFTS = [
     ("tiles",   0x3400794a, 0x100000, "W24_B2",  0),
     ("tiles",   0x61cd2991, 0x200000, "W24_W01", 0x300000),
     ("tiles",   0x502d5799, 0x100000, "W24_B2",  0x300000),
-    ("sprites", 0x59d86c99, 0x400000, "LINEAR",  0x000000),
-    ("sprites", 0x1ceb0b6f, 0x400000, "LINEAR",  0x400000),
-    ("sprites", 0x36e93234, 0x400000, "LINEAR",  0x800000),
+    # Interleaved: chunk k lands at +2k inside each 6-byte half, so the three
+    # chunks' words alternate and a 16-pixel row is twelve contiguous bytes.
+    ("sprites", 0x59d86c99, 0x400000, "SPR_ILV", 0),
+    ("sprites", 0x1ceb0b6f, 0x400000, "SPR_ILV", 2),
+    ("sprites", 0x36e93234, 0x400000, "SPR_ILV", 4),
     ("pcm",     0x3f8d4a48, 0x200000, "LINEAR",  0),
 ]
 
@@ -74,12 +76,16 @@ PARTS_RDFT2 = [
     # Three 6 MB plane-pair chunks, obj3 first. SPR_R10 is LINEAR plus
     # sprite_reorder(); every offset here is 64-byte aligned, so applying the
     # permutation per ROM is the same as applying it across the whole run.
-    ("sprites", 0xe08f42dc, 0x400000, "SPR_R10", 0x0000000),
-    ("sprites", 0x1b6a523c, 0x200000, "SPR_R10", 0x0400000),
-    ("sprites", 0x7aeadd8e, 0x400000, "SPR_R10", 0x0600000),
-    ("sprites", 0x5d790a5d, 0x200000, "SPR_R10", 0x0a00000),
-    ("sprites", 0xc2c50f02, 0x400000, "SPR_R10", 0x0c00000),
-    ("sprites", 0x5259321f, 0x200000, "SPR_R10", 0x1000000),
+    # Three 6 MB chunks, each a pair of ROMs. SPR_ILV_R is the interleave with
+    # MAME's sprite_reorder() applied to the source index first. `off` is the
+    # chunk slot (+0/+2/+4), and the second ROM of a pair continues its chunk,
+    # which the `skip` field carries as a source-index bias.
+    ("sprites", 0xe08f42dc, 0x400000, "SPR_ILV_R", 0, 0x000000),
+    ("sprites", 0x1b6a523c, 0x200000, "SPR_ILV_R", 0, 0x400000),
+    ("sprites", 0x7aeadd8e, 0x400000, "SPR_ILV_R", 2, 0x000000),
+    ("sprites", 0x5d790a5d, 0x200000, "SPR_ILV_R", 2, 0x400000),
+    ("sprites", 0xc2c50f02, 0x400000, "SPR_ILV_R", 4, 0x000000),
+    ("sprites", 0x5259321f, 0x200000, "SPR_ILV_R", 4, 0x400000),
     # pcm is not a part: rdft2's sample flash is derived, see FLASH below.
 ]
 
@@ -91,6 +97,13 @@ SETS = {
 
 
 def dest_of(mode, i):
+    # Sprite interleave: tile*192 + row*12 + half*6 + byte, optionally with
+    # sprite_reorder() folded into the source index first. See
+    # rtl/rom_loader.sv M_SPR_ILV.
+    if mode in ("SPR_ILV", "SPR_ILV_R"):
+        if mode == "SPR_ILV_R":
+            i = (i & ~0x3F) | ((i & 0x1E) << 1) | ((i & 0x20) >> 4) | (i & 1)
+        return (i >> 6) * 192 + ((i >> 2) & 15) * 12 + ((i >> 1) & 1) * 6 + (i & 1)
     if mode == "LINEAR":  return i
     if mode == "W32_B0":  return i * 4
     if mode == "W32_B1":  return i * 4 + 1
@@ -147,7 +160,9 @@ def main():
     image = bytearray(b"\xFF" * SDRAM_SIZE)
     placed = 0
 
-    for region, crc, size, mode, off in PARTS:
+    for part in PARTS:
+        region, crc, size, mode, off = part[:5]
+        skip = part[5] if len(part) > 5 else 0
         if want_regions and region not in want_regions:
             continue
         name = by_crc.get(crc)
@@ -159,11 +174,9 @@ def main():
         if binascii.crc32(data) & 0xFFFFFFFF != crc:
             raise SystemExit("%s failed CRC check" % name)
 
-        if mode == "SPR_R10" and off % 64:
-            raise SystemExit("SPR_R10 offset 0x%X is not 64-byte aligned" % off)
         base = BASE[region] + off
         for i, b in enumerate(data):
-            image[base + dest_of(mode, i)] = b
+            image[base + dest_of(mode, i + skip)] = b
         placed += 1
         print("  %-8s %-28s %8d  %s" % (region, name, size, mode))
 
@@ -180,8 +193,8 @@ def main():
 
     if concat:
         blob = bytearray()
-        for region, crc, size, mode, off in PARTS:
-            blob += zf.read(by_crc[crc])
+        for part in PARTS:
+            blob += zf.read(by_crc[part[1]])
         if cfg["flash"]:
             # Exactly what mra/rdft2.mra sends for the two sample parts: the
             # stamp and a slice of pcm, then the COMPRESSED tail. The loader

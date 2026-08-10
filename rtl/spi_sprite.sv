@@ -33,12 +33,16 @@
 //  holds MORE than 0x10000 tiles, which is MAME's own gfxbank_callback rule
 //  (seibuspi_v.cpp:370). The SEI252 sets have exactly 0x10000 tiles per 4 MB
 //  chunk so it never fires there; rdft2's 6 MB chunks hold 0x18000 and it does.
-//  That condition is read off spr_chunk_stride rather than a separate flag,
+//  That condition is read off spr_chunk_size rather than a separate flag,
 //  because elements = chunk / 64 and the two cannot disagree that way.
 //
-//  Graphics are three plane-pair chunks 4 MB apart, 64 bytes per tile, 4 bytes
-//  per row. One 64-bit SDRAM read per chunk covers a row, so a 16-pixel row
-//  costs three reads and two decrypt passes (8 pixels each).
+//  Graphics are INTERLEAVED by the loader (rom_loader M_SPR_ILV): a tile is 192
+//  contiguous bytes and a 16-pixel row is the twelve bytes at tile*192 + row*12,
+//  holding the three chunks' words as c0.w0 c1.w0 c2.w0 c0.w1 c1.w1 c2.w1.
+//  Twelve bytes from a 4- or 8-aligned start never span more than two 8-byte
+//  reads, so a row costs TWO round trips rather than the three it took when the
+//  chunks sat megabytes apart. That is a third off this engine's bus demand,
+//  and bus demand is what it starves on.
 //============================================================================
 
 module spi_sprite
@@ -50,11 +54,12 @@ module spi_sprite
 	input             line_start,
 	input             enable,       // layer_enable[4] inverted
 
-	// Per set. The stride is the sprite region divided by three, so it is the
-	// chunk size: 4 MB for the SEI252 games, 6 MB for rdft2. `rise10` picks the
-	// decryption with it -- the two always move together, but they are separate
-	// inputs because rdft2us shares RISE10 with a different board.
-	input      [25:0] spr_chunk_stride,
+	// Per set. `spr_chunk_size` is the SOURCE size of one plane-pair chunk --
+	// 4 MB for the SEI252 games, 6 MB for rdft2. It is no longer an address
+	// stride, because the chunks are interleaved rather than laid end to end;
+	// it survives because MAME's extra-bank rule is stated in terms of it
+	// (elements = chunk / 64). `rise10` picks the decryption.
+	input      [25:0] spr_chunk_size,
 	input             rise10,
 
 	// Sprite RAM (1024 dwords), read port
@@ -170,7 +175,7 @@ module spi_sprite
 
 	// MAME: gfxbank_callback adds 0x10000 only when elements > 0x10000, and
 	// elements is the chunk size over 64 bytes per tile.
-	wire ext_bank = (spr_chunk_stride > 26'h040_0000);
+	wire ext_bank = (spr_chunk_size > 26'h040_0000);
 	wire [16:0] code_ext = {ext & ext_bank, code};
 
 	wire        flipy = attr[15];
@@ -217,33 +222,29 @@ module spi_sprite
 	wire col_visible = ((col_x + 11'sd16) > 11'sd0) && (col_x < 11'sd320);
 
 	// ------------------------------------------------------------------
-	// Graphics address: chunk k at + k*stride, tile*64 + row*4
+	// Graphics address: tile*192 + row*12, in the interleaved layout
 	// ------------------------------------------------------------------
-	// Written as a mux rather than chunk * stride: chunk is only ever 0, 1 or 2,
-	// and a 26-bit multiplier for that would be silly.
-	//
-	// The row arithmetic is the same for both crypts even though RISE10 sets
-	// carry MAME's sprite_reorder(), because rom_loader undoes that when it
-	// places them (M_SPR_R10). Doing it here instead would put the two halves of
-	// a row 32 bytes apart and cost six SDRAM reads per row instead of three.
-	reg  [1:0] chunk;
-	function automatic [25:0] chunk_base_of(input [1:0] k);
-		case (k)
-			2'd0   : chunk_base_of = SDR_SPRITES_BASE;
-			2'd1   : chunk_base_of = SDR_SPRITES_BASE + spr_chunk_stride;
-			default: chunk_base_of = SDR_SPRITES_BASE + {spr_chunk_stride[24:0], 1'b0};
-		endcase
-	endfunction
-	// Bits 1:0 are always zero: rows are 4 bytes apart. Bit 2 picks which half
-	// of the 8-byte SDRAM read holds this row.
-	// The row offset within a chunk is the same for all three, so only the base
-	// differs -- which means the next chunk's address is ready a cycle early.
+	// Both permutations the sprite ROM needs -- the interleave, and RISE10's
+	// sprite_reorder() -- are folded into where the LOADER puts each byte
+	// (M_SPR_ILV / M_SPR_ILV_R), so the fetch sees neither. It costs the loader
+	// nothing, since it computes a destination per byte regardless.
+	reg phase;                           // which of the row's two reads
+	reg [63:0] rd0;                      // the first one, held for the join
+
+	// tile*192 + row*12, all shifts and adds. The row's twelve bytes start
+	// here; bit 2 says whether they begin at the start of the 8-byte read or
+	// four bytes into it, which is the only alignment case there is.
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire [25:0] row_off    = {3'd0, tile_code, 6'd0} + {19'd0, ry, 2'd0};
-	wire [25:0] row_addr   = chunk_base_of(chunk)        + row_off;
-	wire [25:0] row_addr_n = chunk_base_of(chunk + 2'd1) + row_off;
-	wire [25:0] row_addr_0 = chunk_base_of(2'd0)         + row_off;
+	wire [25:0] row_addr = SDR_SPRITES_BASE
+	                     + {2'd0, tile_code, 7'd0} + {3'd0, tile_code, 6'd0}
+	                     + {19'd0, ry, 3'd0}       + {20'd0, ry, 2'd0};
 	/* verilator lint_on UNUSEDSIGNAL */
+	wire [25:0] read0_addr = {row_addr[25:3], 3'b000};
+	wire [25:0] read1_addr = read0_addr + 26'd8;
+
+	// The twelve bytes, joined from the two reads.
+	wire [95:0] rowb = row_addr[2] ? {sdr_dout, rd0[63:32]}
+	                               : {sdr_dout[31:0], rd0};
 
 	// ------------------------------------------------------------------
 	// Decryption inputs: three 16-bit words, one per chunk
@@ -585,36 +586,34 @@ module spi_sprite
 						else              axc <= axc + 3'd1;
 					end
 					else if (!rv[fb]) begin
-						chunk     <= 2'd0;
 						dbg_tiles <= dbg_tiles + 16'd1;
-						// Issue chunk 0 here rather than stepping through a
-						// separate F_REQ state. A column is three round trips
-						// and that state put a dead cycle in front of each one;
-						// at ~85 columns a line on a dense scene it was ~340
-						// cycles of a 3200 cycle budget spent doing nothing.
-						sdr_addr  <= {row_addr_0[25:3], 3'b000};
+						// Issue the first read here rather than stepping
+						// through a separate F_REQ state: that state put a dead
+						// cycle in front of every round trip.
+						phase     <= 1'b0;
+						sdr_addr  <= read0_addr;
 						sdr_req   <= ~sdr_req;
 						fstate    <= F_WAIT;
 					end
 				end
 
 				F_WAIT: if (sdr_ack == sdr_req) begin
-					// 4 bytes of the row, selected by bit 2 of the address
-					case (chunk)
-					2'd0: begin
-						r_y1a[fb] <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-						r_y1b[fb] <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
+					if (!phase) begin
+						// Hold the first half and chain straight into the
+						// second on the ack cycle.
+						rd0      <= sdr_dout;
+						phase    <= 1'b1;
+						sdr_addr <= read1_addr;
+						sdr_req  <= ~sdr_req;
 					end
-					2'd1: begin
-						r_y2a[fb] <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-						r_y2b[fb] <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
-					end
-					default: begin
-						r_y3a[fb] <= row_addr[2] ? sdr_dout[47:32] : sdr_dout[15:0];
-						r_y3b[fb] <= row_addr[2] ? sdr_dout[63:48] : sdr_dout[31:16];
-					end
-					endcase
-					if (chunk == 2'd2) begin
+					else begin
+						// Twelve bytes: c0.w0 c1.w0 c2.w0 c0.w1 c1.w1 c2.w1.
+						r_y1a[fb] <= rowb[15:0];
+						r_y2a[fb] <= rowb[31:16];
+						r_y3a[fb] <= rowb[47:32];
+						r_y1b[fb] <= rowb[63:48];
+						r_y2b[fb] <= rowb[79:64];
+						r_y3b[fb] <= rowb[95:80];
 						// Hand the column over with everything the emitter needs.
 						r_tcode[fb] <= tile_code;
 						r_colx[fb]  <= col_x;
@@ -629,13 +628,6 @@ module spi_sprite
 							axc    <= axc + 3'd1;
 							fstate <= F_COL;
 						end
-					end
-					else begin
-						// Chain: the next chunk's address is already formed, so
-						// request it on the ack cycle rather than a cycle later.
-						chunk    <= chunk + 2'd1;
-						sdr_addr <= {row_addr_n[25:3], 3'b000};
-						sdr_req  <= ~sdr_req;
 					end
 				end
 

@@ -59,7 +59,7 @@ module tb_sdram_top
 		.ioctl_dout     (ioctl_dout),
 		.ioctl_wait     (ioctl_wait),
 		.set_id         (2'd0),      // this bench drives the rdfts layout
-		.part_codec     (64'd0),     // every part a straight copy
+		.part_codec     (128'd0),    // every part a straight copy
 		.sdr_addr       (ldr_addr),
 		.sdr_din        (ldr_din),
 		.sdr_be         (ldr_be),
