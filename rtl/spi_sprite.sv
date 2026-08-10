@@ -46,6 +46,13 @@ module spi_sprite
 	input             line_start,
 	input             enable,       // layer_enable[4] inverted
 
+	// Per set. The stride is the sprite region divided by three, so it is the
+	// chunk size: 4 MB for the SEI252 games, 6 MB for rdft2. `rise10` picks the
+	// decryption with it -- the two always move together, but they are separate
+	// inputs because rdft2us shares RISE10 with a different board.
+	input      [25:0] spr_chunk_stride,
+	input             rise10,
+
 	// Sprite RAM (1024 dwords), read port
 	output reg  [9:0] spr_addr,
 	input      [31:0] spr_data,
@@ -199,10 +206,22 @@ module spi_sprite
 	wire col_visible = ((col_x + 11'sd16) > 11'sd0) && (col_x < 11'sd320);
 
 	// ------------------------------------------------------------------
-	// Graphics address: chunk k at + k*4 MB, tile*64 + row*4
+	// Graphics address: chunk k at + k*stride, tile*64 + row*4
 	// ------------------------------------------------------------------
+	// Written as a mux rather than chunk * stride: chunk is only ever 0, 1 or 2,
+	// and a 26-bit multiplier for that would be silly.
+	//
+	// The row arithmetic is the same for both crypts even though RISE10 sets
+	// carry MAME's sprite_reorder(), because rom_loader undoes that when it
+	// places them (M_SPR_R10). Doing it here instead would put the two halves of
+	// a row 32 bytes apart and cost six SDRAM reads per row instead of three.
 	reg  [1:0] chunk;
-	wire [25:0] chunk_base = SDR_SPRITES_BASE + ({23'd0, chunk} * SPR_CHUNK_STRIDE);
+	reg [25:0] chunk_base;
+	always @* case (chunk)
+		2'd0   : chunk_base = SDR_SPRITES_BASE;
+		2'd1   : chunk_base = SDR_SPRITES_BASE + spr_chunk_stride;
+		default: chunk_base = SDR_SPRITES_BASE + {spr_chunk_stride[24:0], 1'b0};
+	endcase
 	// Bits 1:0 are always zero: rows are 4 bytes apart. Bit 2 picks which half
 	// of the 8-byte SDRAM read holds this row.
 	/* verilator lint_off UNUSEDSIGNAL */
@@ -241,15 +260,36 @@ module spi_sprite
 	wire [15:0] y2 = half ? r_y2b[eb] : r_y2a[eb];
 	wire [15:0] y3 = half ? r_y3b[eb] : r_y3a[eb];
 
-	wire [5:0] p0, p1, p2, p3, p4, p5, p6, p7;
+	// Both crypts, muxed. They present the same 48-bits-in, eight-pens-out
+	// interface and the same pen bit order, so the mux is on the result and
+	// nothing else in the emitter changes. RISE10 is address independent and
+	// much the smaller of the two; SEI252 carries the key table.
+	wire [5:0] s0, s1_, s2_, s3, s4, s5, s6, s7;
+	wire [5:0] r0, r1, r2, r3, r4, r5, r6, r7;
 
-	spi_spr_decrypt dec
+	spi_spr_decrypt dec_sei252
 	(
 		.y1(y1), .y2(y2), .y3(y3),
 		.addr(r_tcode[eb][14:3]),         // addr = code >> 3, for the emitting bank
-		.pix0(p0), .pix1(p1), .pix2(p2), .pix3(p3),
-		.pix4(p4), .pix5(p5), .pix6(p6), .pix7(p7)
+		.pix0(s0), .pix1(s1_), .pix2(s2_), .pix3(s3),
+		.pix4(s4), .pix5(s5),  .pix6(s6),  .pix7(s7)
 	);
+
+	spi_rise10_decrypt dec_rise10
+	(
+		.y1(y1), .y2(y2), .y3(y3),
+		.pix0(r0), .pix1(r1), .pix2(r2), .pix3(r3),
+		.pix4(r4), .pix5(r5), .pix6(r6), .pix7(r7)
+	);
+
+	wire [5:0] p0 = rise10 ? r0 : s0;
+	wire [5:0] p1 = rise10 ? r1 : s1_;
+	wire [5:0] p2 = rise10 ? r2 : s2_;
+	wire [5:0] p3 = rise10 ? r3 : s3;
+	wire [5:0] p4 = rise10 ? r4 : s4;
+	wire [5:0] p5 = rise10 ? r5 : s5;
+	wire [5:0] p6 = rise10 ? r6 : s6;
+	wire [5:0] p7 = rise10 ? r7 : s7;
 
 	reg [2:0] pcnt;
 	reg [5:0] pix_raw;

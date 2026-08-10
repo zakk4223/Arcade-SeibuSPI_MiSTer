@@ -17,6 +17,9 @@ module spi_top
 
 	// SXX2C cartridge board. Selected by the MRA's mod byte; see rom_loader.sv.
 	input             set_sxx2c,
+	// Which ROM set, for the things that differ per GAME rather than per board:
+	// the sprite chunk stride and which sprite crypt to use. See spi_defs.vh.
+	input       [1:0] set_id,
 	input       [7:0] jumpers,
 	// Z80 program download -> SDRAM ch3 write port
 	output     [25:0] z80dl_sdr_addr,
@@ -561,6 +564,13 @@ module spi_top
 	wire [14:0] lb_spr;
 	wire        spr_busy;
 
+	// rdft2 is the RISE10 set: 6 MB plane-pair chunks instead of 4, and the
+	// address-independent crypt instead of SEI252's keyed one. The two always
+	// change together here, but spi_sprite takes them separately because
+	// rdft2us pairs RISE10 with a different board.
+	wire        spr_rise10 = (set_id == SET_RDFT2);
+	wire [25:0] spr_stride = spr_rise10 ? SPR_CHUNK_STRIDE_RDFT2 : SPR_CHUNK_STRIDE;
+
 	spi_sprite sprites
 	(
 		.clk        (clk_sys),
@@ -568,6 +578,8 @@ module spi_top
 		.vcnt       (vcnt),
 		.line_start (line_start),
 		.enable     (~layer_en_dbg[4]),
+		.spr_chunk_stride(spr_stride),
+		.rise10     (spr_rise10),
 		.spr_addr   (spr_ra),
 		.spr_data   (spr_rd),
 		.sdr_addr   (sdr_spr_addr),

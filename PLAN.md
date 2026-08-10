@@ -682,6 +682,53 @@ sprite fetch, and the rdft2 tile keys in `spi_layers`. All three are known work
 against verified units -- `spi_rise10_decrypt.sv` and the keys already exist and
 are checked against MAME. The loading is done.
 
+### The sprite stride port and the RISE10 mux (2026-08-09)
+
+`spi_sprite` took the chunk stride from a constant and instantiated the SEI252
+crypt unconditionally. It now takes `spr_chunk_stride` and `rise10` as ports,
+and `spi_top` derives both from `set_id`: 6 MB and RISE10 for rdft2, 4 MB and
+SEI252 for everything else. The two are separate ports rather than one flag
+because rdft2us pairs RISE10 with a different board.
+
+The chunk base is a three-way mux rather than `chunk * stride` -- chunk is only
+ever 0, 1 or 2, and a 26-bit multiplier for that would be silly.
+
+**sprite_reorder went into the LOADER, not the fetch.** This is the one real
+design decision here, and it goes against the project's own rule that graphics
+decryption happens at fetch time (section 5). The rule still holds, because
+`sprite_reorder` is not decryption -- it is an address swizzle. Inside each
+64-byte group MAME's reorder sends input word j to output word 2j and input
+word j+16 to output word 2j+1, which as an index is one rotate:
+
+    dest = base + { i[25:6], i[4:1], i[5], i[0] }        (M_SPR_R10)
+
+Doing it in the loader is FREE: the loader already computes a destination for
+every byte, so this is a wire permutation. Doing it at fetch time is not free.
+It would put the two halves of a 16-pixel row 32 bytes apart instead of 2, so a
+row would need six SDRAM reads instead of three -- doubling sprite bandwidth on
+the set that already carries the most sprite data, and section 3.3's starvation
+budget is not built for that.
+
+The formula is checked against MAME's own `sprite_reorder()` (out of
+`spi_ref.h`) over all 64 bytes of a group before the loader test trusts it for
+18 MB. `check_mra` needed a per-set override for it -- MAME's macro is a plain
+`ROM_LOAD`, so nothing in the driver says the mode should be `M_SPR_R10`.
+
+**Regression evidence.** `make -C sim run-video` still reports the rdfts frame
+matching MAME **exactly, 0 of 76,800 pixels differing**, with both crypt units
+now instantiated and the stride arriving through a port. That is the test that
+would catch a broken sprite path, and it is unchanged.
+
+**Not verified: rdft2's sprites on screen.** There is no rdft2 golden capture,
+and a frame compare would fail anyway while the tile and text layers still use
+the SEI252 keys. What IS verified is every piece the fetch depends on: the
+RISE10 arithmetic against MAME (2048 words), the reorder split, the 6 MB layout
+the loader produces, and that muxing the units changed nothing for rdfts.
+
+**What is left for rdft2** is now one item: the tile and text keys.
+`spi_layers` hardwires the SEI252 triple; `TKEY*_RDFT2` are defined in
+spi_defs.vh and all three key sets are already verified against MAME.
+
 ### The authentic flash path is still the general answer
 
 The codec being cracked weakens this argument but does not kill it. rdft's
@@ -1745,11 +1792,12 @@ clean for the first time.
   against the real stream. Wired into `rom_loader` and into `files.qip`; the
   MRA selects it per part through the index-1 config.
 * `spi_rise10_decrypt.sv` -- RISE10 sprite decryption for rdft2/rdft2us,
-  verified against MAME over 2048 words including `sprite_reorder`. NOT in
-  `files.qip` yet and `spi_sprite` still instantiates the SEI252 unit
-  unconditionally.
+  verified against MAME over 2048 words including `sprite_reorder`. In
+  `files.qip`, and `spi_sprite` now muxes it against SEI252 on `set_id`, with
+  the chunk stride arriving as a port alongside it.
 * Tile keys for all three families are defined and all three verified, but
-  `spi_layers` hardwires the SEI252 triple.
+  `spi_layers` hardwires the SEI252 triple. This is the last thing rdft2
+  needs.
 
 **The immediate decision** is recorded in section 0: an in-core decoder that
 builds the flash contents from raw ROM at load time, versus the authentic flash
@@ -1758,11 +1806,11 @@ per part by the MRA, verified against the real rdft2 stream (section 0). The
 controller still needs a writable ch5, a save file and a long first boot, and
 remains the fallback for any game whose packer is not worth cracking.
 
-**What rdft2 still needs beyond the codec:** `SPR_CHUNK_STRIDE` as a port on
-`spi_sprite` (6 MB for rdft2, currently a 4 MB constant), the tile-key select,
-and the RISE10 mux in the sprite fetch. The third loader table and the MRA are
-DONE and checked against MAME (section 0), as is the 26-bit address widening
-that made its 34.0 MB reachable.
+**What rdft2 still needs:** the tile and text key select in `spi_layers`, and
+nothing else. The loader table, the MRA, the sample-flash decoder, the sprite
+chunk stride port and the RISE10 mux are all done and checked against MAME
+(section 0), as is the 26-bit address widening that made its 34.0 MB
+reachable.
 
 ## 11. TASKS
 

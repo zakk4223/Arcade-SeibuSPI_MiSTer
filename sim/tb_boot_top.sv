@@ -74,6 +74,7 @@ module tb_boot_top
 		.clk_ram      (clk_ram),
 		.reset        (reset),
 		.rom_ready    (rom_ready),
+		.set_id       (2'd0),      // rdfts
 		.dbg_en       (1'b0),
 		// These grew on spi_top for the JTAG debug plumbing. Leaving them
 		// unconnected made Verilator drive dbg_mask with X, which ORs into the

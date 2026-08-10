@@ -697,6 +697,7 @@ spi_top spi_top
 	.rom_ready    (rom_ready & chk_done),
 
 	.set_sxx2c      (set_sxx2c),
+	.set_id         (set_id),
 	// JP1, SXX2C only. MAME's sxx2c port: bits [1:0] = 0x3 "Update" (which is
 	// its default), 0x0 "Normal"; bits [7:2] are unused IP_ACTIVE_LOW and read
 	// as 1. All-ones is therefore UPDATE MODE, and that is not inert -- the

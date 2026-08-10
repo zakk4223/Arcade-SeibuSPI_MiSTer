@@ -21,13 +21,12 @@
     <category>Shooter</category>
 
     <!--
-      INCOMPLETE. This MRA loads rdft2 correctly, and that is all it does so
-      far. The core still fetches sprites at the SEI252 4 MB chunk stride and
-      decrypts tiles and sprites with the SEI252 keys, so rdft2's graphics will
-      be wrong on screen until spi_sprite takes SPR_CHUNK_STRIDE as a port and
-      the RISE10 unit and rdft2 tile keys are selected. See PLAN.md "what rdft2
-      still needs". Everything below is verified; nothing below is the reason
-      it does not run yet.
+      INCOMPLETE, but less so. The download, the sprite chunk stride and the
+      RISE10 sprite crypt are all in place and selected by the mod byte below.
+      What is NOT yet selected is the tile and text decryption: spi_layers
+      still hardwires the SEI252 keys, so the background and text layers will
+      be wrong on screen. TKEY*_RDFT2 exist and are verified; wiring them is
+      the last piece. See PLAN.md "what rdft2 still needs".
     -->
 
     <!--

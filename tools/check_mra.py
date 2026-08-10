@@ -78,6 +78,11 @@ SETS = {
     # the MRA carries sound1.u0222 directly rather than the assembled window.
     "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x03,
                   skip=("audiocpu", "sound01", "soundflash1", "pals"),
+                  # RISE10 sets carry MAME's sprite_reorder(), which the loader
+                  # folds into the destination instead of the fetch. MAME's
+                  # macro is a plain ROM_LOAD, so the expected mode has to be
+                  # overridden here rather than derived from it.
+                  spr_mode="M_SPR_R10",
                   # The sample flash is DERIVED, so with --zip it can be rebuilt
                   # from the MRA's own slices and compared against the image
                   # MAME's flash devices end up holding. That is the only thing
@@ -362,6 +367,10 @@ def check_set(setname, cfg, args):
 
     print("=== %s (%s table) ===" % (setname, cfg["table"]))
     mame = parse_mame(drv, setname, cfg["skip"])
+    if cfg.get("spr_mode"):
+        for r in mame:
+            if r.get("sdram") == "sprites":
+                r["mode"] = cfg["spr_mode"]
     mra = parse_mra(mra_path)
     rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"), cfg["table"])
     mod_byte, codecs = parse_codecs(mra_path, nparts)

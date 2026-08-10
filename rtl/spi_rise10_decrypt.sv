@@ -24,9 +24,14 @@
 //  convention PLAN.md section 13 records after a bit-reversal cost real time.
 //
 //  NOT handled here: sprite_reorder(). That permutes whole words inside each
-//  64-byte group and is an address swizzle at fetch time, not arithmetic --
-//  output word 2j comes from input word j, output word 2j+1 from input word
-//  j+16. It belongs in the sprite fetch, not in this unit.
+//  64-byte group and is an address swizzle, not arithmetic -- output word 2j
+//  comes from input word j, output word 2j+1 from input word j+16. It lives in
+//  rom_loader's M_SPR_R10 scatter mode, which folds it into the LOAD-time
+//  destination. Doing it at fetch time would put the two halves of a 16-pixel
+//  row 32 bytes apart and cost six SDRAM reads per row instead of three; doing
+//  it in the loader costs nothing, because the loader computes a destination
+//  per byte anyway. Either way it is not the decrypt unit's business, and
+//  tb_rise10_decrypt checks that the split is real.
 //============================================================================
 
 module spi_rise10_decrypt

@@ -133,16 +133,18 @@ obj_dir/Vtb_video_top: tb_video_top.sv tb_video.cpp lint.vlt \
                        $(RTL)/spi_layers.sv $(RTL)/spi_mixer.sv $(RTL)/spi_dpram.sv \
                        $(RTL)/spi_video_timing.sv $(RTL)/spi_tile_decrypt.sv \
                        $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
+                       $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise10_tables.vh \
                        $(RTL)/spi_spr_tables.vh \
                        $(RTL)/seibu_partial_add.sv
 	$(VERILATOR) $(VFLAGS) -LDFLAGS "-lz" --top-module tb_video_top tb_video_top.sv \
 	    $(RTL)/spi_layers.sv $(RTL)/spi_mixer.sv $(RTL)/spi_dpram.sv \
 	    $(RTL)/spi_video_timing.sv $(RTL)/spi_tile_decrypt.sv \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
+	    $(RTL)/spi_rise10_decrypt.sv \
 	    $(RTL)/seibu_partial_add.sv tb_video.cpp
 
 obj_dir/Vrom_loader: $(RTL)/rom_loader.sv $(RTL)/spi_rom_decode.sv $(RTL)/spi_defs.vh \
-                     tb_rom_loader.cpp lint.vlt
+                     tb_rom_loader.cpp spi_ref.h lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module rom_loader \
 	    $(RTL)/rom_loader.sv $(RTL)/spi_rom_decode.sv tb_rom_loader.cpp
 
@@ -189,7 +191,8 @@ lint-top:
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
 	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
-	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_rom_decode.sv 2>&1 | \
+	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_rom_decode.sv \
+	    $(RTL)/spi_rise10_decrypt.sv 2>&1 | \
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 
 
@@ -200,10 +203,12 @@ run-boot: obj_dir/Vtb_boot_top
 
 obj_dir/Vtb_boot_top: tb_boot_top.sv tb_boot.cpp lint.vlt $(CORE_SRCS) $(Z386_SRCS) \
                       $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
+                      $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise10_tables.vh \
                       $(RTL)/spi_spr_tables.vh
 	$(VERILATOR) $(VFLAGS) -I$(RTL)/z386 --top-module tb_boot_top \
 	    tb_boot_top.sv $(CORE_SRCS) $(Z386_SRCS) \
-	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv tb_boot.cpp
+	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
+	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_debug.sv tb_boot.cpp
 
 
 # Streams the real ROM image through rom_loader -> rtl/sdram.sv -> a behavioural

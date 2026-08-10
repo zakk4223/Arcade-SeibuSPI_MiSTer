@@ -88,6 +88,20 @@ module rom_loader
 	localparam [3:0] M_24_B1   = 4'd8;   // dest = base + i*3 + 1
 	localparam [3:0] M_24_B2   = 4'd9;   // dest = base + i*3 + 2
 	localparam [3:0] M_24_W01  = 4'd10;  // dest = base + (i>>1)*3 + (1 - (i&1))
+	// LINEAR, plus MAME's sprite_reorder() rotated into the destination: within
+	// each 64-byte group the 32 words are permuted so that output word 2j comes
+	// from input word j and output word 2j+1 from input word j+16. As an index
+	// that is one rotate -- dest = {i[5:0] rotated left by one word}.
+	//
+	// This is a LOAD-time permutation in a project whose rule is that graphics
+	// decryption happens at FETCH time (PLAN.md 5), and deliberately so.
+	// sprite_reorder is not decryption, it is an address swizzle, and doing it
+	// here is free: the loader computes a destination per byte regardless.
+	// Doing it at fetch time is not free -- it puts the two halves of a 16-pixel
+	// row 32 bytes apart instead of 2, so a row would cost six SDRAM reads
+	// instead of three, doubling sprite bandwidth on the one set that already
+	// has the most sprite data.
+	localparam [3:0] M_SPR_R10 = 4'd11;
 
 	// Part indices are 4 bits, and part_end (which spi_jtag_peek reports by bit
 	// position) is 4 bits with it. That is the reason rdft2's six sprite ROMs
@@ -160,7 +174,8 @@ module rom_loader
 		//   * text lanes come in the order fix0(1), fix1(0), fixp(2)
 		//   * 18 MB of sprites as three 6 MB plane-pair chunks, which are
 		//     contiguous and so load as ONE part -- obj3 first, then obj2,
-		//     then obj1, which is MAME's order and not the numeric one
+		//     then obj1, which is MAME's order and not the numeric one. It is
+		//     M_SPR_R10, not M_LINEAR: RISE10 sets carry sprite_reorder()
 		//   * the sample flash is two parts: the region stamp plus a verbatim
 		//     slice of pcm.u0217, then sound1.u0222 COMPRESSED. The MRA marks
 		//     that last part CODEC_BPE_DPCM, so its size here is the
@@ -178,7 +193,7 @@ module rom_loader
 		4'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0537
 		4'd9 : begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-2d.u0536
 		4'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-2p.u0538
-		4'd11: begin part_base = SDR_SPRITES_BASE;                  part_size = 26'h120_0000; part_mode = M_LINEAR; end // sprites: obj3 obj3b obj2 obj2b obj1 obj1b
+		4'd11: begin part_base = SDR_SPRITES_BASE;                  part_size = 26'h120_0000; part_mode = M_SPR_R10; end // sprites: obj3 obj3b obj2 obj2b obj1 obj1b
 		4'd12: begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
 		default:begin part_base = SDR_PCM_BASE + 26'h017_C247;      part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
 		endcase
@@ -230,6 +245,7 @@ module rom_loader
 			M_24_B1 : scat = {off[24:0], 1'b0} + off + 26'd1;
 			M_24_B2 : scat = {off[24:0], 1'b0} + off + 26'd2;
 			M_24_W01: scat = {off_h[24:0], 1'b0} + off_h + {25'd0, ~off[0]};
+			M_SPR_R10: scat = {off[25:6], off[4:1], off[5], off[0]};
 			default : scat =  off;
 		endcase
 	end

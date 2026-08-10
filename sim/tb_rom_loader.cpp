@@ -21,6 +21,11 @@
 #include <vector>
 #include <string>
 
+// MAME's own sprite_reorder(), copied out by tools/gen_ref_c.py. The SPR_R10
+// scatter mode below is checked against it rather than against a restatement
+// of it -- that is the whole point of having it here.
+#include "spi_ref.h"
+
 // ---------------------------------------------------------------------------
 // SDRAM byte map (must match rtl/spi_defs.vh)
 // ---------------------------------------------------------------------------
@@ -33,7 +38,7 @@ static const uint32_t SPRITES_BASE = 0x1100000;
 static const uint32_t SDR_SIZE     = 0x2900000;
 
 enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
-            W24_B0, W24_B1, W24_B2, W24_W01 };
+            W24_B0, W24_B1, W24_B2, W24_W01, SPR_R10 };
 
 struct Part { const char *name; uint32_t base; uint32_t size; Mode mode; };
 
@@ -97,7 +102,7 @@ static const Part parts_rdft2[] = {
     { "bg-1p.u0537",                 TILES_BASE,              0x200000,  W24_B2  },
     { "bg-2d.u0536",                 TILES_BASE + 0x600000,   0x400000,  W24_W01 },
     { "bg-2p.u0538",                 TILES_BASE + 0x600000,   0x200000,  W24_B2  },
-    { "sprites, six ROMs",           SPRITES_BASE,            0x1200000, LINEAR  },
+    { "sprites, six ROMs",           SPRITES_BASE,            0x1200000, SPR_R10 },
     { "flash head: stamp + pcm",     PCM_BASE,                0x17C247,  LINEAR  },
     { "flash tail: sound1, packed",  PCM_BASE + 0x17C247,     0x04C665,  LINEAR  },
 };
@@ -116,7 +121,34 @@ static uint32_t dest_of(const Part &p, uint32_t i)
     case W24_B1:  return p.base + i * 3 + 1;
     case W24_B2:  return p.base + i * 3 + 2;
     case W24_W01: return p.base + (i >> 1) * 3 + (1 - (i & 1));
+    // LINEAR with MAME's sprite_reorder() folded into the destination: inside
+    // each 64-byte group the word index rotates left by one bit.
+    case SPR_R10: return p.base + ((i & ~0x3Fu) | ((i & 0x1Eu) << 1)
+                                                | ((i & 0x20u) >> 4)
+                                                | (i & 1u));
     }
+    return 0;
+}
+
+// Prove that formula IS sprite_reorder, against MAME's copy, before trusting it
+// for 18 MB. Feeds a 64-byte group of distinct values through both.
+static int check_spr_r10()
+{
+    uint8_t want[64], got[64];
+    for (int i = 0; i < 64; i++) want[i] = (uint8_t)i;
+    sprite_reorder(want);
+
+    Part p = { "reorder", 0, 64, SPR_R10 };
+    for (int i = 0; i < 64; i++) got[dest_of(p, (uint32_t)i)] = (uint8_t)i;
+
+    for (int i = 0; i < 64; i++) {
+        if (got[i] != want[i]) {
+            printf("FAIL: SPR_R10 byte %d -> %d, MAME's sprite_reorder says %d\n",
+                   i, got[i], want[i]);
+            return 1;
+        }
+    }
+    printf("PASS: the SPR_R10 scatter is MAME's sprite_reorder, all 64 bytes\n");
     return 0;
 }
 
@@ -356,6 +388,7 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
 int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
+    if (check_spr_r10()) return 1;
     int rc = run_set(parts_sxx2e, (int)(sizeof(parts_sxx2e) / sizeof(parts_sxx2e[0])),
                      0, "rdfts (SXX2E)");
     if (rc) return rc;

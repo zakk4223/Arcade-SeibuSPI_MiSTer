@@ -168,6 +168,8 @@ module tb_video_top
 		.clk(clk), .reset(reset),
 		.vcnt(vcnt), .line_start(line_start),
 		.enable(~layer_enable[4]),
+		// rdfts: SEI252 crypt at the 4 MB chunk stride.
+		.spr_chunk_stride(26'h040_0000), .rise10(1'b0),
 		.spr_addr(spr_ra), .spr_data(spr_rd),
 		.sdr_addr(spr_sdr_addr), .sdr_dout(spr_sdr_dout),
 		.sdr_req(spr_sdr_req), .sdr_ack(spr_sdr_ack),
