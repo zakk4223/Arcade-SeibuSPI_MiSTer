@@ -28,7 +28,7 @@ module spi_romcheck
 	input             start,          // rom_ready
 
 	// SDRAM read port
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output reg        sdr_req,
 	input             sdr_ack,
@@ -57,8 +57,8 @@ module spi_romcheck
 	localparam [31:0] SUM_SPRITES = 32'hDCD037DA;
 
 	reg  [1:0] region;
-	reg [24:0] addr;
-	reg [24:0] limit;
+	reg [25:0] addr;
+	reg [25:0] limit;
 	reg [31:0] sum;
 	reg        busy;
 	reg        started;
@@ -76,8 +76,8 @@ module spi_romcheck
 	always @(posedge clk) begin
 		if (reset) begin
 			region  <= 2'd0;
-			addr    <= 25'd0;
-			limit   <= 25'd0;
+			addr    <= 26'd0;
+			limit   <= 26'd0;
 			sum     <= 32'd0;
 			busy    <= 1'b0;
 			done    <= 1'b0;
@@ -95,7 +95,7 @@ module spi_romcheck
 					started <= 1'b1;
 					region  <= 2'd0;
 					addr    <= SDR_PRG_BASE;
-					limit   <= SDR_PRG_BASE + 25'h020_0000;
+					limit   <= SDR_PRG_BASE + 26'h020_0000;
 					sum     <= 32'd0;
 					busy    <= 1'b0;
 				end
@@ -109,7 +109,7 @@ module spi_romcheck
 				busy <= 1'b0;
 				sum  <= sum + sdr_dout[31:0] + sdr_dout[63:32];
 
-				if (addr + 25'd8 >= limit) begin
+				if (addr + 26'd8 >= limit) begin
 					// Region finished: latch the verdict and move on.
 					ok[region] <= ((sum + sdr_dout[31:0] + sdr_dout[63:32]) == region_sum);
 					case (region)
@@ -128,20 +128,20 @@ module spi_romcheck
 						// go round again
 						region <= 2'd0;
 						addr   <= SDR_PRG_BASE;
-						limit  <= SDR_PRG_BASE + 25'h020_0000;
+						limit  <= SDR_PRG_BASE + 26'h020_0000;
 					end
 					else begin
 						region <= region + 2'd1;
 						addr   <= (region == 2'd0) ? SDR_CHARS_BASE
 						        : (region == 2'd1) ? SDR_TILES_BASE
 						                           : SDR_SPRITES_BASE;
-						limit  <= (region == 2'd0) ? SDR_CHARS_BASE   + 25'h003_0000
-						        : (region == 2'd1) ? SDR_TILES_BASE   + 25'h060_0000
-						                           : SDR_SPRITES_BASE + 25'h0C0_0000;
+						limit  <= (region == 2'd0) ? SDR_CHARS_BASE   + 26'h003_0000
+						        : (region == 2'd1) ? SDR_TILES_BASE   + 26'h060_0000
+						                           : SDR_SPRITES_BASE + 26'h0C0_0000;
 					end
 				end
 				else begin
-					addr <= addr + 25'd8;
+					addr <= addr + 26'd8;
 				end
 			end
 		end

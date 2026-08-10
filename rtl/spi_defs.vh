@@ -13,17 +13,30 @@
 
 // --------------------------------------------------------------------------
 // SDRAM byte-address map (see PLAN.md section 4)
+//
+// ONE map for every set, sized for the worst case in the family rather than
+// for rdfts: rdft2 has 12 MB of tiles and rfjet 24 MB of sprites. A set that
+// needs less simply leaves the tail of its region unwritten, which costs
+// nothing but address space -- and address space is what a 64 MB module has.
+//
+// This is why the core's addresses are 26 bits. They were 25 (32 MB) and the
+// controller's are 27; the five WIDTHEXPAND warnings that produced were
+// harmless in themselves but were also the reason nothing above 32 MB could be
+// reached, which put rdft2 (34.4 MB pre-flashed) out of range.
 // --------------------------------------------------------------------------
-localparam [24:0] SDR_PRG_BASE     = 25'h000_0000;  //  2 MB  386 program
-localparam [24:0] SDR_Z80_BASE     = 25'h020_0000;  // 256 KB Z80 program
-localparam [24:0] SDR_CHARS_BASE   = 25'h024_0000;  // 192 KB text tiles
-localparam [24:0] SDR_PCM_BASE     = 25'h028_0000;  //  2 MB  YMF271 samples
-localparam [24:0] SDR_TILES_BASE   = 25'h048_0000;  //  6 MB  background tiles
-localparam [24:0] SDR_SPRITES_BASE = 25'h0A8_0000;  // 12 MB  sprites (3 x 4 MB)
-localparam [24:0] SDR_END          = 25'h168_0000;  // 22.5 MB total
+localparam [25:0] SDR_PRG_BASE     = 26'h000_0000;  //  2 MB   386 program
+localparam [25:0] SDR_Z80_BASE     = 26'h020_0000;  // 256 KB  Z80 program
+localparam [25:0] SDR_CHARS_BASE   = 26'h024_0000;  // 192 KB  text tiles
+localparam [25:0] SDR_PCM_BASE     = 26'h028_0000;  // 2.5 MB  YMF271 samples
+localparam [25:0] SDR_TILES_BASE   = 26'h050_0000;  //  12 MB  background tiles
+localparam [25:0] SDR_SPRITES_BASE = 26'h110_0000;  //  24 MB  sprites (3 chunks)
+localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
 
-// The three sprite plane-pair chunks are 4 MB apart.
-localparam [24:0] SPR_CHUNK_STRIDE = 25'h040_0000;
+// The three sprite plane-pair chunks. The stride is PER SET -- 4 MB for the
+// SEI252 games, 6 MB for rdft2, 8 MB for rfjet -- because it is the chunk size,
+// which is the sprite region divided by three. Only the SEI252 value is wired
+// yet; rdft2 needs this to become a port on spi_sprite.
+localparam [25:0] SPR_CHUNK_STRIDE = 26'h040_0000;
 
 // --------------------------------------------------------------------------
 // Video timing (seibuspi.cpp:898)

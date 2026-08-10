@@ -19,7 +19,7 @@ module spi_top
 	input             set_sxx2c,
 	input       [7:0] jumpers,
 	// Z80 program download -> SDRAM ch3 write port
-	output     [24:0] z80dl_sdr_addr,
+	output     [25:0] z80dl_sdr_addr,
 	output     [15:0] z80dl_sdr_din,
 	output      [1:0] z80dl_sdr_be,
 	output            z80dl_sdr_req,
@@ -72,31 +72,31 @@ module spi_top
 	output    [191:0] gdt,
 
 	// SDRAM ch1: 386 program ROM
-	output     [24:0] sdr_prg_addr,
+	output     [25:0] sdr_prg_addr,
 	input      [63:0] sdr_prg_dout,
 	output            sdr_prg_req,
 	input             sdr_prg_ack,
 
 	// SDRAM ch2: tile / char graphics
-	output     [24:0] sdr_gfx_addr,
+	output     [25:0] sdr_gfx_addr,
 	input      [63:0] sdr_gfx_dout,
 	output            sdr_gfx_req,
 	input             sdr_gfx_ack,
 
 	// SDRAM ch4: sprite graphics
-	output     [24:0] sdr_spr_addr,
+	output     [25:0] sdr_spr_addr,
 	input      [63:0] sdr_spr_dout,
 	output            sdr_spr_req,
 	input             sdr_spr_ack,
 
 	// SDRAM ch3 (share): Z80 program fetch
-	output     [24:0] sdr_z80_addr,
+	output     [25:0] sdr_z80_addr,
 	input      [63:0] sdr_z80_dout,
 	output            sdr_z80_req,
 	input             sdr_z80_ack,
 
 	// SDRAM ch5: YMF271 PCM samples
-	output     [24:0] sdr_pcm_addr,
+	output     [25:0] sdr_pcm_addr,
 	input      [63:0] sdr_pcm_dout,
 	output            sdr_pcm_req,
 	input             sdr_pcm_ack,
@@ -215,7 +215,7 @@ module spi_top
 	end
 	wire dl_start = (dl_req_s2 != dl_req_s3);
 
-	reg [24:0] dl_sdr_addr;
+	reg [25:0] dl_sdr_addr;
 	reg [15:0] dl_sdr_din;
 	reg  [1:0] dl_sdr_be;
 	reg        dl_sdr_req;

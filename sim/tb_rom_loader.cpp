@@ -28,9 +28,9 @@ static const uint32_t PRG_BASE     = 0x0000000;
 static const uint32_t Z80_BASE     = 0x0200000;
 static const uint32_t CHARS_BASE   = 0x0240000;
 static const uint32_t PCM_BASE     = 0x0280000;
-static const uint32_t TILES_BASE   = 0x0480000;
-static const uint32_t SPRITES_BASE = 0x0A80000;
-static const uint32_t SDR_SIZE     = 0x1680000;
+static const uint32_t TILES_BASE   = 0x0500000;
+static const uint32_t SPRITES_BASE = 0x1100000;
+static const uint32_t SDR_SIZE     = 0x2900000;
 
 enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
             W24_B0, W24_B1, W24_B2, W24_W01 };

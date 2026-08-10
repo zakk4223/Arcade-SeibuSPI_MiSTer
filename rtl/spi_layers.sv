@@ -67,7 +67,7 @@ module spi_layers
 	input      [31:0] tm_data,
 
 	// SDRAM graphics channel (ch2)
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output reg        sdr_req,
 	input             sdr_ack,
@@ -90,7 +90,7 @@ module spi_layers
 	// Debug taps for the golden-reference testbench.
 	output      [1:0] dbg_layer,
 	output     [14:0] dbg_tcode,
-	output     [24:0] dbg_gfx_addr,
+	output     [25:0] dbg_gfx_addr,
 	output            dbg_emit,
 	output            dbg_busy,
 	output     [15:0] dbg_rowscroll,
@@ -232,12 +232,12 @@ module spi_layers
 	// ------------------------------------------------------------------
 	// code*48  = code*32 + code*16     fine_y*6  = fine_y*4 + fine_y*2
 	// code*192 = code*128 + code*64    fine_y*12 = fine_y*8 + fine_y*4
-	wire [24:0] char_off = {8'd0, tcode[11:0], 5'd0} + {9'd0, tcode[11:0], 4'd0}
+	wire [25:0] char_off = {8'd0, tcode[11:0], 5'd0} + {9'd0, tcode[11:0], 4'd0}
 	                     + {19'd0, fine_y, 2'd0}     + {20'd0, fine_y, 1'b0};
-	wire [24:0] tile_off = {3'd0, tcode[14:0], 7'd0} + {4'd0, tcode[14:0], 6'd0}
+	wire [25:0] tile_off = {3'd0, tcode[14:0], 7'd0} + {4'd0, tcode[14:0], 6'd0}
 	                     + {18'd0, fine_y, 3'd0}     + {19'd0, fine_y, 2'd0};
 
-	wire [24:0] gfx_base = is_text ? (SDR_CHARS_BASE + char_off)
+	wire [25:0] gfx_base = is_text ? (SDR_CHARS_BASE + char_off)
 	                               : (SDR_TILES_BASE + tile_off);
 
 	// ------------------------------------------------------------------
@@ -272,7 +272,7 @@ module spi_layers
 	// still outstanding, and the next request would pair with the wrong reply.
 	reg restart_req;
 	reg [63:0] gfx_a, gfx_b;
-	reg [24:0] gfx_addr_r;
+	reg [25:0] gfx_addr_r;
 
 	wire [127:0] win = {gfx_b, gfx_a};
 
@@ -501,7 +501,7 @@ module spi_layers
 			// -------- graphics ---------------------------------------
 			S_GA_REQ: begin
 				gfx_addr_r <= gfx_base;
-				sdr_addr   <= {gfx_base[24:3], 3'b000};
+				sdr_addr   <= {gfx_base[25:3], 3'b000};
 				sdr_req    <= ~sdr_req;
 				state      <= S_GA_WT;
 			end
@@ -525,7 +525,7 @@ module spi_layers
 			end
 
 			S_GB_REQ: begin
-				sdr_addr <= {gfx_addr_r[24:3], 3'b000} + 25'd8;
+				sdr_addr <= {gfx_addr_r[25:3], 3'b000} + 26'd8;
 				sdr_req  <= ~sdr_req;
 				state    <= S_GB_WT;
 			end

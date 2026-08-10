@@ -40,7 +40,7 @@ module rom_loader
 	input             set_sxx2c,
 
 	// SDRAM write port (channel 3, toggle handshake)
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	output reg [15:0] sdr_din,
 	output reg  [1:0] sdr_be,
 	output reg        sdr_req,
@@ -53,7 +53,7 @@ module rom_loader
 	// so count what actually arrived: bytes_in should end at 23,396,352 for
 	// rdfts, and part_end at the last part index. Anything less means the HPS
 	// flow control dropped data and every part after the gap is misplaced.
-	output reg [24:0] bytes_in,
+	output reg [25:0] bytes_in,
 	output reg  [3:0] part_end
 );
 
@@ -96,74 +96,79 @@ module rom_loader
 	// (section 0).
 	// ------------------------------------------------------------------
 	reg [3:0]  part;
-	reg [24:0] off;        // byte offset within the current part
+	reg [25:0] off;        // byte offset within the current part
 
-	reg [24:0] part_base;
-	reg [24:0] part_size;
+	reg [25:0] part_base;
+	reg [25:0] part_size;
 	reg [3:0]  part_mode;
 
 	always @* if (set_sxx2c) begin
 		case (part)
 		//                                          base   size          mode
-		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
-		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
-		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
-		4'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
-		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
-		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
-		4'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
-		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 25'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
-		4'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 25'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
-		4'd9 : begin part_base = SDR_TILES_BASE + 25'h030_0000;      part_size = 25'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
-		4'd10: begin part_base = SDR_TILES_BASE + 25'h030_0000;      part_size = 25'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
-		4'd11: begin part_base = SDR_SPRITES_BASE;                   part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
-		4'd12: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
-		4'd13: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
-		default:begin part_base = SDR_PCM_BASE;                      part_size = 25'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
+		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
+		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
+		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
+		4'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
+		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
+		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
+		4'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
+		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
+		4'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
+		4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
+		4'd10: begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
+		4'd11: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
+		4'd12: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
+		4'd13: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+		default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
 		endcase
 	end
 	else begin
 		case (part)
 		//                                          base   size          mode
-		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
-		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
-		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 25'h010_0000; part_mode = M_32_W23; end // raiden-f_prg34.u0262
-		4'd3 : begin part_base = SDR_Z80_BASE;                       part_size = 25'h002_0000; part_mode = M_LINEAR; end // seibu_zprg.u1139
-		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h002_0000; part_mode = M_24_W01; end // raiden-f_fix.u0535
-		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 25'h001_0000; part_mode = M_24_B2;  end // seibu_fix2.u0528
-		4'd6 : begin part_base = SDR_TILES_BASE;                     part_size = 25'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0526
-		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 25'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0531
-		4'd8 : begin part_base = SDR_TILES_BASE + 25'h030_0000;      part_size = 25'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0534
-		4'd9 : begin part_base = SDR_TILES_BASE + 25'h030_0000;      part_size = 25'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u0530
-		4'd10: begin part_base = SDR_SPRITES_BASE;                   part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
-		4'd11: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
-		4'd12: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 25'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
-		default:begin part_base = SDR_PCM_BASE;                      part_size = 25'h020_0000; part_mode = M_LINEAR; end // raiden-f_pcm2.u0975
+		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
+		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
+		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h010_0000; part_mode = M_32_W23; end // raiden-f_prg34.u0262
+		4'd3 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h002_0000; part_mode = M_LINEAR; end // seibu_zprg.u1139
+		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h002_0000; part_mode = M_24_W01; end // raiden-f_fix.u0535
+		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_fix2.u0528
+		4'd6 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0526
+		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0531
+		4'd8 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0534
+		4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u0530
+		4'd10: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
+		4'd11: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
+		4'd12: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+		default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // raiden-f_pcm2.u0975
 		endcase
 	end
 
 	wire last_part = (part == nparts - 4'd1);
 
 	// destination offset within the part, per scatter mode
-	reg [24:0] scat;
+	wire [25:0] off_h = {1'b0, off[25:1]};   // off >> 1
+	reg [25:0] scat;
 	always @* begin
+		// Every term is written out at the full 26 bits. These used to be sized
+		// by hand for a 25-bit address and each one needed a different patch
+		// when the map grew; `off_h` exists so the halved forms cannot drift
+		// from each other again.
 		case (part_mode)
 			M_LINEAR: scat =  off;
-			M_32_B0 : scat = {off[22:0], 2'b00};
-			M_32_B1 : scat = {off[22:0], 2'b00} + 25'd1;
-			M_32_B2 : scat = {off[22:0], 2'b00} + 25'd2;
-			M_32_B3 : scat = {off[22:0], 2'b00} + 25'd3;
-			M_32_W01: scat = {off[23:1], 2'b00}         + {24'd0, off[0]};
-			M_32_W23: scat = {off[23:1], 2'b00} + 25'd2 + {24'd0, off[0]};
-			M_24_B0 : scat = {off[23:0], 1'b0} + off;
-			M_24_B1 : scat = {off[23:0], 1'b0} + off + 25'd1;
-			M_24_B2 : scat = {off[23:0], 1'b0} + off + 25'd2;
-			M_24_W01: scat = {off[23:1], 1'b0} + {1'b0, off[24:1]} + {24'd0, ~off[0]};
+			M_32_B0 : scat = {off[23:0], 2'b00};
+			M_32_B1 : scat = {off[23:0], 2'b00} + 26'd1;
+			M_32_B2 : scat = {off[23:0], 2'b00} + 26'd2;
+			M_32_B3 : scat = {off[23:0], 2'b00} + 26'd3;
+			M_32_W01: scat = {off_h[23:0], 2'b00}         + {25'd0, off[0]};
+			M_32_W23: scat = {off_h[23:0], 2'b00} + 26'd2 + {25'd0, off[0]};
+			M_24_B0 : scat = {off[24:0], 1'b0} + off;
+			M_24_B1 : scat = {off[24:0], 1'b0} + off + 26'd1;
+			M_24_B2 : scat = {off[24:0], 1'b0} + off + 26'd2;
+			M_24_W01: scat = {off_h[24:0], 1'b0} + off_h + {25'd0, ~off[0]};
 			default : scat =  off;
 		endcase
 	end
 
-	wire [24:0] dest = part_base + scat;
+	wire [25:0] dest = part_base + scat;
 
 	// ------------------------------------------------------------------
 	// Write sequencing
@@ -176,7 +181,7 @@ module rom_loader
 	always @(posedge clk) begin
 		if (reset) begin
 			part          <= 4'd0;
-			off           <= 25'd0;
+			off           <= 26'd0;
 			busy          <= 1'b0;
 			ioctl_wait    <= 1'b0;
 			sdr_req       <= 1'b0;
@@ -197,8 +202,8 @@ module rom_loader
 				part_end      <= part;
 
 				if (ioctl_wr && !busy) begin
-					bytes_in   <= bytes_in + 25'd1;
-					sdr_addr   <= {dest[24:1], 1'b0};
+					bytes_in   <= bytes_in + 26'd1;
+					sdr_addr   <= {dest[25:1], 1'b0};
 					sdr_din    <= {ioctl_dout, ioctl_dout};
 					sdr_be     <= dest[0] ? 2'b10 : 2'b01;
 					sdr_rnw    <= 1'b0;
@@ -206,12 +211,12 @@ module rom_loader
 					busy       <= 1'b1;
 					ioctl_wait <= 1'b1;
 
-					if (off == part_size - 25'd1) begin
-						off <= 25'd0;
+					if (off == part_size - 26'd1) begin
+						off <= 26'd0;
 						if (!last_part) part <= part + 4'd1;
 					end
 					else begin
-						off <= off + 25'd1;
+						off <= off + 26'd1;
 					end
 				end
 			end
@@ -219,7 +224,7 @@ module rom_loader
 				// Image is in place once the last write has retired.
 				if (seen_download && !busy) rom_ready <= 1'b1;
 				part <= 4'd0;
-				off  <= 25'd0;
+				off  <= 26'd0;
 			end
 		end
 	end

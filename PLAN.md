@@ -707,7 +707,31 @@ When `layer_bank` bit 15 is set, back/midl/fore each get a 0x800-byte table of
 
 ## 4. ROM loading and SDRAM map
 
-Single 32 MB SDRAM module required. The ROM loader performs the MAME
+**64 MB SDRAM module required as of 2026-08-09** (32 MB fits only the SEI252
+sets). The core's addresses are 26 bits; they were 25, and the controller's are
+27, which produced five WIDTHEXPAND warnings that looked cosmetic and were
+actually the 32 MB ceiling -- `rdft2` pre-flashed is 34.4 MB and could not be
+addressed at all. The extension to 27 is explicit at the `sdram` instantiation
+now, so `make -C sim lint-top` is clean and a future width mistake will show up
+instead of hiding among known warnings.
+
+One map serves every set, sized for the worst case in the family rather than
+for `rdfts`: 12 MB of tiles (rdft2) and 24 MB of sprites (rfjet). A set needing
+less leaves the tail unwritten.
+
+    0x0000000   2 MB    PRG        386 program
+    0x0200000   256 KB  Z80        sound program (RAM on SXX2C)
+    0x0240000   192 KB  CHARS      text tiles
+    0x0280000   2.5 MB  PCM        YMF271 samples / pre-programmed flash
+    0x0500000   12 MB   TILES      background tiles
+    0x1100000   24 MB   SPRITES    three plane-pair chunks
+    0x2900000   ---     end (41 MB)
+
+`SPR_CHUNK_STRIDE` is the sprite region divided by three and is therefore PER
+SET -- 4 MB for the SEI252 games, 6 MB for rdft2, 8 MB for rfjet. Only the
+SEI252 value is wired; rdft2 needs it to become a port on `spi_sprite`.
+
+The ROM loader performs the MAME
 `ROM_LOAD24_*` / `ROM_LOAD32_*` scatter in hardware, so the MRA just concatenates
 the raw files in a fixed order.
 

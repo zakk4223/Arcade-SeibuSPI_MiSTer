@@ -221,7 +221,7 @@ wire        video_rotated;
 
 wire        ioctl_download;
 wire        ioctl_wr;
-wire [24:0] ioctl_addr;
+wire [25:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_index;
 wire        ioctl_wait;
@@ -298,7 +298,7 @@ end
 // static value that is settled long before rom_ready.
 reg [7:0] mod_byte = 8'd0;
 always @(posedge clk_sys) begin
-	if (ioctl_wr && (ioctl_index == 8'd1) && ~|ioctl_addr[24:0]) mod_byte <= ioctl_dout;
+	if (ioctl_wr && (ioctl_index == 8'd1) && ~|ioctl_addr[25:0]) mod_byte <= ioctl_dout;
 end
 
 wire set_sxx2c = mod_byte[0];
@@ -312,32 +312,32 @@ wire service_mode_dip = dsw[0][1];
 // dword it wants out of it -- declaring this 32 bits wide silently truncated the
 // controller's output and zero-extended it back, so every odd dword the 386
 // fetched read as zero and half the instruction stream was blank.
-wire [24:0] sdr_prg_addr;
+wire [25:0] sdr_prg_addr;
 wire [63:0] sdr_prg_dout;
 wire        sdr_prg_req, sdr_prg_ack;
 
 // ch2 tile / char graphics (64 bit)
-wire [24:0] sdr_gfx_addr;
+wire [25:0] sdr_gfx_addr;
 wire [63:0] sdr_gfx_dout;
 wire        sdr_gfx_req, sdr_gfx_ack;
 
 // ch3 shared: ROM download, then Z80 program fetch (16 bit rw)
-wire [24:0] sdr_rw_addr;
+wire [25:0] sdr_rw_addr;
 wire [63:0] sdr_rw_dout;
 wire [15:0] sdr_rw_din;
 wire  [1:0] sdr_rw_be;
 wire        sdr_rw_req, sdr_rw_ack, sdr_rw_rnw;
 
-wire [24:0] sdr_z80_addr;
+wire [25:0] sdr_z80_addr;
 wire        sdr_z80_req, sdr_z80_ack;
 
 // ch4 sprite graphics (64 bit)
-wire [24:0] sdr_spr_addr;
+wire [25:0] sdr_spr_addr;
 wire [63:0] sdr_spr_dout;
 wire        sdr_spr_req, sdr_spr_ack;
 
 // ch5 YMF271 PCM samples (64 bit)
-wire [24:0] sdr_pcm_addr;
+wire [25:0] sdr_pcm_addr;
 wire [63:0] sdr_pcm_dout;
 wire        sdr_pcm_req, sdr_pcm_ack;
 
@@ -353,20 +353,20 @@ sdram #(.USE_CH5(1)) sdram
 	.SDRAM_DQ, .SDRAM_A, .SDRAM_DQML, .SDRAM_DQMH, .SDRAM_BA,
 	.SDRAM_nCS, .SDRAM_nWE, .SDRAM_nRAS, .SDRAM_nCAS, .SDRAM_CKE, .SDRAM_CLK,
 
-	.ch1_addr(sdr_prg_addr), .ch1_dout(sdr_prg_dout),
+	.ch1_addr({1'b0, sdr_prg_addr}), .ch1_dout(sdr_prg_dout),
 	.ch1_req (sdr_prg_req),  .ch1_ack (sdr_prg_ack),
 
-	.ch2_addr(sdr_gfx_addr), .ch2_dout(sdr_gfx_dout),
+	.ch2_addr({1'b0, sdr_gfx_addr}), .ch2_dout(sdr_gfx_dout),
 	.ch2_req (sdr_gfx_req),  .ch2_ack (sdr_gfx_ack),
 
-	.ch3_addr(sdr_rw_addr),  .ch3_dout(sdr_rw_dout),
+	.ch3_addr({1'b0, sdr_rw_addr}),  .ch3_dout(sdr_rw_dout),
 	.ch3_din (sdr_rw_din),   .ch3_be  (sdr_rw_be),
 	.ch3_req (sdr_rw_req),   .ch3_rnw (sdr_rw_rnw), .ch3_ack(sdr_rw_ack),
 
-	.ch4_addr(sdr_spr_addr), .ch4_dout(sdr_spr_dout),
+	.ch4_addr({1'b0, sdr_spr_addr}), .ch4_dout(sdr_spr_dout),
 	.ch4_req (sdr_spr_req),  .ch4_ack (sdr_spr_ack),
 
-	.ch5_addr(sdr_pcm_addr), .ch5_dout(sdr_pcm_dout),
+	.ch5_addr({1'b0, sdr_pcm_addr}), .ch5_dout(sdr_pcm_dout),
 	.ch5_req (sdr_pcm_req),  .ch5_ack (sdr_pcm_ack)
 );
 
@@ -374,8 +374,8 @@ sdram #(.USE_CH5(1)) sdram
 
 wire        rom_ready;
 
-wire [24:0] ldr_addr;
-wire [24:0] ldr_bytes;
+wire [25:0] ldr_addr;
+wire [25:0] ldr_bytes;
 wire [15:0] v_prg, v_iowr, v_tm, v_pal, v_vbl;
 wire  [3:0] v_why;
 wire [31:0] v_eip;
@@ -471,7 +471,7 @@ rom_loader rom_loader
 // Channel 3 belongs to the loader while downloading, then to the ROM checker,
 // and to the board after that.
 // TODO(T5): drive the "after" side from the Z80 program fetcher.
-wire [24:0] chk_addr, peek_addr;
+wire [25:0] chk_addr, peek_addr;
 wire        chk_req, chk_done, peek_req, peek_ack;
 wire  [3:0] chk_ok;
 wire [15:0] chk_passes, chk_fails;
@@ -534,9 +534,9 @@ spi_jtag_peek peek
 // Loader owns channel 3 during the download, the checker until it is done,
 // and after that the Z80 and the JTAG peek share it through an arbiter. The
 // Z80 is served first: it stalls a running CPU, while the peek is a human.
-wire [24:0] arb_addr;
+wire [25:0] arb_addr;
 wire        arb_req, arb_ack;
-wire [24:0] z80dl_sdr_addr;
+wire [25:0] z80dl_sdr_addr;
 wire [15:0] z80dl_sdr_din;
 wire  [1:0] z80dl_sdr_be;
 wire        z80dl_sdr_req, z80dl_sdr_ack;

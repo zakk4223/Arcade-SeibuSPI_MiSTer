@@ -51,7 +51,7 @@ module spi_sprite
 	input      [31:0] spr_data,
 
 	// SDRAM channel 4
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output reg        sdr_req,
 	input             sdr_ack,
@@ -202,11 +202,11 @@ module spi_sprite
 	// Graphics address: chunk k at + k*4 MB, tile*64 + row*4
 	// ------------------------------------------------------------------
 	reg  [1:0] chunk;
-	wire [24:0] chunk_base = SDR_SPRITES_BASE + ({23'd0, chunk} * SPR_CHUNK_STRIDE);
+	wire [25:0] chunk_base = SDR_SPRITES_BASE + ({23'd0, chunk} * SPR_CHUNK_STRIDE);
 	// Bits 1:0 are always zero: rows are 4 bytes apart. Bit 2 picks which half
 	// of the 8-byte SDRAM read holds this row.
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire [24:0] row_addr   = chunk_base + {3'd0, tile_code, 6'd0} + {19'd0, ry, 2'd0};
+	wire [25:0] row_addr   = chunk_base + {3'd0, tile_code, 6'd0} + {19'd0, ry, 2'd0};
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	// ------------------------------------------------------------------
@@ -537,7 +537,7 @@ module spi_sprite
 				end
 
 				F_REQ: begin
-					sdr_addr <= {row_addr[24:3], 3'b000};
+					sdr_addr <= {row_addr[25:3], 3'b000};
 					sdr_req  <= ~sdr_req;
 					fstate   <= F_WAIT;
 				end

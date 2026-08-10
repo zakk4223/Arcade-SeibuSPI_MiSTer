@@ -42,13 +42,13 @@ module spi_sound
 	input       [7:0] coin,         // COIN port, active low
 
 	// ---- SDRAM ch3: Z80 program (shared with the JTAG peek) ---------------
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output reg        sdr_req,
 	input             sdr_ack,
 
 	// ---- SDRAM ch5: YMF271 samples ----------------------------------------
-	output     [24:0] pcm_addr,
+	output     [25:0] pcm_addr,
 	input      [63:0] pcm_dout,
 	output            pcm_req,
 	input             pcm_ack,

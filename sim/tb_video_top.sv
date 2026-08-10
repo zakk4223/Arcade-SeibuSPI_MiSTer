@@ -32,13 +32,13 @@ module tb_video_top
 	input             pre_pal_we,
 
 	// SDRAM graphics channel, modelled by the testbench
-	output     [24:0] sdr_addr,
+	output     [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output            sdr_req,
 	input             sdr_ack,
 
 	// SDRAM sprite channel
-	output     [24:0] spr_sdr_addr,
+	output     [25:0] spr_sdr_addr,
 	input      [63:0] spr_sdr_dout,
 	output            spr_sdr_req,
 	input             spr_sdr_ack,
@@ -62,7 +62,7 @@ module tb_video_top
 	output      [9:0] dbg_text,
 	output      [1:0] dbg_layer,
 	output     [14:0] dbg_tcode,
-	output     [24:0] dbg_gfx_addr,
+	output     [25:0] dbg_gfx_addr,
 	output            dbg_emit,
 	output            dbg_busy,
 	output     [15:0] dbg_rowscroll,

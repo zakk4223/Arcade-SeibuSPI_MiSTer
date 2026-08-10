@@ -26,15 +26,15 @@ module spi_sdr_arb2
 (
 	input             clk,
 
-	input      [24:0] a_addr,
+	input      [25:0] a_addr,
 	input             a_req,
 	output reg        a_ack,
 
-	input      [24:0] b_addr,
+	input      [25:0] b_addr,
 	input             b_req,
 	output reg        b_ack,
 
-	output reg [24:0] m_addr,
+	output reg [25:0] m_addr,
 	output reg        m_req,
 	input             m_ack,
 	input      [63:0] m_dout,
@@ -50,7 +50,7 @@ module spi_sdr_arb2
 		a_ack  = 1'b0;
 		b_ack  = 1'b0;
 		m_req  = 1'b0;
-		m_addr = 25'd0;
+		m_addr = 26'd0;
 		a_dout = 64'd0;
 		b_dout = 64'd0;
 	end

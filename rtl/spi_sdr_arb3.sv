@@ -25,21 +25,21 @@ module spi_sdr_arb3
 (
 	input             clk,
 
-	input      [24:0] a_addr,
+	input      [25:0] a_addr,
 	input             a_req,
 	output reg        a_ack,
 
-	input      [24:0] b_addr,
+	input      [25:0] b_addr,
 	input             b_req,
 	output reg        b_ack,
 
-	input      [24:0] c_addr,
+	input      [25:0] c_addr,
 	input      [15:0] c_din,
 	input       [1:0] c_be,
 	input             c_req,
 	output reg        c_ack,
 
-	output reg [24:0] m_addr,
+	output reg [25:0] m_addr,
 	output reg [15:0] m_din,
 	output reg  [1:0] m_be,
 	output reg        m_rnw,
@@ -59,7 +59,7 @@ module spi_sdr_arb3
 		b_ack  = 1'b0;
 		c_ack  = 1'b0;
 		m_req  = 1'b0;
-		m_addr = 25'd0;
+		m_addr = 26'd0;
 		m_din  = 16'd0;
 		m_be   = 2'd0;
 		m_rnw  = 1'b1;

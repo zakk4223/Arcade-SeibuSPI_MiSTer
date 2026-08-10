@@ -3,7 +3,7 @@
 //
 //  Two In-System Sources & Probes instances:
 //
-//    PEEK  source = {go, addr[24:0]}   probe = {ack, data[63:0]}
+//    PEEK  source = {go, addr[25:0]}   probe = {ack, data[63:0]}
 //          Writing an address and flipping `go` issues one 64-bit SDRAM read;
 //          `ack` flips back when `data` is valid. tools/jtag_peek.tcl drives it.
 //
@@ -26,7 +26,7 @@ module spi_jtag_peek
 	input             enable,        // only take the bus once the checker is done
 
 	// SDRAM read port (shared with spi_romcheck, handed over after chk_done)
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output reg        sdr_req,
 	input             sdr_ack,
@@ -38,7 +38,7 @@ module spi_jtag_peek
 	input       [3:0] ok,
 	input      [15:0] passes,
 	input      [15:0] fails,
-	input      [24:0] bytes_in,
+	input      [25:0] bytes_in,
 	input       [3:0] part_end,
 
 	// Live counters from the board, so the vital signs can be read over JTAG
@@ -95,7 +95,7 @@ module spi_jtag_peek
 
 	wire [25:0] source;
 	wire        go   = source[25];
-	wire [24:0] addr = source[24:0];
+	wire [25:0] addr = source[25:0];
 
 	reg        ack;
 	reg [63:0] data;
@@ -231,7 +231,7 @@ module spi_jtag_peek
 		else begin
 			go_d <= go;
 			if (enable && !busy && (go != go_d)) begin
-				sdr_addr <= {addr[24:3], 3'b000};
+				sdr_addr <= {addr[25:3], 3'b000};
 				sdr_req  <= ~sdr_req;
 				busy     <= 1'b1;
 			end

@@ -23,10 +23,10 @@ BASE = {
     "z80":     0x0200000,
     "chars":   0x0240000,
     "pcm":     0x0280000,
-    "tiles":   0x0480000,
-    "sprites": 0x0A80000,
+    "tiles":   0x0500000,
+    "sprites": 0x1100000,
 }
-SDRAM_SIZE = 0x1680000
+SDRAM_SIZE = 0x2900000
 
 # (region, crc32, size, mode, offset-within-region)
 # Mode names match the scatter modes in rtl/rom_loader.sv.

@@ -40,7 +40,7 @@ module spi_cpu
 	input             z80dl_stall,  // SXX2C: a Z80 download byte is in flight
 
 	// SDRAM channel 1 - PRG ROM
-	output reg [24:0] sdr_addr,
+	output reg [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output reg        sdr_req,
 	input             sdr_ack,
@@ -343,7 +343,7 @@ module spi_cpu
 	// the same 2 MB image, so the low 21 bits are the offset either way.
 	// SDRAM 64-bit reads must be 8-byte aligned, so this is the address of the
 	// aligned group containing cur_dw, i.e. (cur_dw & ~1) * 4.
-	wire [24:0] rom_grp_addr = SDR_PRG_BASE + {4'd0, cur_dw[18:1], 3'b000};
+	wire [25:0] rom_grp_addr = SDR_PRG_BASE + {4'd0, cur_dw[18:1], 3'b000};
 
 	// Snoop the GDT the boot code builds at byte 0x800 (dword index 0x200).
 	//

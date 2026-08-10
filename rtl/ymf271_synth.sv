@@ -65,7 +65,7 @@ module ymf271_synth
 	input                sample_tick,
 
 	// ---- SDRAM ch5: sample ROM --------------------------------------------
-	output reg    [24:0] sdr_addr,
+	output reg    [25:0] sdr_addr,
 	input         [63:0] sdr_dout,
 	output reg           sdr_req,
 	input                sdr_ack,
@@ -401,7 +401,7 @@ module ymf271_synth
 	// ---- sample addressing ------------------------------------------------
 	wire [23:0] addr8  = {1'b0, p_start} + stepptr[39:16];
 	// 12 bit packs two samples into three bytes; base is the start of the pair.
-	wire [24:0] idx3   = {stepptr[39:17], 1'b0} + {1'b0, stepptr[39:17]};
+	wire [25:0] idx3   = {2'b00, stepptr[39:17], 1'b0} + {3'b000, stepptr[39:17]};
 	wire [22:0] base12 = p_start + idx3[22:0];
 
 	wire line_hit  = line_tv[20] && (line_tv[19:0] == fetch_addr[22:3]);

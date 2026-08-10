@@ -36,7 +36,7 @@ module ymf271
 	output            irq,
 
 	// ---- SDRAM ch5 --------------------------------------------------------
-	output     [24:0] sdr_addr,
+	output     [25:0] sdr_addr,
 	input      [63:0] sdr_dout,
 	output            sdr_req,
 	input             sdr_ack,

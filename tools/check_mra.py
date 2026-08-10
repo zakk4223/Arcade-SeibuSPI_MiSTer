@@ -45,8 +45,8 @@ BASES = {
     "z80":     0x0200000,
     "chars":   0x0240000,
     "pcm":     0x0280000,
-    "tiles":   0x0480000,
-    "sprites": 0x0A80000,
+    "tiles":   0x0500000,
+    "sprites": 0x1100000,
 }
 
 REGION = {
@@ -162,13 +162,13 @@ def parse_loader(path, table):
 
     out = {}
     for e in re.finditer(r"4'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
-                         r"\s*part_size\s*=\s*25'h([0-9a-fA-F_]+);"
+                         r"\s*part_size\s*=\s*26'h([0-9a-fA-F_]+);"
                          r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(\S+)", body):
         idx, base, size, mode, name = e.groups()
         out[int(idx)] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
                          "mode": mode, "name": name}
     e = re.search(r"default\s*:\s*begin\s*part_base\s*=\s*([^;]+);"
-                  r"\s*part_size\s*=\s*25'h([0-9a-fA-F_]+);"
+                  r"\s*part_size\s*=\s*26'h([0-9a-fA-F_]+);"
                   r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(.+)", body)
     if not e:
         fail("no default arm in the %s table" % table)
@@ -190,7 +190,7 @@ def resolve_base(expr):
                  ("SDR_TILES_BASE", BASES["tiles"]), ("SDR_SPRITES_BASE", BASES["sprites"]),
                  ("SPR_CHUNK_STRIDE", 0x400000)):
         e = e.replace(k, hex(v))
-    e = re.sub(r"25'h([0-9a-fA-F_]+)", lambda m: hex(int(m.group(1).replace("_", ""), 16)), e)
+    e = re.sub(r"26'h([0-9a-fA-F_]+)", lambda m: hex(int(m.group(1).replace("_", ""), 16)), e)
     return eval(e, {"__builtins__": {}}, {})
 
 
