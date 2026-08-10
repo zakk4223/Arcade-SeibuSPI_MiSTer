@@ -423,21 +423,54 @@ finding), and this session already used disassembly successfully to pin the
 0x4009 bit in minutes. What it should answer: whether the tail is decompressed,
 and if so from where.
 
-**Three ways forward, and the third is the cheap one:**
+**Cracked, by decomposing the pipeline rather than reading code.** The path is
+`sound01 reads -> [386] -> sound FIFO 0x680 -> [Z80] -> flash`, so tapping all
+three says which stage transforms. The Z80 turns out to be a pure pass-through:
+4,056,707 FIFO bytes against 4,056,752 flash writes, command bytes and all. So
+everything happens in the 386, and the read log explains the payload completely.
 
-1. Do section 0's `install_write_tap` analysis properly for rdft2. It would say
-   exactly what the Z80 writes and from where, and would settle whether the
-   payload is transformed, decompressed, or sourced from somewhere unexpected.
-2. Implement the authentic path instead -- flash command state machine,
-   writable sample channel, save file -- and let the game do its own reflash
-   once. That is section 0's "authentic" MRA and it works for every cartridge
-   game without deriving anything.
-3. **Do `rdft2us` (SXX2F single board) instead.** It has a plain 2.5 MB `ymf`
-   sample ROM and NO flash at all, so the entire problem disappears. With
-   RISE10 already done it needs a 93C46 EEPROM, a loader table, the tile-key
-   select and the two register moves -- all of which are needed for the
-   cartridge version eventually anyway. 34.9 MB, which the 26-bit map now
-   reaches.
+rdft2's flash payload:
+
+| flash range          | source                                                |
+|----------------------|-------------------------------------------------------|
+| `0x0..0x3`           | region stamp, = `maincpu[0x1FFFFC]` (`80 4A 4A 37`)   |
+| `0x4..0x17C246`      | `pcm.u0217` VERBATIM, 1,557,059 bytes                 |
+| `0x17C247..0x1EF2F5` | `sound1.u0222[0..0x4C664]` DECOMPRESSED               |
+
+The last row is the thing rdft does not have: 312,933 bytes in, 471,215 out,
+**1.506x**. That is why the tail appears in no ROM at any alignment -- it is
+computed, not copied. The 386 reads exactly `snd1[0..0x4C664]` and emits exactly
+the tail, which is what pins it.
+
+**`sound1.u0222` also holds rdft2's Z80 program**, at 0x60000..0x7FFFF, 128 KB
+beginning `C3 67 00` (`jp 0x0067`). It is the FIRST thing read. rdft takes its
+Z80 program from `maincpu[0x1BB800]` instead, so that differs per game too --
+and it means **the "omit sound01" trick is rdft-specific**. A pre-flashed rdft2
+MRA that dropped sound01 would have no Z80 program at all.
+
+### So build the authentic flash path, not per-game derivation
+
+This measurement settles the architecture question. rdft's payload being a plain
+concatenation was a special case; rdft2 needs a decompressor whose format is
+unknown, and rfjet will have its own arrangement again. Deriving images offline
+means reverse-engineering one packer per game.
+
+The authentic path costs that once and works for every cartridge game:
+
+* **The write side of the wave memory port already exists.** 0x14-0x17 decode
+  the address and the direction bit, and 0x17 pre-increments; writes currently
+  go nowhere because SXX2E's sample memory is a mask ROM. Section 14.5.
+* What is missing is the **E28F008SA command state machine** (Read Array FF,
+  Block Erase 20/D0, Byte Program 40 + datum, status polling with the direction
+  bit flipped between steps), a **writable ch5** with the sample line cache
+  invalidated on write, and **save-file persistence** so the several-minute
+  reflash happens once rather than every boot.
+* The ch3 write arbiter built for the Z80 download (`spi_sdr_arb3`) is the
+  pattern to copy for ch5.
+
+Then rdft, rdft2, rfjet, senkyu, viprp1 and ejanhs all work from stock MRAs
+with no derived images, and `mra/rdft.mra`'s pre-flashed trick stays as a
+fast-boot option for the one game where it happens to be derivable.
 
 ### What else `seibuspi.cpp` covers, and what each would cost
 
