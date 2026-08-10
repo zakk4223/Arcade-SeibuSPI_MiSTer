@@ -448,6 +448,40 @@ Z80 program from `maincpu[0x1BB800]` instead, so that differs per game too --
 and it means **the "omit sound01" trick is rdft-specific**. A pre-flashed rdft2
 MRA that dropped sound01 would have no Z80 program at all.
 
+### What the decompressor is: DPCM, plus a state-dependent extension
+
+Pinned by a time-ordered merged tap -- reads of `sound01` and the bytes the 386
+pushes to the Z80 in one stream, so the LOCAL expansion ratio is visible. The
+interleaving is almost entirely "one read, then 2/4/6/8/10/12 writes" (always
+even: each output byte costs a command byte plus the datum), so one input byte
+produces one to six output samples.
+
+**The output is plain 8-bit PCM** -- mean |delta| 6.5 as signed bytes, which is
+smooth audio. It is NOT 12-bit packed: unpacking it that way gives |delta|
+2239. The input is not audio (mean |delta| 51.5).
+
+**The core rule is DPCM**, and it is certain:
+
+    out[n] = out[n-1] + in[n]        (signed 8-bit, wrapping)
+
+verified over **174,045 single-output groups with zero failures**.
+
+**What is not yet pinned** is the multi-output case, 117,000-odd groups where
+one input byte yields 2 to 6 samples. It is not a fixed codebook: only 11 of
+256 input values always produce the same delta sequence, and those eleven are
+the small literal deltas. Values like 0x84 show 69 distinct behaviours, so the
+decoder carries state. It is also not LZ -- **0 of 400 eight-byte output windows
+appear anywhere in the input**, so nothing is copied, every byte is computed.
+
+That leaves an adaptive scheme (ADPCM-like step adaptation) or a run/ramp
+extension on top of the literal deltas. Cracking it needs the 386 routine, and
+the search is now small: find the loop that reads `sound01` sequentially and
+emits more than one sample per input byte.
+
+**But note this is optional work.** Everything above exists to derive images
+offline. The authentic flash path below makes the codec irrelevant, because the
+game runs its own decoder.
+
 ### So build the authentic flash path, not per-game derivation
 
 This measurement settles the architecture question. rdft's payload being a plain
