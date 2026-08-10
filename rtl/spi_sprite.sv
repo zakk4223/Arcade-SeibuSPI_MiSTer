@@ -227,16 +227,22 @@ module spi_sprite
 	// places them (M_SPR_R10). Doing it here instead would put the two halves of
 	// a row 32 bytes apart and cost six SDRAM reads per row instead of three.
 	reg  [1:0] chunk;
-	reg [25:0] chunk_base;
-	always @* case (chunk)
-		2'd0   : chunk_base = SDR_SPRITES_BASE;
-		2'd1   : chunk_base = SDR_SPRITES_BASE + spr_chunk_stride;
-		default: chunk_base = SDR_SPRITES_BASE + {spr_chunk_stride[24:0], 1'b0};
-	endcase
+	function automatic [25:0] chunk_base_of(input [1:0] k);
+		case (k)
+			2'd0   : chunk_base_of = SDR_SPRITES_BASE;
+			2'd1   : chunk_base_of = SDR_SPRITES_BASE + spr_chunk_stride;
+			default: chunk_base_of = SDR_SPRITES_BASE + {spr_chunk_stride[24:0], 1'b0};
+		endcase
+	endfunction
 	// Bits 1:0 are always zero: rows are 4 bytes apart. Bit 2 picks which half
 	// of the 8-byte SDRAM read holds this row.
+	// The row offset within a chunk is the same for all three, so only the base
+	// differs -- which means the next chunk's address is ready a cycle early.
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire [25:0] row_addr   = chunk_base + {3'd0, tile_code, 6'd0} + {19'd0, ry, 2'd0};
+	wire [25:0] row_off    = {3'd0, tile_code, 6'd0} + {19'd0, ry, 2'd0};
+	wire [25:0] row_addr   = chunk_base_of(chunk)        + row_off;
+	wire [25:0] row_addr_n = chunk_base_of(chunk + 2'd1) + row_off;
+	wire [25:0] row_addr_0 = chunk_base_of(2'd0)         + row_off;
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	// ------------------------------------------------------------------
@@ -339,8 +345,7 @@ module spi_sprite
 	// Fetch machine, inside S_DRAW.
 	localparam [2:0] F_POP  = 3'd0,   // take the next sprite the scanner queued
 	                 F_COL  = 3'd1,   // is this column on screen, and is a bank free?
-	                 F_REQ  = 3'd2,   // request chunk `chunk`
-	                 F_WAIT = 3'd3,
+	                 F_WAIT = 3'd3,   // request issued, waiting for its ack
 	                 F_DONE = 3'd4;
 	// Emit machine, inside S_DRAW, running a column behind the fetcher.
 	localparam       E_IDLE = 1'b0,
@@ -505,9 +510,8 @@ module spi_sprite
 
 			// Restart only at a sprite boundary, so an SDRAM request is never
 			// abandoned with its ack outstanding.
-			// Safe only where no SDRAM request is outstanding: F_REQ/F_WAIT
-			// have one in flight and must not be abandoned with its ack
-			// pending. Interrupting the emitter mid-column is fine -- the line
+			// Safe only where no SDRAM request is outstanding: F_WAIT has one
+			// in flight and must not be abandoned with its ack pending. Interrupting the emitter mid-column is fine -- the line
 			// is being abandoned anyway and S_CLR wipes the buffer.
 			if (restart_req && (state == S_IDLE ||
 			                    (state == S_DRAW && (fstate == F_POP ||
@@ -583,14 +587,15 @@ module spi_sprite
 					else if (!rv[fb]) begin
 						chunk     <= 2'd0;
 						dbg_tiles <= dbg_tiles + 16'd1;
-						fstate    <= F_REQ;
+						// Issue chunk 0 here rather than stepping through a
+						// separate F_REQ state. A column is three round trips
+						// and that state put a dead cycle in front of each one;
+						// at ~85 columns a line on a dense scene it was ~340
+						// cycles of a 3200 cycle budget spent doing nothing.
+						sdr_addr  <= {row_addr_0[25:3], 3'b000};
+						sdr_req   <= ~sdr_req;
+						fstate    <= F_WAIT;
 					end
-				end
-
-				F_REQ: begin
-					sdr_addr <= {row_addr[25:3], 3'b000};
-					sdr_req  <= ~sdr_req;
-					fstate   <= F_WAIT;
 				end
 
 				F_WAIT: if (sdr_ack == sdr_req) begin
@@ -626,8 +631,11 @@ module spi_sprite
 						end
 					end
 					else begin
-						chunk  <= chunk + 2'd1;
-						fstate <= F_REQ;
+						// Chain: the next chunk's address is already formed, so
+						// request it on the ack cycle rather than a cycle later.
+						chunk    <= chunk + 2'd1;
+						sdr_addr <= {row_addr_n[25:3], 3'b000};
+						sdr_req  <= ~sdr_req;
 					end
 				end
 

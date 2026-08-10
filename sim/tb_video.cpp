@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <set>
 #include <map>
 #include <array>
@@ -191,6 +192,15 @@ int main(int argc, char **argv)
     int      bus_owner = 0;          // 1 = gfx, 2 = sprite
     long long sdr_count = 0, spr_stall = 0, gfx_stall = 0;
 
+    // Per-line sprite bandwidth accounting. "9 lines starved" says a budget ran
+    // out but not what it ran out of, and the fix depends on that: issuing more
+    // requests than the bus can serve is a different problem from waiting
+    // behind the tile layers, which get strict priority.
+    std::vector<int> ln_spr_req(320, 0), ln_spr_stall(320, 0), ln_gfx_req(320, 0);
+    std::vector<int> ln_starved(320, 0);
+    std::vector<int> ln_scanned(320, 0), ln_yhit(320, 0);
+    int prev_starved = 0, prev_scanned = 0, prev_yhit = 0;
+
     auto fetch64 = [&](uint32_t addr) -> uint64_t {
         uint64_t a = addr & ~7u, v = 0;
         for (int i = 0; i < 8; i++)
@@ -199,9 +209,19 @@ int main(int argc, char **argv)
     };
 
     auto tick = [&]() {
+        const int ln = (dut->vcnt < 320) ? dut->vcnt : 319;
         // latch new requests
-        if (dut->sdr_req     != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_pend = true; sdr_count++; }
-        if (dut->spr_sdr_req != spr_req_d) { spr_req_d = dut->spr_sdr_req; spr_pend = true; }
+        if (dut->sdr_req     != sdr_req_d) { sdr_req_d = dut->sdr_req; sdr_pend = true; sdr_count++; ln_gfx_req[ln]++; }
+        if (dut->spr_sdr_req != spr_req_d) { spr_req_d = dut->spr_sdr_req; spr_pend = true; ln_spr_req[ln]++; }
+        if ((int)dut->dbg_spr_starved != prev_starved) {
+            prev_starved = dut->dbg_spr_starved;
+            ln_starved[ln]++;
+        }
+        {
+            int sc = dut->dbg_spr_scanned_o, yh = dut->dbg_spr_yhit_o;
+            ln_scanned[ln] += (uint16_t)(sc - prev_scanned); prev_scanned = sc;
+            ln_yhit[ln]    += (uint16_t)(yh - prev_yhit);    prev_yhit = yh;
+        }
 
         if (bus_free) {
             if (sdr_pend) { sdr_data   = fetch64(dut->sdr_addr);     dut->sdr_ack     = sdr_req_d; sdr_pend = false; }
@@ -218,7 +238,7 @@ int main(int argc, char **argv)
             else if (sdr_pend) { bus_owner = 1; bus_busy = BUS_OCC; }
             else if (spr_pend) { bus_owner = 2; bus_busy = BUS_OCC; }
             if (sdr_pend && bus_owner != 1) gfx_stall++;
-            if (spr_pend && bus_owner != 2) spr_stall++;
+            if (spr_pend && bus_owner != 2) { spr_stall++; ln_spr_stall[ln]++; }
         }
 
         dut->sdr_dout     = sdr_data;
@@ -807,6 +827,25 @@ int main(int argc, char **argv)
     {
         size_t nonblack = 0;
         for (auto c : got) if (c) nonblack++;
+        {
+            std::vector<int> order;
+            for (int i = 0; i < 320; i++) order.push_back(i);
+            std::sort(order.begin(), order.end(),
+                      [&](int a, int b) { return ln_spr_req[a] > ln_spr_req[b]; });
+            printf("busiest lines (spr reqs / spr stall cycles / gfx reqs):\n   ");
+            for (int k = 0; k < 6; k++) {
+                int i = order[k];
+                printf(" L%d:req%d/stall%d/gfx%d/scan%d/yhit%d%s", i,
+                       ln_spr_req[i] / 3, ln_spr_stall[i] / 3, ln_gfx_req[i] / 3,
+                       ln_scanned[i] / 3, ln_yhit[i] / 3,
+                       ln_starved[i] ? "/STARVED" : "");
+            }
+            printf("\n");
+            int st = 0, wr = 0;
+            for (int i = 0; i < 320; i++)
+                if (ln_starved[i]) { st++; if (ln_spr_req[i] > wr) wr = ln_spr_req[i]; }
+            if (st) printf("   %d starved lines, most sprite reqs on one: %d\n", st, wr);
+        }
         printf("sprite budget: %u lines ended with sprites unscanned (starved),"
            " %u scanned, %u y-hits\n",
            (unsigned)dut->dbg_spr_starved, (unsigned)dut->dbg_spr_scanned_o,

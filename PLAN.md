@@ -834,6 +834,64 @@ seconds reflashing. Two traps worth keeping: `SECONDS` must cover `FRAME` at
 just empty; and the capture now writes its set name into `regs.txt`, so the
 bench cannot be pointed at an rdft2 capture with rdfts's keys.
 
+### Sprite starvation: measured, improved 2.8x, not eliminated (2026-08-10)
+
+The one scene that did not match, rdft2 frame 5400, is down from **377 wrong
+pixels to 133** (0.49% -> 0.17%). Everything else still matches exactly. The
+remaining gap is real and this records what it actually is, because the first
+thing this needed was numbers rather than a theory.
+
+**What the busiest line is doing**, per line per frame, from the new per-line
+accounting in `sim/tb_video.cpp`:
+
+    L139  263 sprite reqs   705 stall cycles   165 gfx reqs   512 scanned   60 y-hits
+    L144  252 sprite reqs   776 stall cycles   174 gfx reqs   512 scanned   59 y-hits  STARVED
+
+Two things fall out of that. The scanner is NOT the limit -- all 512 entries are
+walked on every one of these lines, so the FIFO split from earlier did its job.
+And the bus is at about 72% utilisation ((263+165) x 6 cycles against a 3584
+cycle line), with sprites losing ~750 cycles a line waiting behind the tiles.
+
+**The arbiter is worse than the testbench models.** `sdram.sv`'s STATE_IDLE is
+fixed priority: ch2 (tiles) > ch1 (the 386's own fetches) > ch4 (sprites) > ch5
+(PCM) > ch3. `tb_video.cpp` models only tiles ahead of sprites, so it is
+OPTIMISTIC -- on hardware sprites also queue behind the CPU. Worth knowing
+before trusting any margin measured here.
+
+**What was fixed.** A column is three SDRAM round trips and the fetcher stepped
+through an `F_REQ` state before each one, so every round trip carried a dead
+cycle. The next chunk's address differs only in its base, so it is available on
+the ack cycle: `F_REQ` is gone and requests chain straight out of `F_WAIT`.
+That is ~4 cycles a column, ~340 of a 3200-cycle budget on a dense line, and it
+is what took 377 down to 133.
+
+**What was tried and reverted.** The 320-cycle clear pass at the top of every
+line is 10% of the budget, and the standard way to remove it is a generation
+tag: give each line-buffer entry the bank's tag, flip the tag when the bank is
+re-rendered, treat a mismatch as invalid. Implemented, it lost every sprite on
+both sets -- and lost them identically whether the tag was compared, bypassed,
+or forced to always fail, which says the write side was wrong rather than the
+compare. Rather than ship a half-debugged line buffer it is reverted. The idea
+is still right and the measurement says it is worth 10%; whoever picks it up
+should start by proving `bank_tag` actually toggles, which is the step this ran
+out of road on.
+
+**The structural fix, and why it was not taken.** Three round trips per column
+exist because the three plane-pair chunks are megabytes apart. Interleaving them
+at load time so a tile row's 12 bytes are contiguous makes it TWO reads always
+-- 12 bytes from a 4-or-8 aligned start never spans three 8-byte reads -- a 33%
+cut in sprite bus demand that would relieve the tile layers too. The loader can
+do the permutation for free, exactly as it already does sprite_reorder. The
+blocker is part indices: rdft2's sprites are one part only because they are
+contiguous, and interleaving needs one part per chunk, which puts the table at
+16. `part` and `part_end` are 4 bits and `part_end` is decoded by bit position
+in `tools/jtag_peek.tcl`, so it is a wider change than it looks.
+
+**Is 133 pixels worth more work?** It is one scene of ten, transient sprites on
+a busy demo-play frame, and the same budget constrains every set. The honest
+position is that the sprite engine is bandwidth-bound at ~85 columns a line and
+the next real gain is the interleave, not another micro-optimisation.
+
 ### The authentic flash path is still the general answer
 
 The codec being cracked weakens this argument but does not kill it. rdft's

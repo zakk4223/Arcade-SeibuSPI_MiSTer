@@ -27,7 +27,7 @@
       against MAME frame by frame".
 
       One caveat that is not rdft2's: the densest demo-play scene differs by
-      0.49% because the sprite engine runs out of SDRAM bandwidth and drops
+      0.17% because the sprite engine runs out of SDRAM bandwidth and drops
       sprites on nine lines. It matches exactly with the bandwidth limit
       removed, so the graphics are right and the budget is the constraint --
       the same budget every set shares.
