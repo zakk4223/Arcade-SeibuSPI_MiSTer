@@ -482,6 +482,92 @@ emits more than one sample per input byte.
 offline. The authentic flash path below makes the codec irrelevant, because the
 game runs its own decoder.
 
+### RESUME HERE: cracking the rdft2 codec (2026-08-09, unfinished)
+
+Everything below is what a fresh session needs. The captured data lived in a
+scratch directory and is gone; the recipe to regenerate it is here and takes
+about seven minutes a run.
+
+**Regenerating the evidence.** `tools/mame_flash_probe.lua` has four modes.
+rdft2's PAL dumps are missing from the usual zip and MAME refuses to start
+without them, so make a working copy of `rdft2.zip` with three 0x117-byte
+placeholder files named `rm81.u0529.bin`, `rm82.u0330.bin`, `rm83.u0331.bin`;
+MAME then warns about the CRCs and runs. The reflash needs ~420 emulated
+seconds and runs at ~570% (a completed flash boots at ~2700% instead, which is
+how to tell it finished).
+
+    SLOP_MODE=merged SLOP_OUT=/tmp/x mame rdft2 -rompath <patched> \
+      -nvram_directory /tmp/nv -autoboot_script tools/mame_flash_probe.lua \
+      -video none -sound none -seconds_to_run 420 -nothrottle
+
+The final image is simply MAME's `soundflash1` + `soundflash2` nvram files
+concatenated; no tap needed just to obtain it.
+
+**Established, with numbers:**
+
+* The Z80 is a pure relay -- 4,056,707 FIFO bytes against 4,056,752 ext-port
+  writes. All the work is in the 386.
+* Payload is 2,028,342 bytes, 0x000000-0x1EF2F5, both chips written in
+  lockstep, each datum preceded by its program-setup command.
+* `flash[0..3]` = `maincpu[0x1FFFFC]` = `80 4A 4A 37`.
+* `flash[4..0x17C246]` = `pcm.u0217` verbatim, 1,557,059 bytes.
+* `flash[0x17C247..0x1EF2F5]` = 471,215 bytes decoded from
+  `sound1.u0222[0..0x4C664]` (312,933 bytes), 1.506x.
+* `sound1.u0222[0x60000..0x7FFFF]` is the Z80 program, read FIRST, 128 KB
+  starting `C3 67 00`.
+* Output is plain 8-bit PCM: mean |delta| 6.5. NOT 12-bit packed (unpacking
+  gives 2239).
+* **The core rule is DPCM: `out[n] = out[n-1] + in[n]`, signed 8-bit wrapping,
+  verified over 174,045 single-output groups with ZERO failures.**
+
+**Ruled out, so nobody repeats them:**
+
+* Not LZ or any copier: 0 of 400 eight-byte output windows appear anywhere in
+  the input.
+* Not a fixed codebook: only 11 of 256 input values always produce the same
+  delta sequence, and those eleven are the small literal deltas.
+* Not 12-bit packing, despite the 1.5 ratio inviting it.
+* The tail is in no ROM of the set. Note the earlier failure to find it in the
+  individual program files proves nothing -- the 386 reads the ASSEMBLED 32-bit
+  region, so data spanning byte lanes appears in no single lane file.
+
+**The open question** is the multi-output case: ~117,000 groups where one input
+byte yields 2 to 6 samples. Two clues, pulling in the same direction:
+
+* The coder spends **4.95 bits per sample against a delta entropy of 5.25**, so
+  it BEATS order-0 entropy. Samples are being predicted, not merely coded.
+* Several multi-output groups show near-equal successive deltas (+16,+12;
+  +11,+10; -15,-14), which looks like linear interpolation between coded
+  points. Others do not, so it is not purely that.
+* Determinism given context: 4.3% from the input byte alone, 52.0% with one
+  previous byte, **98.9% with two**. So the decoder state is shallow -- roughly
+  two bytes' worth -- which is good news for an RTL implementation.
+
+Caution: the read-to-write grouping used for all of the above may be skewed by
+the 386's own buffering, so a rule that "almost" fits may be a framing artefact
+rather than a wrong rule.
+
+**Next step, already set up:** `SLOP_MODE=pc` records the 386's PC when it
+pushes a byte during the compressed phase, which names the codec routine. The
+last attempt dumped at frame 18000 and the run ended at ~17,800, so it produced
+nothing -- the script now dumps every 4000 frames. With the PC in hand,
+disassemble `maincpu` around it (`objdump -D -b binary -m i386 -M intel` on the
+assembled 32-bit image; note the PRG window is at 0x00200000, so file offset =
+EIP - 0x200000).
+
+**Why this matters, and why it is optional.** An in-core decoder run at ROM-load
+time avoids the flash controller entirely: no several-minute first boot, no 2 MB
+MiSTer save, and it never touches the audio fetch path. The DPCM core is an
+8-bit adder; with two bytes of state the whole decoder is tens of lines. The
+loader would need a variable-rate part mode (destination advances by bytes
+emitted, `ioctl_wait` held while draining) -- about 30 lines. Verification is
+unusually strong because the exact 2 MB expected image can be captured from
+MAME and compared bit-for-bit.
+
+The alternative remains the authentic flash path below, which needs no codec at
+all but costs the boot time, the save plumbing, and a writable ch5 in the audio
+path.
+
 ### So build the authentic flash path, not per-game derivation
 
 This measurement settles the architecture question. rdft's payload being a plain
@@ -1519,6 +1605,42 @@ Traps worth remembering:
    earlier pipeline-depth bugs.
 
 Of those, only the first would ever have produced an obvious symptom.
+
+## 10b. Where the project stands (end of 2026-08-09)
+
+Two mainboard revisions run on hardware, both deployed to the MiSTer at
+192.168.1.125 and both verified this session:
+
+* **SXX2E** (`rdfts`) -- the original target. Frame is BIT-EXACT against MAME,
+  0 of 76,800 pixels differing, on two independent captures. Sound plays with
+  0 PCM overruns.
+* **SXX2C** (`rdft`, pre-flashed) -- the SPI cartridge mainboard. Boots to
+  attract with sprites and sound from an MRA that ships the sample flash
+  pre-programmed, so no reflash ritual.
+
+The deployed core is SEED 3, timing met on every clock: clk_ram +0.735,
+clk_sys +1.517, TNS 0.000. `make verify` passes; `make -C sim lint-top` is
+clean for the first time.
+
+**Built but not yet wired to anything:**
+
+* `spi_rise10_decrypt.sv` -- RISE10 sprite decryption for rdft2/rdft2us,
+  verified against MAME over 2048 words including `sprite_reorder`. NOT in
+  `files.qip` yet and `spi_sprite` still instantiates the SEI252 unit
+  unconditionally.
+* Tile keys for all three families are defined and all three verified, but
+  `spi_layers` hardwires the SEI252 triple.
+
+**The immediate decision** is recorded in section 0: an in-core decoder that
+builds the flash contents from raw ROM at load time, versus the authentic flash
+controller. The decoder needs the rdft2 codec cracked (see RESUME HERE); the
+controller needs a writable ch5, a save file and a long first boot. The decoder
+is the preferred path.
+
+**What rdft2 still needs beyond the codec:** `SPR_CHUNK_STRIDE` as a port on
+`spi_sprite` (6 MB for rdft2, currently a 4 MB constant), a third loader table
+and MRA, the tile-key select, and the RISE10 mux in the sprite fetch. The 26-bit
+address widening that made its 34.4 MB reachable is done.
 
 ## 11. TASKS
 
