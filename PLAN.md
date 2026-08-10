@@ -359,6 +359,54 @@ Everything else the cartridge needs is already there: SEI252 sprite decryption
 and the SEI252 tile keys are the same as `rdfts` (both are `init_sei252`), the
 sprite DMA trigger at 0x50E is already decoded, and the DS2404 stub is shared.
 
+### rdft2's flash payload is NOT derivable the way rdft's was (2026-08-09)
+
+Measured before building anything, and it is the reason not to build it.
+
+Method, cheaper than section 0's write tap because the mechanism is already
+known: fresh `-nvram_directory`, run `rdft2` until the updater finishes, then
+read the two `soundflash` nvram files back. MAME persists the flash devices, so
+the final image comes out directly.
+
+The reflash completed and was verified as complete, not assumed: 575% while
+flashing (the same figure `rdft` gives), then a re-run at **2727% with both
+chips unchanged**, which is the updater skipping.
+
+**The region-lock rule holds exactly.** `flash[0..3]` = `maincpu[0x1FFFFC]` =
+`80 4A 4A 37` -- region 0x80 Germany, and note the build ID is 4A 4A **37**
+against `rdft`'s 4A 4A 36. So section 0's stamp finding generalises.
+
+**The payload does not.** `flash[4..0x17C246]` is `pcm.u0217` verbatim at
+identity offset, 1,557,059 bytes. After that:
+
+* the flash holds real data out to 0x1EF2FC, which is MORE than `pcm.u0217`
+  itself contains (its real data ends at 0x18749E);
+* `sound1.u0222` does not appear in the flash anywhere -- not at any offset,
+  searched by content;
+* probes taken from the flash past the break are not found in ANY file of the
+  rdft2 set.
+
+So `rdft` being a plain concatenation of two ROMs was a property of `rdft`, not
+of the hardware. Something transforms or generates data here, and until that is
+understood a pre-flashed rdft2 MRA cannot be built -- an MRA can only assemble
+files that are in the ROM set.
+
+**Three ways forward, and the third is the cheap one:**
+
+1. Do section 0's `install_write_tap` analysis properly for rdft2. It would say
+   exactly what the Z80 writes and from where, and would settle whether the
+   payload is transformed, decompressed, or sourced from somewhere unexpected.
+2. Implement the authentic path instead -- flash command state machine,
+   writable sample channel, save file -- and let the game do its own reflash
+   once. That is section 0's "authentic" MRA and it works for every cartridge
+   game without deriving anything.
+3. **Do `rdft2us` (SXX2F single board) instead.** It has a plain 2.5 MB `ymf`
+   sample ROM and NO flash at all, so the entire problem disappears. With
+   RISE10 already done it needs a 93C46 EEPROM, a loader table, the tile-key
+   select and the two register moves -- all of which are needed for the
+   cartridge version eventually anyway. 34.9 MB, which the 26-bit map now
+   reaches.
+
 ### What else `seibuspi.cpp` covers, and what each would cost
 
 Seven distinct titles across five board types. Everything below is read off the
