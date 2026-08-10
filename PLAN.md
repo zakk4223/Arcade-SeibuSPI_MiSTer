@@ -2010,11 +2010,29 @@ per part by the MRA, verified against the real rdft2 stream (section 0). The
 controller still needs a writable ch5, a save file and a long first boot, and
 remains the fallback for any game whose packer is not worth cracking.
 
-**What rdft2 still needs:** nothing known. Ten captured scenes match MAME
-exactly (section 0), including the title screen and the intro cinematic. The
-one scene that does not is a sprite-STARVATION difference, not an rdft2 one --
-it matches exactly with the bus model relaxed, and improving the sprite budget
-is section 3.3's problem for every set. rdft2 has never been run on hardware.
+**What rdft2 still needs: the sound01 window, for its Z80 program.** The video
+path is done -- ten captured scenes match MAME exactly, sprite starvation
+included (section 0). Sound is not, and the gap is in the CORE, not the MRA.
+
+rdft2 keeps its Z80 program in `sound1.u0222[0x60000..0x7FFFF]` and the 386
+reads it through the sound01 window before releasing the Z80 from reset. rdft
+does not -- its copy is in `maincpu`, already loaded -- which is exactly why
+rdft can drop sound01 and rdft2 cannot. Section 0 predicted this; it is now
+measured. Pre-flashed, with the updater skipped, rdft2 still issues **131,072
+dword reads over 0x1380000-0x13FFFFC**, which is region 0x980000-0x9FFFFC, which
+is `sound1.u0222[0x60000..0x7FFFF]` exactly and nothing else.
+
+`spi_cpu.sv` decodes main RAM, I/O and the PRG ROM; anything else reads as zero,
+so today the 386 would push 128 KB of zeros through port 0x688. What it needs is
+a fourth 386 read window at 0x1380000 backed by SDRAM. Two details make it
+smaller than it sounds: only 128 KB of the 10 MB window is ever touched, and the
+386 reads it as dwords with only byte 0 meaningful (`sound1` is ROM_LOAD32_BYTE
+on lane 0), so the core can store it PACKED and expand `{24'b0, byte}` on the
+way out -- and a 4-dword cache-line burst is then four consecutive bytes, one
+64-bit SDRAM read. The PCM region has 512 KB spare above rdft2's 2 MB flash
+image, which is where the 128 KB can live without moving the map.
+
+rdft2 has never been run on hardware.
 
 ## 11. TASKS
 

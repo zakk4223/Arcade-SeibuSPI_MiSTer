@@ -16,7 +16,7 @@ hardware. See `PLAN.md` for the full design notes and the task list.
 | 386 (z386) + memory map + IRQ | running |
 | Video DMA | verified exact against MAME's video RAMs |
 | Tile layers (back / midl / fore / text) | verified against MAME |
-| Sprites | verified against MAME, no starvation under load |
+| Sprites | verified against MAME, no starvation under load (SEI252 and RISE10) |
 | Mixer, including the exact 127/129 alpha blend | **bit-exact against MAME** |
 | Z80 + banked ROM + command FIFO + coin latch | running on hardware |
 | YMF271 registers, timers, IRQ | verified in simulation, running on hardware |
@@ -32,10 +32,30 @@ are to be heard.
 ## Installing
 
 1. Build `SeibuSPI.rbf` (see below) and put it in `/media/fat/_Arcade/cores/`.
-2. Put `mra/rdfts.mra` in `/media/fat/_Arcade/`.
-3. Put `rdfts.zip` in `/media/fat/games/mame/`.
+2. Put the MRA you want from `mra/` in `/media/fat/_Arcade/`.
+3. Put its zip in `/media/fat/games/mame/`.
 
-Needs an SDRAM module of **32 MB or more**; the ROM set occupies 22.5 MB.
+| MRA | set | zip | download | state |
+|---|---|---|---|---|
+| `rdfts.mra` | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | runs on hardware |
+| `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
+| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.0 MB | video verified against MAME in simulation; **no sound yet**, see below |
+
+The two cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
+several-minute "techno music" reflash the real cartridge does on first boot is
+skipped. rdft's image is assembled by the MRA; rdft2's cannot be, because half a
+megabyte of it is compressed — the core decompresses that during the download
+(`rtl/spi_rom_decode.sv`).
+
+**rdft2 does not have sound yet, and the gap is in the core, not the MRA.** It
+keeps its Z80 program in `sound1.u0222` and the 386 reads it through the
+`sound01` window, which `spi_cpu.sv` does not decode; rdft keeps its copy in
+`maincpu`, which is why rdft is fine. PLAN.md "what rdft2 still needs" has the
+measurement and what the fix costs.
+
+SDRAM: **32 MB is enough for rdfts and rdft** (both reach 29 MB in the map).
+**rdft2 needs 64 MB** — its sprites are 18 MB rather than 12, which puts the top
+of the image at 35 MB.
 
 ## Building
 

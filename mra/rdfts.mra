@@ -43,6 +43,19 @@
       part below resolves out of rdft.zip regardless of how it is named there.
       Keep the CRCs correct - they are load-bearing, not documentation.
     -->
+    <!--
+      Config blob, index 1. Byte 0 is the mod byte and 0x00 is what rdfts wants:
+      the SXX2E single board, part table 0, every part copied rather than
+      decoded. That is also the core's power-up state, so this element changes
+      nothing on a fresh load -- it is here so that loading rdfts AFTER a set
+      that does set something (rdft's 0x01, rdft2's 0x03 plus a codec) cannot
+      leave a stale value behind if the RBF is not reloaded in between.
+
+      It must precede the index-0 ROM: Main_MiSTer sends <rom> elements in file
+      order, and the loader has to know its table before the image starts.
+    -->
+    <rom index="1"><part>00</part></rom>
+
     <rom index="0" zip="rdfts.zip|rdft.zip" md5="none">
         <!-- 386 program -->
         <part name="seibu_1.u0259"        crc="e278dddd"/>

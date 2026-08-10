@@ -21,14 +21,23 @@
     <category>Shooter</category>
 
     <!--
-      Verified against MAME in simulation, not yet run on hardware. Ten captured
-      scenes -- story, intro, title and demo play -- render pixel-identical to
-      MAME, including the sprite-heavy title screen. See PLAN.md "rdft2 verified
-      against MAME frame by frame".
+      DO NOT EXPECT THIS TO BOOT YET. The video path is verified -- ten captured
+      scenes, story through demo play, render pixel-identical to MAME with no
+      sprites dropped, the densest at 16,572 y-hits in a frame. What is missing
+      is SOUND, and it is missing in the core rather than in this file.
 
-      Every scene matches, with no sprites dropped anywhere. The densest one
-      tested runs 16,572 sprite y-hits in a frame and still comes out exact,
-      which it did not before the sprite ROMs were interleaved.
+      rdft2 keeps its Z80 program in sound1.u0222 at 0x60000-0x7FFFF and the 386
+      reads it through the sound01 window before releasing the Z80. rdft does
+      not: its copy lives in maincpu, which is already loaded, and that is why
+      rdft can drop sound01 entirely. Measured rather than assumed -- with the
+      flash already programmed, rdft2 still issues exactly 131,072 dword reads
+      over 0x1380000-0x13FFFFC, which is sound1.u0222[0x60000..0x7FFFF] and
+      nothing else.
+
+      spi_cpu.sv decodes main RAM, I/O and PRG ROM; everything else reads as
+      zero. So the 386 would download 128 KB of zeros into the Z80's RAM. Until
+      the core carries that window, this MRA loads correctly and plays silent
+      at best. See PLAN.md "what rdft2 still needs".
     -->
 
     <!--
