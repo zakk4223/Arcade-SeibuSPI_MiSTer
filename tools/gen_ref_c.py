@@ -33,6 +33,22 @@ typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 
+// MAME's bitswap<N>(value, bN-1, ..., b0): the first source listed supplies the
+// MOST significant destination bit. Reimplemented rather than copied because
+// MAME's lives in a core header full of unrelated machinery.
+template <int N, typename... Args>
+static inline u32 bitswap(u32 val, Args... args)
+{
+    const int src[] = { args... };
+    static_assert(sizeof...(args) == N, "bitswap arity");
+    u32 out = 0;
+    for (int i = 0; i < N; i++)
+        out |= ((val >> src[i]) & 1u) << (N - 1 - i);
+    return out;
+}
+
+template <typename T> static inline u32 BIT_(T v, int n) { return (v >> n) & 1u; }
+
 #define BIT(x, n) (((x) >> (n)) & 1u)
 
 // MAME's bitswap<N>(val, b_{N-1}, ..., b_0): the first index listed supplies
@@ -93,6 +109,17 @@ static inline u32 seibu_partial_carry_sum32(u32 a, u32 b, u32 m) { return seibu_
         spr,
         r"void seibuspi_sprite_decrypt\(u8 \*src, int rom_size\)\s*\{.*?\n\}",
         "seibuspi_sprite_decrypt"))
+
+    # RISE10 (rdft2). Copied whole, including sprite_reorder, so the testbench
+    # compares against MAME's arithmetic AND against where MAME puts the words.
+    out.append(grab(
+        spr,
+        r"static void sprite_reorder\(u8 \*buffer\)\s*\{.*?\n\}",
+        "sprite_reorder"))
+    out.append(grab(
+        spr,
+        r"void seibuspi_rise10_sprite_decrypt\(u8 \*rom, int size\)\s*\{.*?\n\}",
+        "seibuspi_rise10_sprite_decrypt"))
 
     print("\n\n".join(out))
 

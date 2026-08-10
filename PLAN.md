@@ -385,12 +385,28 @@ along as an MRA config bit on a build 32 MB users can run.
 tilemaps, same Z80 + YMF271 topology, same 386 core. What actually differs:
 
 * **RISE10 / RISE11 sprite decryption** — different algorithms, not different
-  keys. Both are *address-independent*, unlike SEI252: fixed-constant bit
-  permutations feeding `seibu_partial_carry_sum16/32`, so no `key_table[addr]`
-  lookup and no per-tile key fetch. We already have the partial-carry
-  primitive. Both then apply `sprite_reorder`, which permutes words inside
-  64-byte groups; for on-the-fly decode that is an address swizzle at fetch
-  rather than a pass over ROM.
+  keys, and they are NOT the same difficulty. Both apply `sprite_reorder`,
+  which permutes words inside 64-byte groups -- output word 2j from input word
+  j, output word 2j+1 from input word j+16 -- so for on-the-fly decode that is
+  an address swizzle at fetch rather than a pass over ROM.
+
+  **RISE10 is address-independent and is DONE** (`rtl/spi_rise10_decrypt.sv`,
+  2026-08-09). One fixed `bitswap<32>` and two partial-carry sums whose every
+  operand is a constant: no `key_table[addr]`, no per-tile key fetch, no
+  `addr` input at all. It is a drop-in for `spi_spr_decrypt` -- MAME writes
+  both back as chunk0={plane5,plane4}, chunk1={plane3,plane2},
+  chunk2={plane1,plane0}, so the same pen convention applies. Verified against
+  MAME over 2048 words including `sprite_reorder`; constants parsed by
+  `tools/gen_rise10_tables.py` while the reference is copied by
+  `tools/gen_ref_c.py`, the same two-path arrangement the SEI252 tables use.
+
+  **RISE11 is NOT address-independent.** This section used to claim both were,
+  and that is wrong: `plane210 = partial_carry_sum24(plane210, i, k4) ^ k5`
+  takes the word index `i` as its addend. It still needs no lookup tables --
+  cheaper than SEI252 in that respect -- but the fetch has to supply `i`, so it
+  is a different unit with a different interface. It is also parameterised by
+  five keys and shared with `feversoc` in another driver, so take the keys as
+  inputs the way `spi_tile_decrypt` does.
 * **Tile and char decryption come free.** `spi_tile_decrypt` takes key1/key2/key3
   as inputs and `tb_tile_decrypt` already proves all three triples (rdft,
   rdft2, rfjet) against MAME. Wire the keys to a config bit.
