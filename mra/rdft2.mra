@@ -35,9 +35,10 @@
       nothing else.
 
       spi_cpu.sv decodes main RAM, I/O and PRG ROM; everything else reads as
-      zero. So the 386 would download 128 KB of zeros into the Z80's RAM. Until
-      the core carries that window, this MRA loads correctly and plays silent
-      at best. See PLAN.md "what rdft2 still needs".
+      zero. So the 386 would download 128 KB of zeros into the Z80's RAM -- and
+      it also waits on the Z80 during boot, so expect a hang rather than just
+      silence. Until the core carries that window this file is here to be
+      loaded and looked at, not played. See PLAN.md "what rdft2 still needs".
     -->
 
     <!--

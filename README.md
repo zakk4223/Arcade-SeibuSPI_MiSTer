@@ -39,7 +39,7 @@ are to be heard.
 |---|---|---|---|---|
 | `rdfts.mra` | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | runs on hardware |
 | `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
-| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.0 MB | video verified against MAME in simulation; **no sound yet**, see below |
+| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.0 MB | video verified against MAME in simulation; **not expected to run yet**, see below |
 
 The two cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
 several-minute "techno music" reflash the real cartridge does on first boot is
@@ -47,11 +47,14 @@ skipped. rdft's image is assembled by the MRA; rdft2's cannot be, because half a
 megabyte of it is compressed — the core decompresses that during the download
 (`rtl/spi_rom_decode.sv`).
 
-**rdft2 does not have sound yet, and the gap is in the core, not the MRA.** It
-keeps its Z80 program in `sound1.u0222` and the 386 reads it through the
+**rdft2 is not expected to run yet, and the gap is in the core, not the MRA.**
+It keeps its Z80 program in `sound1.u0222` and the 386 reads it through the
 `sound01` window, which `spi_cpu.sv` does not decode; rdft keeps its copy in
-`maincpu`, which is why rdft is fine. PLAN.md "what rdft2 still needs" has the
-measurement and what the fix costs.
+`maincpu`, which is why rdft is fine. So the 386 would download 128 KB of zeros
+into the Z80's RAM — and since it also waits on the Z80 during boot, expect a
+hang rather than merely silence. The video path itself is verified frame-exact
+against MAME in simulation; it is the sound01 window that is missing. PLAN.md
+"what rdft2 still needs" has the measurement and what the fix costs.
 
 SDRAM: **32 MB is enough for rdfts and rdft** (both reach 29 MB in the map).
 **rdft2 needs 64 MB** — its sprites are 18 MB rather than 12, which puts the top
