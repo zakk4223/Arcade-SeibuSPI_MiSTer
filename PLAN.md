@@ -362,6 +362,9 @@ sprite DMA trigger at 0x50E is already decoded, and the DS2404 stub is shared.
 ### rdft2's flash payload is NOT derivable the way rdft's was (2026-08-09)
 
 Measured before building anything, and it is the reason not to build it.
+(Superseded in part: the payload turned out to be derivable after all, just not
+by concatenation -- see "CRACKED: the rdft2 sound-flash codec" below. The
+measurements here still stand and are what led there.)
 
 Method, cheaper than section 0's write tap because the mechanism is already
 known: fresh `-nvram_directory`, run `rdft2` until the updater finishes, then
@@ -448,134 +451,123 @@ Z80 program from `maincpu[0x1BB800]` instead, so that differs per game too --
 and it means **the "omit sound01" trick is rdft-specific**. A pre-flashed rdft2
 MRA that dropped sound01 would have no Z80 program at all.
 
-### What the decompressor is: DPCM, plus a state-dependent extension
+### CRACKED: the rdft2 sound-flash codec is BPE over DPCM (2026-08-09)
 
-Pinned by a time-ordered merged tap -- reads of `sound01` and the bytes the 386
-pushes to the Z80 in one stream, so the LOCAL expansion ratio is visible. The
-interleaving is almost entirely "one read, then 2/4/6/8/10/12 writes" (always
-even: each output byte costs a command byte plus the datum), so one input byte
-produces one to six output samples.
+Solved, and the whole 2 MB flash image is now built offline bit-for-bit by
+`tools/build_soundflash.py rdft2.zip out.bin --verify`. It works from the stock
+zip; the PAL placeholders are only needed to run rdft2 under MAME, not to build
+the image.
 
-**The output is plain 8-bit PCM** -- mean |delta| 6.5 as signed bytes, which is
-smooth audio. It is NOT 12-bit packed: unpacking it that way gives |delta|
-2239. The input is not audio (mean |delta| 51.5).
+**How it was found.** `SLOP_MODE=pc` (from `tools/mame_flash_probe.lua`) named
+the routine in one 60-second run: 4,048,837 of 4,048,847 FIFO pushes come from
+EIP `0x002A1B8F`. That is a leaf `push_byte` helper, so the useful step was
+scanning the program image for `call rel32` sites targeting it -- seventeen, all
+inside `0x2A1BBD..0x2A1EFD`, which is the entire flash updater. File offset =
+EIP - 0x200000; `objdump -D -b binary -m i386 -M intel --adjust-vma=0x200000`.
 
-**The core rule is DPCM**, and it is certain:
+**The codec, at `0x2A1D20`, is Philip Gage's byte pair encoding (Dr. Dobb's,
+1994) layered over DPCM.** Stream layout, exactly as the 386 reads it:
 
-    out[n] = out[n-1] + in[n]        (signed 8-bit, wrapping)
+    u16 nblocks                 LITTLE-endian (note: the block size below is not)
+    per block:
+      pair table                256 entries of (left, right). A count byte
+                                >= 0x80 skips (count - 127) entries; otherwise
+                                it introduces count + 1 entries. Per entry read
+                                `left`; only if `left != index` read `right`.
+                                left[i] == i therefore means "unused".
+      u16 size                  BIG-endian, input bytes in this block
+      size bytes                each expanded through the table
 
-verified over **174,045 single-output groups with zero failures**.
+Expansion is the classic BPE stack walk: while `left[c] != c`, push `right[c]`
+and take `left[c]`; pop before fetching new input. Every leaf byte is then a
+DPCM delta:
 
-**What is not yet pinned** is the multi-output case, 117,000-odd groups where
-one input byte yields 2 to 6 samples. It is not a fixed codebook: only 11 of
-256 input values always produce the same delta sequence, and those eleven are
-the small literal deltas. Values like 0x84 show 69 distinct behaviours, so the
-decoder carries state. It is also not LZ -- **0 of 400 eight-byte output windows
-appear anywhere in the input**, so nothing is copied, every byte is computed.
+    out[n] = out[n-1] + leaf     (8-bit wrapping; accumulator ds:0x36524,
+                                  zeroed once per call, NOT per block)
 
-That leaves an adaptive scheme (ADPCM-like step adaptation) or a run/ramp
-extension on top of the literal deltas. Cracking it needs the 386 routine, and
-the search is now small: find the loop that reads `sound01` sequentially and
-emits more than one sample per input byte.
+That explains every earlier observation at once. The DPCM rule held perfectly on
+single-output groups because those are unpaired leaves. The multi-output groups
+are pairs expanding to 2..6 leaves. It looked stateful because the pair table is
+state, and rebuilt per block. It is not LZ because nothing is copied from the
+output -- the dictionary is explicit.
 
-**But note this is optional work.** Everything above exists to derive images
-offline. The authentic flash path below makes the codec irrelevant, because the
-game runs its own decoder.
+**The updater is table-driven, so none of the lengths are magic.** `0x2A1F2B`
+walks an array of 12-byte jobs terminated by `src == 0xFFFFFFFF`:
 
-### RESUME HERE: cracking the rdft2 codec (2026-08-09, unfinished)
+    u32 src          386 address of the source (sound01 window is at 0xA00000)
+    u32 len          verbatim: bytes to copy. decoded: OUTPUT bytes (progress bar)
+    u8  lane_mode    -> ds:0x36518, consumed by the fetcher at 0x2A1C34
+    u8  verbatim     nonzero: raw copy (0x2A1E1C). zero: decode (0x2A1D20)
+    u16 pad
 
-Everything below is what a fresh session needs. The captured data lived in a
-scratch directory and is gone; the recipe to regenerate it is here and takes
-about seven minutes a run.
+rdft2's table is at `0x00201B55` and holds exactly two jobs:
 
-**Regenerating the evidence.** `tools/mame_flash_probe.lua` has four modes.
-rdft2's PAL dumps are missing from the usual zip and MAME refuses to start
-without them, so make a working copy of `rdft2.zip` with three 0x117-byte
-placeholder files named `rm81.u0529.bin`, `rm82.u0330.bin`, `rm83.u0331.bin`;
-MAME then warns about the CRCs and runs. The reflash needs ~420 emulated
-seconds and runs at ~570% (a completed flash boots at ~2700% instead, which is
-how to tell it finished).
+| src         | len       | lane | mode     | produces                    |
+|-------------|-----------|------|----------|-----------------------------|
+| `0x0A00008` | `0x17C243`| 1    | verbatim | `flash[0x4..0x17C246]`      |
+| `0x1200000` | `0x730ED` | 0    | decode   | `flash[0x17C247..0x1EF333]` |
 
-    SLOP_MODE=merged SLOP_OUT=/tmp/x mame rdft2 -rompath <patched> \
-      -nvram_directory /tmp/nv -autoboot_script tools/mame_flash_probe.lua \
-      -video none -sound none -seconds_to_run 420 -nothrottle
+The updater is reached as `0x2A0FA7(ptr)` where the struct at `0x00201B91` is
+`{stamp=0x003FFFFC, callback=0x00201BCB, tableA=0x00201B55, tableB=0x00201B79}`.
+`stamp` is `maincpu[0x1FFFFC]` = `80 4A 4A 37`, written to `flash[0..3]` last;
+table B is a single 0x1FFFFC-byte verbatim copy, a variant this path never took.
 
-The final image is simply MAME's `soundflash1` + `soundflash2` nvram files
-concatenated; no tap needed just to obtain it.
+**`lane_mode` is the piece that made the payload unfindable by search.** The
+fetcher at `0x2A1C34` caches a dword and hands out only some of its byte lanes:
+mode 0 takes 1 byte per dword, mode 1 takes 2, otherwise 4. That is undoing
+MAME's scatter of the sound01 region -- `pcm.u0217` is loaded 2 bytes per dword
+at region 0, `sound1.u0222` 1 byte per dword at region `0x800000`. Two
+confirmations of that map: the decode job's `src` is `0xA00000 + 0x800000`
+exactly, and `sound1[0x60000]` (the Z80 program) lands at region `0x980000`,
+which is precisely the boundary the probe script was already using.
 
-**Established, with numbers:**
+**Numbers, all verified against the emulated flash:**
 
-* The Z80 is a pure relay -- 4,056,707 FIFO bytes against 4,056,752 ext-port
-  writes. All the work is in the 386.
-* Payload is 2,028,342 bytes, 0x000000-0x1EF2F5, both chips written in
-  lockstep, each datum preceded by its program-setup command.
-* `flash[0..3]` = `maincpu[0x1FFFFC]` = `80 4A 4A 37`.
-* `flash[4..0x17C246]` = `pcm.u0217` verbatim, 1,557,059 bytes.
-* `flash[0x17C247..0x1EF2F5]` = 471,215 bytes decoded from
-  `sound1.u0222[0..0x4C664]` (312,933 bytes), 1.506x.
-* `sound1.u0222[0x60000..0x7FFFF]` is the Z80 program, read FIRST, 128 KB
-  starting `C3 67 00`.
-* Output is plain 8-bit PCM: mean |delta| 6.5. NOT 12-bit packed (unpacking
-  gives 2239).
-* **The core rule is DPCM: `out[n] = out[n-1] + in[n]`, signed 8-bit wrapping,
-  verified over 174,045 single-output groups with ZERO failures.**
+* verbatim `flash[0x4..0x17C246]` = `pcm.u0217` at identity offset, 1,557,059 B
+* decoded `flash[0x17C247..0x1EF333]` = 471,277 B from `sound1.u0222[0..0x4C664]`
+  (312,933 B, exactly the measured read count), 1.506x
+* `flash[0..3]` = `maincpu[0x1FFFFC]`; everything past `0x1EF333` stays erased
+* whole 2 MB image: sha256 `c0da4614a8d07a7bce24b7712b756435f2c5fd1ef74dc44333657afdecc6c67c`
 
-**Ruled out, so nobody repeats them:**
+The earlier "471,215 bytes" was 62 short: both previous runs ended mid-flash.
+420 emulated seconds is not enough at these speeds -- use 520, then re-run and
+check the image is unchanged and the speed jumps to ~3000% (it does).
 
-* Not LZ or any copier: 0 of 400 eight-byte output windows appear anywhere in
-  the input.
-* Not a fixed codebook: only 11 of 256 input values always produce the same
-  delta sequence, and those eleven are the small literal deltas.
-* Not 12-bit packing, despite the 1.5 ratio inviting it.
-* The tail is in no ROM of the set. Note the earlier failure to find it in the
-  individual program files proves nothing -- the 386 reads the ASSEMBLED 32-bit
-  region, so data spanning byte lanes appears in no single lane file.
+**Why 4.95 bits/sample beat the delta entropy:** BPE pairs are a dictionary, so
+common delta sequences cost one byte. Nothing was being predicted.
 
-**The open question** is the multi-output case: ~117,000 groups where one input
-byte yields 2 to 6 samples. Two clues, pulling in the same direction:
+### What this changes: rdft2 pre-flashed is now possible, with one wrinkle
 
-* The coder spends **4.95 bits per sample against a delta entropy of 5.25**, so
-  it BEATS order-0 entropy. Samples are being predicted, not merely coded.
-* Several multi-output groups show near-equal successive deltas (+16,+12;
-  +11,+10; -15,-14), which looks like linear interpolation between coded
-  points. Others do not, so it is not purely that.
-* Determinism given context: 4.3% from the input byte alone, 52.0% with one
-  previous byte, **98.9% with two**. So the decoder state is shallow -- roughly
-  two bytes' worth -- which is good news for an RTL implementation.
+The image is derivable, so a pre-flashed rdft2 is back on the table -- but an
+MRA can only concatenate files that are in the ROM set, and this needs a
+decompressor. So one of:
 
-Caution: the read-to-write grouping used for all of the above may be skewed by
-the 386's own buffering, so a rule that "almost" fits may be a framing artefact
-rather than a wrong rule.
+* **run the decoder in the core at ROM-load time.** BPE+DPCM is small: a 512-byte
+  pair table, a 64-byte stack, an 8-bit accumulator. Needs the variable-rate
+  loader part mode already sketched below (destination advances by bytes
+  emitted, `ioctl_wait` held while draining).
+* **ship a derived image** built by `tools/build_soundflash.py`, outside the MRA.
+* **the authentic flash path below**, which needs no decoder at all.
 
-**Next step, already set up:** `SLOP_MODE=pc` records the 386's PC when it
-pushes a byte during the compressed phase, which names the codec routine. The
-last attempt dumped at frame 18000 and the run ended at ~17,800, so it produced
-nothing -- the script now dumps every 4000 frames. With the PC in hand,
-disassemble `maincpu` around it (`objdump -D -b binary -m i386 -M intel` on the
-assembled 32-bit image; note the PRG window is at 0x00200000, so file offset =
-EIP - 0x200000).
+Note the "omit sound01" trick stays rdft-specific either way: rdft2's Z80
+program lives in `sound1.u0222[0x60000..0x7FFFF]` (128 KB, starts `C3 67 00`,
+read first), not in `maincpu`.
 
-**Why this matters, and why it is optional.** An in-core decoder run at ROM-load
-time avoids the flash controller entirely: no several-minute first boot, no 2 MB
-MiSTer save, and it never touches the audio fetch path. The DPCM core is an
-8-bit adder; with two bytes of state the whole decoder is tens of lines. The
-loader would need a variable-rate part mode (destination advances by bytes
-emitted, `ioctl_wait` held while draining) -- about 30 lines. Verification is
-unusually strong because the exact 2 MB expected image can be captured from
-MAME and compared bit-for-bit.
+rfjet is now cheap to check rather than a fresh reverse-engineering job: find its
+job table the same way (PC tap -> callers -> the `0x2A1F2B` equivalent) and read
+the jobs off. The codec and the fetcher are library code and will very likely be
+identical.
 
-The alternative remains the authentic flash path below, which needs no codec at
-all but costs the boot time, the save plumbing, and a writable ch5 in the audio
-path.
+### The authentic flash path is still the general answer
 
-### So build the authentic flash path, not per-game derivation
+The codec being cracked weakens this argument but does not kill it. rdft's
+payload was a plain concatenation, rdft2's needed a BPE+DPCM decoder and a
+job-table read out of its program image, and rfjet's job table has not been
+looked at yet. Derivation now costs an hour per game rather than a session, but
+it is still per game, and each one adds a derived artefact the MRA cannot
+produce on its own.
 
-This measurement settles the architecture question. rdft's payload being a plain
-concatenation was a special case; rdft2 needs a decompressor whose format is
-unknown, and rfjet will have its own arrangement again. Deriving images offline
-means reverse-engineering one packer per game.
-
-The authentic path costs that once and works for every cartridge game:
+The authentic path costs nothing per game and works for every cartridge title:
 
 * **The write side of the wave memory port already exists.** 0x14-0x17 decode
   the address and the direction bit, and 0x17 pre-increments; writes currently
@@ -1633,9 +1625,10 @@ clean for the first time.
 
 **The immediate decision** is recorded in section 0: an in-core decoder that
 builds the flash contents from raw ROM at load time, versus the authentic flash
-controller. The decoder needs the rdft2 codec cracked (see RESUME HERE); the
-controller needs a writable ch5, a save file and a long first boot. The decoder
-is the preferred path.
+controller. The codec is now cracked (BPE over DPCM, section 0) and
+`tools/build_soundflash.py` reproduces rdft2's 2 MB image bit-for-bit offline,
+so the decoder path is unblocked; the controller still needs a writable ch5, a
+save file and a long first boot. The decoder remains the preferred path.
 
 **What rdft2 still needs beyond the codec:** `SPR_CHUNK_STRIDE` as a port on
 `spi_sprite` (6 MB for rdft2, currently a 4 MB constant), a third loader table
