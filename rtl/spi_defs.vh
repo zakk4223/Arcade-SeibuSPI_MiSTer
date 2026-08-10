@@ -34,9 +34,30 @@ localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
 
 // The three sprite plane-pair chunks. The stride is PER SET -- 4 MB for the
 // SEI252 games, 6 MB for rdft2, 8 MB for rfjet -- because it is the chunk size,
-// which is the sprite region divided by three. Only the SEI252 value is wired
-// yet; rdft2 needs this to become a port on spi_sprite.
-localparam [25:0] SPR_CHUNK_STRIDE = 26'h040_0000;
+// which is the sprite region divided by three.
+//
+// rom_loader already LAYS OUT rdft2 at the 6 MB stride (its six sprite ROMs are
+// contiguous from SDR_SPRITES_BASE, which is the same thing). spi_sprite still
+// FETCHES at the 4 MB constant, so it needs this as a port before rdft2's
+// sprites are right on screen. That is the one piece of rdft2 the loader work
+// does not cover.
+localparam [25:0] SPR_CHUNK_STRIDE       = 26'h040_0000;  // SEI252 sets
+localparam [25:0] SPR_CHUNK_STRIDE_RDFT2 = 26'h060_0000;
+
+// --------------------------------------------------------------------------
+// Which ROM set is loading. The MRA's mod byte says so: bit 0 picks the SXX2C
+// cartridge board wiring, and bits 3:1 pick the set WITHIN that board, so an
+// existing MRA that sends only bit 0 keeps selecting the board's first set.
+//
+//   mod 0x00  SXX2E, set 0  -> rdfts
+//   mod 0x01  SXX2C, set 0  -> rdft
+//   mod 0x03  SXX2C, set 1  -> rdft2
+//
+// rfjet becomes SXX2C set 2 (mod 0x05) and costs one more arm in rom_loader.
+// --------------------------------------------------------------------------
+localparam [1:0] SET_RDFTS = 2'd0;
+localparam [1:0] SET_RDFT  = 2'd1;
+localparam [1:0] SET_RDFT2 = 2'd2;
 
 // --------------------------------------------------------------------------
 // ROM download codecs (rtl/spi_rom_decode.sv).

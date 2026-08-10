@@ -65,12 +65,27 @@ SETS = {
     # table:  which rom_loader.sv part table this set walks
     # skip:   MAME regions the MRA deliberately does not carry
     # synth:  logical parts with no single MAME ROM behind them
-    "rdfts": dict(mra="rdfts.mra", table="sxx2e", skip=(), synth=0),
-    "rdft":  dict(mra="rdft.mra",  table="sxx2c",
+    # mod:  the exact index-1 mod byte this set must send. bit 0 = SXX2C board,
+    #       bits 3:1 = set within that board (rtl/spi_defs.vh).
+    "rdfts": dict(mra="rdfts.mra", table="rdfts", mod=0x00, skip=()),
+    "rdft":  dict(mra="rdft.mra",  table="rdft",  mod=0x01,
                   # audiocpu is RAM the 386 fills through 0x688; sound01 is the
                   # updater's window and is measurably untouched once the flash
                   # is programmed; soundflash1 is the blank flash we replace.
-                  skip=("audiocpu", "sound01", "soundflash1"), synth=1),
+                  skip=("audiocpu", "sound01", "soundflash1")),
+    # rdft2 skips the same three, plus the PAL dumps, which are not ROM data.
+    # Its sound01 IS read -- that is where the compressed tail comes from -- but
+    # the MRA carries sound1.u0222 directly rather than the assembled window.
+    "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x03,
+                  skip=("audiocpu", "sound01", "soundflash1", "pals"),
+                  # The sample flash is DERIVED, so with --zip it can be rebuilt
+                  # from the MRA's own slices and compared against the image
+                  # MAME's flash devices end up holding. That is the only thing
+                  # tying these offsets and lengths to reality: an off-by-one in
+                  # either would otherwise load quietly shifted samples.
+                  flash=dict(parts=(12, 13), decoded=13, size=0x200000,
+                             sha256="c0da4614a8d07a7bce24b7712b756435f2c5f"
+                                    "d1ef74dc44333657afdecc6c67c")),
 }
 
 
@@ -127,9 +142,23 @@ def parse_mame(path, setname, skip):
     return parts
 
 
+def read_mra(path):
+    """The MRA with XML comments removed.
+
+    Not optional: these files document the config format by EXAMPLE, and an
+    example <rom index="1"> inside a comment is what the parsers below would
+    otherwise find first. Main_MiSTer uses a real XML parser and ignores
+    comments, so a checker that reads them is checking a different file than
+    the hardware does -- which it briefly was, reporting a codec on rdft that
+    only ever existed in a comment.
+    """
+    src = open(path, encoding="utf-8").read()
+    return re.sub(r"<!--.*?-->", "", src, flags=re.S)
+
+
 def parse_mra(path):
     """Every <part> of index 0, in order, as a flat byte-stream description."""
-    src = open(path, encoding="utf-8").read()
+    src = read_mra(path)
     m = re.search(r'<rom index="0".*?>(.*?)</rom>', src, re.S)
     if not m:
         fail('no <rom index="0"> in %s' % path)
@@ -152,7 +181,9 @@ def parse_mra(path):
             if nb == 0:
                 fail("empty <part> in %s" % path)
             n = int(rep.group(1), 16) if rep else 1
-            out.append({"kind": "fill" if rep else "inline", "size": n * nb})
+            body = bytes(int(b, 16) for b in text.split())
+            out.append({"kind": "fill" if rep else "inline", "size": n * nb,
+                        "data": body * n})
     if not out:
         fail("no <part> elements in %s" % path)
     return out
@@ -165,7 +196,7 @@ def parse_codecs(path, nparts):
     an id the core has no decoder for -- the part simply loads as garbage. So
     check it here, where the part count is already known.
     """
-    src = open(path, encoding="utf-8").read()
+    src = read_mra(path)
     m = re.search(r'<rom index="1".*?>(.*?)</rom>', src, re.S)
     if not m:
         return None, {}
@@ -199,19 +230,21 @@ def parse_codecs(path, nparts):
 def parse_loader(path, table):
     """One of rom_loader.sv's part tables, plus its part count."""
     src = open(path, encoding="utf-8").read()
-    # The tables are the two arms of `always @* if (set_sxx2c) ... else ...`.
-    m = re.search(r"always @\* if \(set_sxx2c\) begin(.*?)\n\telse begin(.*?)\n\tend\n", src, re.S)
-    if not m:
-        fail("cannot find the two part tables in %s" % path)
-    body = m.group(1) if table == "sxx2c" else m.group(2)
+    # Each table is delimited by its own marker comment, which is more robust
+    # than matching the if/else shape -- and there are three of them now.
+    bodies = dict(re.findall(r"// ---- TABLE (\w+):.*?\n(.*?)\n\t\tendcase", src, re.S))
+    if table not in bodies:
+        fail("cannot find the %s part table in %s (have: %s)"
+             % (table, path, ", ".join(sorted(bodies)) or "none"))
+    body = bodies[table]
 
     out = {}
     for e in re.finditer(r"4'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
                          r"\s*part_size\s*=\s*26'h([0-9a-fA-F_]+);"
-                         r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(\S+)", body):
+                         r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(.+)", body):
         idx, base, size, mode, name = e.groups()
         out[int(idx)] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
-                         "mode": mode, "name": name}
+                         "mode": mode, "name": name.strip()}
     e = re.search(r"default\s*:\s*begin\s*part_base\s*=\s*([^;]+);"
                   r"\s*part_size\s*=\s*26'h([0-9a-fA-F_]+);"
                   r"\s*part_mode\s*=\s*(M_\w+);\s*end\s*//\s*(.+)", body)
@@ -221,7 +254,7 @@ def parse_loader(path, table):
     out["default"] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
                       "mode": mode, "name": name.strip()}
 
-    sym = "NPARTS_SXX2C" if table == "sxx2c" else "NPARTS_SXX2E"
+    sym = "NPARTS_" + table.upper()
     n = re.search(r"localparam \[3:0\] %s\s*=\s*4'd(\d+)" % sym, src)
     if not n:
         fail("cannot find %s in %s" % (sym, path))
@@ -256,6 +289,72 @@ def expected_base(rom):
     return BASES[rom["sdram"]] + disp, disp
 
 
+def element_bytes(el, byname, bycrc):
+    """The actual bytes one MRA element contributes."""
+    if el["kind"] != "file":
+        return el["data"]
+    data = bycrc.get(el["crc"]) or byname.get(el["name"])
+    if data is None:
+        fail("part %r (crc %08x) is not in the archive" % (el["name"], el["crc"] or 0))
+    off = el["offset"]
+    n = el["length"] if el["length"] is not None else len(data) - off
+    if off + n > len(data):
+        fail("part %r: offset 0x%X + length 0x%X runs past the %d-byte file"
+             % (el["name"], off, n, len(data)))
+    return data[off:off + n]
+
+
+def check_flash(cfg, table, zippath):
+    """Rebuild a derived sample-flash image the way the loader will, and check it."""
+    import hashlib
+    from build_soundflash import expand
+
+    z = zipfile.ZipFile(zippath)
+    byname, bycrc = {}, {}
+    for info in z.infolist():
+        if info.is_dir():
+            continue
+        blob = z.read(info)
+        byname.setdefault(os.path.basename(info.filename), blob)
+        bycrc.setdefault(info.CRC, blob)
+
+    spec = cfg["flash"]
+    img = bytearray(b"\xFF" * spec["size"])
+    for idx in spec["parts"]:
+        ent = table[idx]
+        data = bytearray()
+        for el in ent["members"]:
+            data += element_bytes(el, byname, bycrc)
+        if len(data) != ent["size"]:
+            fail("flash part %d: MRA supplies 0x%X bytes, table wants 0x%X"
+                 % (idx, len(data), ent["size"]))
+        if idx == spec["decoded"]:
+            pos = [0]
+            def fetch():
+                b = data[pos[0]]
+                pos[0] += 1
+                return b
+            out = bytearray()
+            expand(fetch, out)
+            if pos[0] != len(data):
+                fail("flash part %d: the codec read 0x%X of 0x%X bytes -- the "
+                     "MRA's length is wrong" % (idx, pos[0], len(data)))
+            data = out
+        dst = resolve_base(ent["base"]) - BASES["pcm"]
+        if dst + len(data) > spec["size"]:
+            fail("flash part %d runs past the end of the image" % idx)
+        img[dst:dst + len(data)] = data
+        print("  flash part %d -> 0x%06X..0x%06X (%d bytes%s)"
+              % (idx, dst, dst + len(data) - 1, len(data),
+                 ", decoded" if idx == spec["decoded"] else ""))
+
+    got = hashlib.sha256(bytes(img)).hexdigest()
+    if got != spec["sha256"]:
+        fail("rebuilt flash sha256 %s != %s (the image MAME writes)"
+             % (got, spec["sha256"]))
+    print("  rebuilt flash matches the image MAME's own flash devices hold")
+
+
 def check_set(setname, cfg, args):
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     drv = os.path.join(args.mame, "src", "mame", "seibu", "seibuspi.cpp")
@@ -267,11 +366,10 @@ def check_set(setname, cfg, args):
     rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"), cfg["table"])
     mod_byte, codecs = parse_codecs(mra_path, nparts)
 
-    want_mod = 1 if cfg["table"] == "sxx2c" else 0
-    if (mod_byte or 0) & 1 != want_mod:
-        fail("%s: mod byte %s selects the %s table, but this set needs %s"
-             % (cfg["mra"], "absent" if mod_byte is None else hex(mod_byte),
-                "sxx2c" if (mod_byte or 0) & 1 else "sxx2e", cfg["table"]))
+    if (mod_byte or 0) != cfg["mod"]:
+        fail("%s: mod byte %s, but the %s table needs %#04x"
+             % (cfg["mra"], "absent" if mod_byte is None else "%#04x" % mod_byte,
+                cfg["table"], cfg["mod"]))
     for part, codec in sorted(codecs.items()):
         print("  part %d decoded by %s" % (part, codec))
 
@@ -356,8 +454,27 @@ def check_set(setname, cfg, args):
                 fail("part %d (%s): table base 0x%X != expected 0x%X (%s + 0x%X)"
                      % (idx, rom["name"], got_base, want_base, rom["sdram"], disp))
         else:
+            # A part built from several MRA elements. Any member that is a whole
+            # file still has to be the next MAME ROM, in order -- otherwise a
+            # part like rdft2's six-ROM sprite run would be the one place a
+            # wrong CRC or a swapped pair goes unnoticed. Members with an
+            # explicit length are slices of a synthesised image and are skipped,
+            # as are inline bytes and fills.
+            for el in ent["members"]:
+                if el["kind"] != "file" or el["length"] is not None:
+                    continue
+                if ri >= len(roms):
+                    fail("part %d (%s) member %r has no MAME ROM left to match"
+                         % (idx, ent["name"], el["name"]))
+                rom = roms[ri]; ri += 1
+                if el["name"] != rom["name"] or el["crc"] != rom["crc"]:
+                    fail("part %d member %d: MRA %s/%08x != MAME %s/%08x"
+                         % (idx, ri - 1, el["name"], el["crc"], rom["name"], rom["crc"]))
+                if rom["mode"] != ent["mode"]:
+                    fail("part %d member %s: MAME wants %s, the part is %s"
+                         % (idx, el["name"], rom["mode"], ent["mode"]))
             names = [m.get("name", m["kind"]) for m in ent["members"]]
-            print("  part %-2d %-28s synthesised from %d elements: %s"
+            print("  part %-2d %-38s from %d elements: %s"
                   % (idx, ent["name"], len(ent["members"]), ", ".join(names)))
 
     if ri != len(roms):
@@ -388,6 +505,8 @@ def check_set(setname, cfg, args):
         print("all %d distinct files present in %s by CRC%s"
               % (len(needed), os.path.basename(args.zip),
                  " (%d under the parent set's names)" % renamed if renamed else ""))
+        if cfg.get("flash"):
+            check_flash(cfg, table, args.zip)
     print()
 
 

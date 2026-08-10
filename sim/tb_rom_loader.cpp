@@ -80,6 +80,28 @@ static const Part parts_sxx2c[] = {
     { "pre-programmed flash image",  PCM_BASE,                0x200000, LINEAR  },
 };
 
+// rdft2, SPI cartridge, sample flash DECODED rather than concatenated. Read off
+// MAME's ROM_START(rdft2): 12 MB of tiles in two 6 MB groups, text lanes in the
+// order 1/0/2, and 18 MB of sprites as three 6 MB plane-pair chunks -- which are
+// contiguous at that stride, so all six ROMs are one LINEAR part. The last part
+// is the compressed tail and its size is the COMPRESSED length.
+static const Part parts_rdft2[] = {
+    { "prg0.tun",                    PRG_BASE,                0x080000,  W32_B0  },
+    { "prg1.bin",                    PRG_BASE,                0x080000,  W32_B1  },
+    { "prg2.bin",                    PRG_BASE,                0x080000,  W32_B2  },
+    { "prg3.bin",                    PRG_BASE,                0x080000,  W32_B3  },
+    { "fix0.u0524",                  CHARS_BASE,              0x010000,  W24_B1  },
+    { "fix1.u0518",                  CHARS_BASE,              0x010000,  W24_B0  },
+    { "fixp.u0514",                  CHARS_BASE,              0x010000,  W24_B2  },
+    { "bg-1d.u0535",                 TILES_BASE,              0x400000,  W24_W01 },
+    { "bg-1p.u0537",                 TILES_BASE,              0x200000,  W24_B2  },
+    { "bg-2d.u0536",                 TILES_BASE + 0x600000,   0x400000,  W24_W01 },
+    { "bg-2p.u0538",                 TILES_BASE + 0x600000,   0x200000,  W24_B2  },
+    { "sprites, six ROMs",           SPRITES_BASE,            0x1200000, LINEAR  },
+    { "flash head: stamp + pcm",     PCM_BASE,                0x17C247,  LINEAR  },
+    { "flash tail: sound1, packed",  PCM_BASE + 0x17C247,     0x04C665,  LINEAR  },
+};
+
 static uint32_t dest_of(const Part &p, uint32_t i)
 {
     switch (p.mode) {
@@ -157,12 +179,12 @@ static void make_bpe_part(uint32_t in_len, std::vector<uint8_t> &stream,
     }
 }
 
-static int run_set(const Part *parts, int NPARTS, int sxx2c, const char *label,
+static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
                    int codec_part = -1)
 {
     printf("--- %s ---\n", label);
     Vrom_loader *dut = new Vrom_loader;
-    dut->set_sxx2c  = sxx2c;
+    dut->set_id     = set_id;
     dut->part_codec = 0;   // every part a straight copy unless told otherwise
 
     std::vector<uint8_t> cstream, cexpect;
@@ -344,5 +366,13 @@ int main(int argc, char **argv)
     // rdft2 needs: fourteen copied parts and one that expands.
     rc = run_set(parts_sxx2c, (int)(sizeof(parts_sxx2c) / sizeof(parts_sxx2c[0])),
                  1, "SXX2C with a CODEC_BPE_DPCM sample part", 14);
+    if (rc) return rc;
+    // rdft2 for real: the table the MRA drives, with part 13 decoded. The
+    // stream is synthetic (tb_rom_decode.cpp is what checks the codec against
+    // rdft2's actual data); what this checks is that 34 MB lands where MAME's
+    // region layout says, across a 6 MB tile stride, a six-ROM sprite run and
+    // a part whose output length is not its input length.
+    rc = run_set(parts_rdft2, (int)(sizeof(parts_rdft2) / sizeof(parts_rdft2[0])),
+                 2, "rdft2 (SXX2C, decoded sample flash)", 13);
     return rc;
 }

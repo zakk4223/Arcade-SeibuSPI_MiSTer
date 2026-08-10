@@ -1,0 +1,166 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SlopperPI.                                     -->
+<!--                                                                     -->
+<!-- SlopperPI is free software: you can redistribute it and/or modify   -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters 2 (Europe, SPI cartridge, pre-flashed)</name>
+    <setname>rdft2</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1997</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>Europe</region>
+    <category>Shooter</category>
+
+    <!--
+      INCOMPLETE. This MRA loads rdft2 correctly, and that is all it does so
+      far. The core still fetches sprites at the SEI252 4 MB chunk stride and
+      decrypts tiles and sprites with the SEI252 keys, so rdft2's graphics will
+      be wrong on screen until spi_sprite takes SPR_CHUNK_STRIDE as a port and
+      the RISE10 unit and rdft2 tile keys are selected. See PLAN.md "what rdft2
+      still needs". Everything below is verified; nothing below is the reason
+      it does not run yet.
+    -->
+
+    <!--
+      LIKE rdft, THE CARTRIDGE HAS NO SAMPLE ROM: the YMF271 plays out of two
+      Intel E28F008SA flash chips the game programs itself on first boot. This
+      MRA ships that flash pre-programmed so the several-minute reflash is
+      skipped.
+
+      UNLIKE rdft, the image is not a concatenation. Only the first 1.5 MB is a
+      copy; the remaining half megabyte is DECOMPRESSED from sound1.u0222 by a
+      routine in the game's own 386 program. An MRA cannot express that, so the
+      core does it during the download -- rtl/spi_rom_decode.sv, selected by
+      the codec config below. The format is byte pair encoding over DPCM, read
+      off the 386 at 0x2A1D20; PLAN.md section 0 has the derivation.
+
+        flash[0x000000-0x000003] = maincpu[0x1FFFFC-0x1FFFFF]   region + build
+        flash[0x000004-0x17C246] = pcm.u0217[4..]               verbatim
+        flash[0x17C247-0x1EF333] = decode(sound1.u0222[0..0x4C664])
+        flash[0x1EF334-0x1FFFFF] = 0xFF, erased and never addressed
+
+      The whole 2 MB is reproduced bit-for-bit offline by
+      tools/build_soundflash.py, checked by sha256 against the image MAME's own
+      flash devices end up holding, and the core's decoder is checked against
+      the same reference (`make -C sim run-bpe`).
+
+      The four header bytes are the region lock, not a checksum: a verbatim
+      copy of the last four bytes of the 386 program, region byte plus build
+      ID. A stamp that does not match the program makes the game reflash, so
+      this image belongs to THIS set's program ROMs and no other region's.
+
+      The erased tail is not padded here. Nothing addresses it -- it is past
+      the end of the samples -- and writing 68 KB of 0xFF would mean hardcoding
+      the decoder's OUTPUT length into rom_loader's table, where every other
+      number is an input length. If it is ever wanted, the clean way is a fill
+      scatter mode that consumes no download bytes at all.
+    -->
+
+    <!--
+      Part order is significant. rtl/rom_loader.sv walks this list with a fixed
+      table -- selected by the mod byte below -- and performs MAME's
+      ROM_LOAD24_* / ROM_LOAD32_* byte scatter in hardware, because MRA
+      <interleave> cannot express the 3-byte period the Seibu "D + P" graphics
+      ROM pairs need. Do not reorder or insert parts without updating the
+      rdft2 table in rom_loader.sv to match. `make check-mra` checks them
+      against each other and against MAME's driver.
+
+      Layout produced in SDRAM (see rtl/spi_defs.vh):
+        0x0000000  2 MB   386 program
+        0x0200000  256 KB Z80 program -- RAM, NOT loaded here. The 386 fills it
+                          through port 0x688 and releases the Z80 with 0x68C.
+        0x0240000  192 KB text tiles
+        0x0280000  2 MB   YMF271 samples: the pre-programmed flash image
+        0x0500000  12 MB  background tiles, two 6 MB groups
+        0x1100000  18 MB  sprites, three 6 MB plane-pair chunks
+    -->
+
+    <!--
+      Mod byte 0x03: bit 0 selects the SXX2C cartridge board wiring, bits 3:1
+      select set 1 on that board, which is rdft2. rdft.mra sends 0x01 (same
+      board, set 0) and rdfts.mra sends nothing at all.
+
+      The second element is the codec config: pairs of {part index, codec id}.
+      Part 13 is the compressed sample tail, and codec 1 is CODEC_BPE_DPCM.
+      Parts default to codec 0, a straight copy, so nothing else is listed.
+      Ids live in rtl/spi_defs.vh and the decoders in rtl/spi_rom_decode.sv.
+
+      IT MUST COME BEFORE THE index="0" ROM. Main_MiSTer sends the <rom>
+      elements in file order, so an index-1 that follows the image arrives
+      AFTER the loader has already walked its table -- the download then runs
+      against the wrong layout and every part after the first lands wrong.
+    -->
+    <rom index="1">
+        <part>03</part>
+        <part>0D 01</part>
+    </rom>
+
+    <rom index="0" zip="rdft2.zip" md5="none">
+        <!-- 386 program: four byte lanes -->
+        <part name="prg0.tun" crc="3cb3fdca"/>
+        <part name="prg1.bin" crc="cab55d88"/>
+        <part name="prg2.bin" crc="83758b0e"/>
+        <part name="prg3.bin" crc="084fb5e4"/>
+
+        <!-- text layer: three byte lanes, and the lane order is 1, 0, 2 -->
+        <part name="fix0.u0524" crc="6fdf4cf6"/>
+        <part name="fix1.u0518" crc="69b7899b"/>
+        <part name="fixp.u0514" crc="99a5fece"/>
+
+        <!-- background tiles: 12 MB, two D+P groups 6 MB apart -->
+        <part name="bg-1d.u0535" crc="6143f576"/>
+        <part name="bg-1p.u0537" crc="55e64ef7"/>
+        <part name="bg-2d.u0536" crc="c607a444"/>
+        <part name="bg-2p.u0538" crc="f0830248"/>
+
+        <!--
+          Sprites: 18 MB in three 6 MB plane-pair chunks, and MAME's order is
+          obj3, obj2, obj1 -- chunk 0 is obj3, not obj1. The chunks are
+          contiguous at this stride, so the loader places all six as one run.
+        -->
+        <part name="obj3.u0434"  crc="e08f42dc"/>
+        <part name="obj3b.u0433" crc="1b6a523c"/>
+        <part name="obj2.u0431"  crc="7aeadd8e"/>
+        <part name="obj2b.u0432" crc="5d790a5d"/>
+        <part name="obj1.u0429"  crc="c2c50f02"/>
+        <part name="obj1b.u0430" crc="5259321f"/>
+
+        <!--
+          YMF271 sample flash, pre-programmed. Loader part 12: the region stamp
+          plus 0x17C243 bytes of pcm.u0217 at identity offset, 4 + 0x17C243 =
+          0x17C247.
+        -->
+        <part>80 4A 4A 37</part>
+        <part name="pcm.u0217" crc="2edc30b5" offset="0x000004" length="0x17C243"/>
+
+        <!--
+          Loader part 13, CODEC_BPE_DPCM: the compressed tail. 0x4C665 bytes in,
+          0x730ED out. This is a LENGTH-LIMITED slice on purpose -- the rest of
+          sound1.u0222 is not sample data. 0x60000-0x7FFFF is rdft2's Z80
+          program, which the 386 downloads over port 0x688 at runtime rather
+          than the loader placing it, exactly as on rdft.
+        -->
+        <part name="sound1.u0222" crc="b7bd3703" length="0x04C665"/>
+    </rom>
+
+    <!--
+      Same control layout as rdft; the names map to joystick bits 4 upwards IN
+      ORDER and SeibuSPI.sv decodes them at exactly those positions.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
+             default="A,B,X,Start,Select,R,L" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>

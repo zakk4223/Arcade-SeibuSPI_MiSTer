@@ -41,14 +41,13 @@ module rom_loader
 	input       [7:0] ioctl_dout,
 	output reg        ioctl_wait,
 
-	// Which part table to walk. 0 = rdfts (SXX2E single board), 1 = rdft
-	// pre-flashed (SXX2C cartridge). Comes from the MRA's index-1 mod byte and
-	// must be stable before the index-0 download starts, which it is: the HPS
-	// sends the mod byte first.
-	input             set_sxx2c,
+	// Which part table to walk: SET_RDFTS / SET_RDFT / SET_RDFT2, decoded in
+	// SeibuSPI.sv from the MRA's index-1 mod byte. It must be stable before the
+	// index-0 download starts, which it is: the HPS sends the mod byte first.
+	input       [1:0] set_id,
 
 	// Codec per part, 4 bits each, part 0 in the low nibble. Comes from the
-	// MRA's index-1 config the same way set_sxx2c does, and is all zero
+	// MRA's index-1 config the same way set_id does, and is all zero
 	// (CODEC_RAW) unless the MRA says otherwise. See rtl/spi_rom_decode.sv.
 	input      [63:0] part_codec,
 
@@ -90,10 +89,22 @@ module rom_loader
 	localparam [3:0] M_24_B2   = 4'd9;   // dest = base + i*3 + 2
 	localparam [3:0] M_24_W01  = 4'd10;  // dest = base + (i>>1)*3 + (1 - (i&1))
 
-	localparam [3:0] NPARTS_SXX2E = 4'd14;
-	localparam [3:0] NPARTS_SXX2C = 4'd15;
+	// Part indices are 4 bits, and part_end (which spi_jtag_peek reports by bit
+	// position) is 4 bits with it. That is the reason rdft2's six sprite ROMs
+	// are ONE loader part rather than six: at a 6 MB chunk stride they are
+	// contiguous from SDR_SPRITES_BASE, so one LINEAR run places all of them,
+	// and 19 parts would not have fit. check_mra.py still checks all six
+	// individually, by walking that part's MRA members.
+	localparam [3:0] NPARTS_RDFTS = 4'd14;
+	localparam [3:0] NPARTS_RDFT  = 4'd15;
+	localparam [3:0] NPARTS_RDFT2 = 4'd14;
 
-	wire [3:0] nparts = set_sxx2c ? NPARTS_SXX2C : NPARTS_SXX2E;
+	reg [3:0] nparts;
+	always @* case (set_id)
+		SET_RDFT : nparts = NPARTS_RDFT;
+		SET_RDFT2: nparts = NPARTS_RDFT2;
+		default  : nparts = NPARTS_RDFTS;
+	endcase
 
 	// ------------------------------------------------------------------
 	// Part tables. The order in each must match the <part> order in the MRA,
@@ -119,43 +130,78 @@ module rom_loader
 	reg [25:0] part_size;
 	reg [3:0]  part_mode;
 
-	always @* if (set_sxx2c) begin
-		case (part)
-		//                                          base   size          mode
-		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
-		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
-		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
-		4'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
-		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
-		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
-		4'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
-		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
-		4'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
-		4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
-		4'd10: begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
-		4'd11: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
-		4'd12: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
-		4'd13: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
-		default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
+	always @* begin
+		case (set_id)
+
+		// ---- TABLE rdft: SPI cartridge, pre-flashed (SXX2C) ----
+		SET_RDFT: case (part)
+			//                                          base   size          mode
+			4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // raiden-fi_prg0_121196.u0211
+			4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-fi_prg1_121196.u0212
+			4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // raiden-fi_prg2_121196.u0210
+			4'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // raiden-fi_prg3_121196.u029
+			4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // seibu_5.u0423
+			4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // seibu_6.u0424
+			4'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_7.u048
+			4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0415
+			4'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0410
+			4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0424
+			4'd10: begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u049
+			4'd11: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
+			4'd12: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
+			4'd13: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+			default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
 		endcase
-	end
-	else begin
-		case (part)
-		//                                          base   size          mode
-		4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
-		4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
-		4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h010_0000; part_mode = M_32_W23; end // raiden-f_prg34.u0262
-		4'd3 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h002_0000; part_mode = M_LINEAR; end // seibu_zprg.u1139
-		4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h002_0000; part_mode = M_24_W01; end // raiden-f_fix.u0535
-		4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_fix2.u0528
-		4'd6 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0526
-		4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0531
-		4'd8 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0534
-		4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u0530
-		4'd10: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
-		4'd11: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
-		4'd12: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
-		default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // raiden-f_pcm2.u0975
+
+		// ---- TABLE rdft2: SPI cartridge, decoded sample flash (SXX2C) ----
+		//
+		// Differences from rdft, all read off MAME's ROM_START(rdft2):
+		//   * twice the tiles (12 MB), so the second bg group sits at +6 MB
+		//   * text lanes come in the order fix0(1), fix1(0), fixp(2)
+		//   * 18 MB of sprites as three 6 MB plane-pair chunks, which are
+		//     contiguous and so load as ONE part -- obj3 first, then obj2,
+		//     then obj1, which is MAME's order and not the numeric one
+		//   * the sample flash is two parts: the region stamp plus a verbatim
+		//     slice of pcm.u0217, then sound1.u0222 COMPRESSED. The MRA marks
+		//     that last part CODEC_BPE_DPCM, so its size here is the
+		//     compressed length -- 0x4C665 in, 0x730ED out (PLAN.md 0).
+		SET_RDFT2: case (part)
+		//                                                    base   size          mode
+		4'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.tun
+		4'd1 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B1;  end // prg1.bin
+		4'd2 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B2;  end // prg2.bin
+		4'd3 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B3;  end // prg3.bin
+		4'd4 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B1;  end // fix0.u0524
+		4'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B0;  end // fix1.u0518
+		4'd6 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // fixp.u0514
+		4'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-1d.u0535
+		4'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0537
+		4'd9 : begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-2d.u0536
+		4'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-2p.u0538
+		4'd11: begin part_base = SDR_SPRITES_BASE;                  part_size = 26'h120_0000; part_mode = M_LINEAR; end // sprites: obj3 obj3b obj2 obj2b obj1 obj1b
+		4'd12: begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
+		default:begin part_base = SDR_PCM_BASE + 26'h017_C247;      part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
+		endcase
+
+		// ---- TABLE rdfts: SXX2E single board ----
+		default: case (part)
+			//                                          base   size          mode
+			4'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu_1.u0259
+			4'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // raiden-f_prg2.u0258
+			4'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h010_0000; part_mode = M_32_W23; end // raiden-f_prg34.u0262
+			4'd3 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h002_0000; part_mode = M_LINEAR; end // seibu_zprg.u1139
+			4'd4 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h002_0000; part_mode = M_24_W01; end // raiden-f_fix.u0535
+			4'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu_fix2.u0528
+			4'd6 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg1-d.u0526
+			4'd7 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg1-p.u0531
+			4'd8 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // gun_dogs_bg2-d.u0534
+			4'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // gun_dogs_bg2-p.u0530
+			4'd10: begin part_base = SDR_SPRITES_BASE;                   part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-1.u0322
+			4'd11: begin part_base = SDR_SPRITES_BASE +   SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-2.u0324
+			4'd12: begin part_base = SDR_SPRITES_BASE + 2*SPR_CHUNK_STRIDE;  part_size = 26'h040_0000; part_mode = M_LINEAR; end // gun_dogs_obj-3.u0323
+			default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // raiden-f_pcm2.u0975
+		endcase
+
 		endcase
 	end
 

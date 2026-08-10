@@ -327,7 +327,15 @@ always @(posedge clk_sys) begin
 	end
 end
 
-wire set_sxx2c = mod_byte[0];
+// Mod byte bit 0 is the SXX2C cartridge board; bits 3:1 pick the SET within
+// that board, so an MRA that sends only bit 0 still selects the board's first
+// set and nothing that already works has to change. Ids are in
+// rtl/spi_defs.vh: 0 rdfts, 1 rdft, 2 rdft2.
+wire       set_sxx2c   = mod_byte[0];
+wire [2:0] set_variant = mod_byte[3:1];
+wire [1:0] set_id      = !set_sxx2c            ? 2'd0    // SET_RDFTS
+                       : (set_variant == 3'd0) ? 2'd1    // SET_RDFT
+                                               : 2'd2;   // SET_RDFT2
 
 wire flip_screen_dip  = dsw[0][0];
 wire service_mode_dip = dsw[0][1];
@@ -480,7 +488,7 @@ rom_loader rom_loader
 	.ioctl_index    (ioctl_index),
 	.ioctl_dout     (ioctl_dout),
 	.ioctl_wait     (ioctl_wait),
-	.set_sxx2c      (set_sxx2c),
+	.set_id         (set_id),
 	.part_codec     (part_codec),
 
 	.sdr_addr       (ldr_addr),

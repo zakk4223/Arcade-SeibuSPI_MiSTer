@@ -628,6 +628,60 @@ lets the bench build, and it then fails its readback compare -- IDENTICALLY at
 HEAD with the decoder reverted, 15,908,067 bytes differing either way, so that
 is an older regression in the bench or the SDRAM model and not the loader.
 
+### rdft2's part table and MRA (2026-08-09)
+
+`mra/rdft2.mra` plus a third table in `rom_loader`. 34.0 MB, 35,621,036 bytes,
+fourteen parts. `make check-mra` agrees with MAME's `ROM_START(rdft2)` on every
+one: order, name, CRC, size, scatter mode and destination.
+
+**Set selection grew a level.** The loader took `set_sxx2c`; it now takes
+`set_id` (`SET_RDFTS` / `SET_RDFT` / `SET_RDFT2`). The mod byte keeps bit 0 as
+the SXX2C board and adds bits 3:1 as the set WITHIN that board, so `rdft.mra`'s
+existing `01` still means rdft and nothing shipped has to change. rdft2 sends
+`03`; rfjet would be `05` and one more arm.
+
+**What differs from rdft**, all read off the driver rather than assumed:
+
+* 12 MB of tiles, so the second bg group sits at TILES + 6 MB, not + 3 MB
+* the text lanes arrive in the order fix0(lane 1), fix1(lane 0), fixp(lane 2)
+* 18 MB of sprites as three **6 MB** plane-pair chunks, and MAME's order is
+  obj3, obj2, obj1 -- chunk 0 is obj3, not obj1
+* the sample flash is two parts instead of one: a verbatim head, then the
+  compressed tail marked `CODEC_BPE_DPCM` by the MRA
+
+**The six sprite ROMs are one loader part.** At a 6 MB stride the three chunks
+are contiguous from `SDR_SPRITES_BASE`, so one LINEAR run places all of them.
+That is not an aesthetic choice: part indices and `part_end` are 4 bits, and
+`part_end` is reported by bit position in `spi_jtag_peek`'s probe, which
+`tools/jtag_peek.tcl` decodes. Nineteen parts would have meant widening both
+and re-cutting the probe. Instead `check_mra` learned to walk a multi-element
+part's members and match each against the next MAME ROM, so all six are still
+checked individually -- better coverage than before, since rdft's synthesised
+part was previously unexamined too.
+
+**The MRA's own slices rebuild the verified flash image.** With `--zip`,
+`check_mra` now reconstructs the 2 MB image the way the loader will -- head
+part copied, tail part run through the same decoder `build_soundflash.py` uses
+-- and compares its sha256 against the image MAME's flash devices hold. This is
+the only thing tying `offset="0x000004"`, `length="0x17C243"` and
+`length="0x04C665"` to reality; every one of them is off-by-one-able and silent.
+Perturbing each by one byte, and the RTL's tail base by one, was tried: all four
+are caught.
+
+**One bug this turned up, in the checker rather than the core.** `check_mra`
+read the MRA as text and its `<rom index="1">` regex was matching the EXAMPLE
+inside a documentation comment, so it reported a codec on rdft that exists only
+in prose. Main_MiSTer uses a real XML parser and ignores comments, so the
+hardware was never affected -- but a checker reading a different file than the
+hardware is worse than no checker. It strips comments first now.
+
+**Still missing for rdft2 to actually run**, and the MRA says so at the top:
+`SPR_CHUNK_STRIDE` as a port on `spi_sprite` (it fetches at the 4 MB SEI252
+constant; the loader already lays rdft2 out at 6 MB), the RISE10 mux in the
+sprite fetch, and the rdft2 tile keys in `spi_layers`. All three are known work
+against verified units -- `spi_rise10_decrypt.sv` and the keys already exist and
+are checked against MAME. The loading is done.
+
 ### The authentic flash path is still the general answer
 
 The codec being cracked weakens this argument but does not kill it. rdft's
@@ -1705,9 +1759,10 @@ controller still needs a writable ch5, a save file and a long first boot, and
 remains the fallback for any game whose packer is not worth cracking.
 
 **What rdft2 still needs beyond the codec:** `SPR_CHUNK_STRIDE` as a port on
-`spi_sprite` (6 MB for rdft2, currently a 4 MB constant), a third loader table
-and MRA, the tile-key select, and the RISE10 mux in the sprite fetch. The 26-bit
-address widening that made its 34.4 MB reachable is done.
+`spi_sprite` (6 MB for rdft2, currently a 4 MB constant), the tile-key select,
+and the RISE10 mux in the sprite fetch. The third loader table and the MRA are
+DONE and checked against MAME (section 0), as is the 26-bit address widening
+that made its 34.0 MB reachable.
 
 ## 11. TASKS
 
