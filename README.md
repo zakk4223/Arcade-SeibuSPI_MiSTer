@@ -63,6 +63,9 @@ of the image at 35 MB.
 ## Building
 
     make            # full Quartus compile -> output_files/SeibuSPI.rbf
+                    # NOTE: "successful" does not mean timing met. Always
+                    # follow with `make timing` -- Quartus writes the RBF
+                    # either way. As of 2026-08-10 clk_ram is -0.292 ns.
     make map        # analysis and synthesis only, much faster
     make timing     # name the worst timing paths after a fit
     make lint       # Verilator lint
