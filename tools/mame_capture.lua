@@ -231,7 +231,13 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
     dump_region(":maincpu", "maincpu.bin")
     dump_region(":chars", "chars_decrypted.bin")
     dump_region(":tiles", "tiles_decrypted_head.bin", 0x40000)
-    dump_region(":tiles", "tiles_decrypted_bg2.bin", 0x40000, 0x480000)
+    -- The second bg group starts halfway through the tile region: 3 MB in for
+    -- the 6 MB sets, 6 MB in for rdft2's 12 MB. Derived rather than hardcoded,
+    -- which it was (0x480000, an rdfts-only number).
+    local tiles_rg = mach.memory.regions[":tiles"]
+    if tiles_rg then
+        dump_region(":tiles", "tiles_decrypted_bg2.bin", 0x40000, tiles_rg.size // 2)
+    end
 
     local n_main = dump_share(":mainram",     "mainram.bin")
     local n_tm   = dump_share(":tilemap_ram", "tilemap_ram.bin")
@@ -241,6 +247,10 @@ slop_frame_sub = emu.add_machine_frame_notifier(function()
 
     local scr = mach.screens:at(1)
     f = assert(io.open(OUT .. "/regs.txt", "w"))
+    -- The set name makes the capture self-describing: sim/tb_video.cpp reads it
+    -- to pick the per-game parameters (tile keys, fore base, sprite stride and
+    -- crypt) instead of being told separately and getting it wrong.
+    f:write(string.format("game %s\n", emu.romname()))
     f:write(string.format("frame %d\n", frames))
     f:write(string.format("screen %d %d\n", scr.width, scr.height))
     f:write(string.format("layer_enable %d\n", reg.layer_enable))

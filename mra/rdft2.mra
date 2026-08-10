@@ -21,16 +21,16 @@
     <category>Shooter</category>
 
     <!--
-      UNVERIFIED. Everything rdft2 needs is now wired and selected by the mod
-      byte below: the part table, the compressed sample flash, the 6 MB sprite
-      chunk stride, the RISE10 sprite crypt, sprite_reorder, and the rdft2 tile
-      and text keys with the fore-layer base that goes with 12 MB of tiles.
+      Verified against MAME in simulation, not yet run on hardware. Ten captured
+      scenes -- story, intro, title and demo play -- render pixel-identical to
+      MAME, including the sprite-heavy title screen. See PLAN.md "rdft2 verified
+      against MAME frame by frame".
 
-      What has NOT happened is a frame-by-frame comparison against MAME. Every
-      piece is checked individually against the driver or against MAME's own
-      code, but no rdft2 frame has been rendered and compared, so treat this as
-      ready to try rather than known good. See PLAN.md "what rdft2 still
-      needs".
+      One caveat that is not rdft2's: the densest demo-play scene differs by
+      0.49% because the sprite engine runs out of SDRAM bandwidth and drops
+      sprites on nine lines. It matches exactly with the bandwidth limit
+      removed, so the graphics are right and the budget is the constraint --
+      the same budget every set shares.
     -->
 
     <!--

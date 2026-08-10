@@ -775,6 +775,65 @@ because they are the same debt as tb_sdram_top's, but reconnecting it needs
 models for the Z80 SDRAM read and download ports and is its own change. It is
 not in `make verify`.
 
+### rdft2 verified against MAME frame by frame (2026-08-10)
+
+Ten scenes, ten exact matches. `tools/build_sdram_image.py` learned rdft2's
+layout, `mame_capture.lua` lost its rdfts-only assumptions, and the video bench
+takes its per-set parameters from the capture instead of constants.
+
+| scene            | sprite pens | result                                    |
+|------------------|-------------|-------------------------------------------|
+| 600 story        | 208         | exact                                      |
+| 1800 intro       | 240         | exact **after the fix below**              |
+| 2700             | 0           | exact                                      |
+| 3600             | 48          | exact                                      |
+| 4500 title       | 336         | exact                                      |
+| 5400 demo play   | 976         | 377 px, sprite STARVATION -- see below     |
+| 6300/7200/8100/9000 | 368/464/224/128 | exact                              |
+
+**The bug it found: rdft2 needs a 17th sprite tile-code bit.** MAME's
+`gfxbank_callback` (seibuspi_v.cpp:370) ORs 0x10000 into the code when the
+sprite gfx has more than 0x10000 elements AND word 2 bit 12 of the sprite entry
+is set. Elements is the chunk size over 64, so the SEI252 sets sit at exactly
+0x10000 and it never fires -- `spi_sprite.sv` said as much in a comment and did
+not implement it. rdft2's 6 MB chunks hold 0x18000, and the intro cinematic
+draws from the top half of the sprite ROM: the left of the frame was perfect and
+the right was confetti, 24.8% of pixels, all of them sprite pens.
+
+`tile_code` is 17 bits now and the bank bit is `ext & (spr_chunk_stride >
+4 MB)` -- MAME's own condition rather than a per-set flag, so the two cannot
+disagree. rdfts is unaffected and still matches exactly.
+
+**Frame 5400 is not a decode failure.** 976 of 976 sprite pens decode
+correctly; the frame differs by 0.49% because **9 lines ended with sprites
+unscanned**. Re-run with `SLOP_BUS_FREE=1`, which gives the sprite engine
+unlimited SDRAM bandwidth, and it matches exactly with 0 starved. So this is
+the sprite budget from section 3.3 meeting the densest scene tested yet --
+12,981 y-hits against rdfts's 9,995 -- and not anything rdft2-specific. It is
+also NOT the reorder: that lives in the loader, so an rdft2 row still costs
+three SDRAM reads, the same as SEI252.
+
+**A second broken thing, found by using it.** The bench's sprite-pixel check
+read the sprite ROM from `0x0A80000`, where sprites lived before the map was
+re-laid for the 26-bit widening. It had been comparing against tile data and
+printing mismatches nobody read. Pointed at `SDR_SPRITES_BASE` it passes 640 of
+640 for rdfts, and for rdft2 it un-does the loader's reorder before calling
+MAME's RISE10 decryptor -- which reorders at the end, so applying it to an
+already-reordered image would permute twice.
+
+**Reproducing.** `make capture` takes `GAME` now:
+
+    make capture GAME=rdft2 FRAME=4500 ROMS=<patched> NVRAM=<flashed> \
+         CAP=/tmp/cap_rdft2 SDRAM=/tmp/sdram_rdft2.bin
+    make run-video CAP=/tmp/cap_rdft2 SDRAM=/tmp/sdram_rdft2.bin
+
+rdft2 needs a rompath whose `rdft2.zip` carries the three PAL placeholders, and
+an already-flashed `-nvram_directory` or the first boot spends ~420 emulated
+seconds reflashing. Two traps worth keeping: `SECONDS` must cover `FRAME` at
+53.99 Hz and not 60, or the capture silently never happens and the directory is
+just empty; and the capture now writes its set name into `regs.txt`, so the
+bench cannot be pointed at an rdft2 capture with rdfts's keys.
+
 ### The authentic flash path is still the general answer
 
 The codec being cracked weakens this argument but does not kill it. rdft's
@@ -1853,12 +1912,11 @@ per part by the MRA, verified against the real rdft2 stream (section 0). The
 controller still needs a writable ch5, a save file and a long first boot, and
 remains the fallback for any game whose packer is not worth cracking.
 
-**What rdft2 still needs:** a golden capture, and whatever that turns up. Every
-per-set difference in the driver is now wired -- loader table, MRA,
-sample-flash decoder, sprite chunk stride, RISE10 crypt, sprite reorder, tile
-and text keys, fore-layer base. None of it has been compared against an rdft2
-frame, because producing one needs `tools/build_sdram_image.py` to learn
-rdft2's layout first (section 0).
+**What rdft2 still needs:** nothing known. Ten captured scenes match MAME
+exactly (section 0), including the title screen and the intro cinematic. The
+one scene that does not is a sprite-STARVATION difference, not an rdft2 one --
+it matches exactly with the bus model relaxed, and improving the sprite budget
+is section 3.3's problem for every set. rdft2 has never been run on hardware.
 
 ## 11. TASKS
 

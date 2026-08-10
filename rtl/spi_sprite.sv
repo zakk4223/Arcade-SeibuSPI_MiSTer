@@ -28,9 +28,13 @@
 //  code++. So the tile covering column ax at vertical vcell ay is
 //  code + ax*sizey + ay.
 //
-//  `code % elements == 0` is skipped, and since the gfx region holds exactly
-//  0x10000 tiles the RISE "extra bank" bit is NOT applied on this board --
-//  MAME's gfxbank callback only adds it when elements > 0x10000.
+//  `code % elements == 0` is skipped. The RISE "extra bank" bit -- word 2 bit
+//  12, which becomes tile code bit 16 -- is applied only when the gfx region
+//  holds MORE than 0x10000 tiles, which is MAME's own gfxbank_callback rule
+//  (seibuspi_v.cpp:370). The SEI252 sets have exactly 0x10000 tiles per 4 MB
+//  chunk so it never fires there; rdft2's 6 MB chunks hold 0x18000 and it does.
+//  That condition is read off spr_chunk_stride rather than a separate flag,
+//  because elements = chunk / 64 and the two cannot disagree that way.
 //
 //  Graphics are three plane-pair chunks 4 MB apart, 64 bytes per tile, 4 bytes
 //  per row. One 64-bit SDRAM read per chunk covers a row, so a 16-pixel row
@@ -92,7 +96,7 @@ module spi_sprite
 	output      [8:0] dbg_sx, dbg_sy,
 	// Exposed so the golden test can decode the same tile row straight out of
 	// the sprite ROM with MAME's decryptor and compare pixel for pixel.
-	output     [15:0] dbg_tile_code,
+	output     [16:0] dbg_tile_code,
 	output      [3:0] dbg_ry,
 	output      [3:0] dbg_px,
 
@@ -161,7 +165,13 @@ module spi_sprite
 	// Sprite attributes, latched as the list is walked
 	// ------------------------------------------------------------------
 	reg [15:0] attr, code;
+	reg        ext;                       // word 2 bit 12: the extra bank
 	reg  [8:0] sx_raw, sy_raw;
+
+	// MAME: gfxbank_callback adds 0x10000 only when elements > 0x10000, and
+	// elements is the chunk size over 64 bytes per tile.
+	wire ext_bank = (spr_chunk_stride > 26'h040_0000);
+	wire [16:0] code_ext = {ext & ext_bank, code};
 
 	wire        flipy = attr[15];
 	wire  [2:0] sizey = attr[14:12];   // height - 1
@@ -198,7 +208,8 @@ module spi_sprite
 	// grid of repeated blocks over large sprites like the title logo. Widen it
 	// first, then multiply.
 	wire  [3:0] rows_per_col = {1'b0, sizey} + 4'd1;
-	wire [15:0] tile_code = code + ({12'd0, ax} * {12'd0, rows_per_col}) + {13'd0, ay};
+	wire [16:0] tile_code = code_ext + ({13'd0, ax} * {13'd0, rows_per_col})
+	                                 + {14'd0, ay};
 
 	wire signed [10:0] col_x = 11'(spr_x + $signed({4'd0, axc, 4'd0}));  // + axc*16
 	// This 16-pixel column has at least one pixel on screen. Skipping an
@@ -245,7 +256,7 @@ module spi_sprite
 	// because by the time it runs the fetcher has moved on to another column
 	// and possibly another sprite.
 	reg [15:0] r_y1a[0:1], r_y1b[0:1], r_y2a[0:1], r_y2b[0:1], r_y3a[0:1], r_y3b[0:1];
-	reg [15:0] r_tcode[0:1];
+	reg [16:0] r_tcode[0:1];
 	reg signed [10:0] r_colx[0:1];
 	reg        r_flipx[0:1];
 	reg  [5:0] r_colr[0:1];
@@ -372,7 +383,7 @@ module spi_sprite
 	// falls out of the write order exactly as before.
 	// ------------------------------------------------------------------
 	localparam FIFO_N = 8;
-	reg [49:0] fifo [0:FIFO_N-1];         // {attr, code, sx, sy}
+	reg [50:0] fifo [0:FIFO_N-1];         // {attr, code, ext, sx, sy}
 	reg  [3:0] fifo_wp, fifo_rp;          // one spare bit for full vs empty
 	wire [3:0] fifo_cnt   = fifo_wp - fifo_rp;
 	wire       fifo_empty = (fifo_wp == fifo_rp);
@@ -484,7 +495,7 @@ module spi_sprite
 					// MAME skips code 0 (`code % elements == 0`).
 					if (sc_yhit && sc_xhit && s_code != 16'd0) begin
 						dbg_yhit <= dbg_yhit + 16'd1;
-						fifo[fifo_wp[2:0]] <= {s_attr, s_code,
+						fifo[fifo_wp[2:0]] <= {s_attr, s_code, spr_data[12],
 						                       spr_data[8:0], spr_data[24:16]};
 						fifo_wp <= fifo_wp + 4'd1;
 					end
@@ -552,7 +563,7 @@ module spi_sprite
 				case (fstate)
 				F_POP: begin
 					if (!fifo_empty && budget != 12'd0) begin
-						{attr, code, sx_raw, sy_raw} <= fifo[fifo_rp[2:0]];
+						{attr, code, ext, sx_raw, sy_raw} <= fifo[fifo_rp[2:0]];
 						fifo_rp <= fifo_rp + 4'd1;
 						axc    <= 3'd0;
 						fstate <= F_COL;

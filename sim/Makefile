@@ -111,12 +111,31 @@ $(RTL)/spi_rise10_tables.vh: $(TOOLS)/gen_rise10_tables.py
 # Produce the golden capture and the SDRAM image the two reference tests need.
 # The bitmap is taken one frame after the video RAM snapshot, deliberately --
 # see PLAN.md 12, it is the trap that made ~20% of tilemap entries look wrong.
+# GAME picks the set. rdft2 needs two extras, both one-offs:
+#   * a rompath whose rdft2.zip carries three 0x117-byte placeholder files
+#     (rm81.u0529.bin, rm82.u0330.bin, rm83.u0331.bin) -- MAME will not start
+#     without the PAL dumps, which are not in the set;
+#   * NVRAM=<dir> pointing at an already-flashed nvram, or the first boot
+#     spends ~420 emulated seconds running the sample-flash updater. Produce
+#     one by running rdft2 once with -seconds_to_run 520.
+#
+#     make capture GAME=rdft2 FRAME=4500 ROMS=<patched> NVRAM=<dir> \
+#          CAP=/tmp/cap_rdft2 SDRAM=/tmp/sdram_rdft2.bin
+#
+# SECONDS has to cover FRAME at the SPI's 53.99 Hz, not 60 -- at 60 the capture
+# silently never happens and the output directory is just empty.
+GAME    ?= rdfts
+GAMEZIP ?= $(if $(filter rdfts,$(GAME)),rdft.zip,$(GAME).zip)
+MAMEBIN ?= mame
+NVRAM   ?=
+SECONDS ?= $(shell expr $(FRAME) / 50 + 6)
 capture:
 	@mkdir -p $(CAP)
-	cd $(MAME) && SLOP_OUT=$(abspath $(CAP)) SLOP_FRAME=$(FRAME) ./mame rdfts \
-	    -rompath $(ROMS) -autoboot_script $(abspath $(TOOLS))/mame_capture.lua \
-	    -video none -sound none -seconds_to_run 45 -nothrottle
-	python3 $(TOOLS)/build_sdram_image.py $(ROMS)/rdft.zip $(SDRAM)
+	SLOP_OUT=$(abspath $(CAP)) SLOP_FRAME=$(FRAME) $(MAMEBIN) $(GAME) \
+	    -rompath "$(ROMS)" $(if $(NVRAM),-nvram_directory "$(NVRAM)",) \
+	    -autoboot_script $(abspath $(TOOLS))/mame_capture.lua \
+	    -video none -sound none -seconds_to_run $(SECONDS) -nothrottle
+	python3 $(TOOLS)/build_sdram_image.py "$(ROMS)/$(GAMEZIP)" $(SDRAM)
 	@echo "capture in $(CAP), sdram image $(SDRAM)"
 
 # Golden-reference tests. Need a capture from tools/mame_capture.lua in $(CAP).

@@ -45,6 +45,20 @@ static std::vector<uint8_t> load(const std::string &p, size_t expect = 0)
     return v;
 }
 
+// regs.txt's one non-numeric field. The capture names the set it came from so
+// this bench cannot be pointed at an rdft2 capture with rdfts's keys.
+static std::string load_game(const std::string &p)
+{
+    FILE *f = fopen(p.c_str(), "r");
+    if (!f) return "";
+    char line[256], name[64];
+    std::string game;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "game %63s", name) == 1) game = name;
+    fclose(f);
+    return game;
+}
+
 static std::map<std::string, std::vector<long>> load_regs(const std::string &p)
 {
     FILE *f = fopen(p.c_str(), "r");
@@ -116,12 +130,31 @@ int main(int argc, char **argv)
     std::string outdir = (argc > 3) ? argv[3] : cap;
 
     auto regs   = load_regs(cap + "/regs.txt");
+    std::string game = load_game(cap + "/regs.txt");
+    if (game.empty()) {
+        game = "rdfts";
+        printf("note: capture has no `game` line, assuming rdfts\n");
+    }
     auto tm     = load(cap + "/tilemap_ram.bin", 0x4000);
     auto pal    = load(cap + "/palette_ram.bin", 0x3000);
     auto ref    = load(cap + "/frame.bin", (size_t)W * H * 4);
     auto sdram  = load(sdrpath);
 
     Vtb_video_top *dut = new Vtb_video_top;
+
+    // Per-set configuration. rdft2 is the only set here that is not SEI252 at
+    // 6 MB of tiles and 4 MB sprite chunks; see rtl/spi_defs.vh.
+    const bool is_rdft2 = (game == "rdft2");
+    dut->bg_fore_pos      = is_rdft2 ? 0x8000 : 0x4000;
+    dut->tkey1            = is_rdft2 ? 0x823146 : 0x5A3845;
+    dut->tkey2            = is_rdft2 ? 0x4DE2F8 : 0x77CF5B;
+    dut->tkey3            = is_rdft2 ? 0x157ADC : 0x1378DF;
+    dut->spr_chunk_stride = is_rdft2 ? 0x600000 : 0x400000;
+    dut->rise10           = is_rdft2;
+    printf("set: %s  (fore_base %04X, keys %06X/%06X/%06X, chunk %06X, %s)\n",
+           game.c_str(), (unsigned)dut->bg_fore_pos, (unsigned)dut->tkey1,
+           (unsigned)dut->tkey2, (unsigned)dut->tkey3,
+           (unsigned)dut->spr_chunk_stride, is_rdft2 ? "RISE10" : "SEI252");
 
     dut->layer_enable     = regs["layer_enable"].at(0);
     dut->rowscroll_enable = regs["rowscroll"].at(0);
@@ -572,16 +605,36 @@ int main(int argc, char **argv)
     // xoffset STEP8(7,-1) then STEP8(8*2+7,-1), yoffset STEP16(0,8*4),
     // 16*32 bits per tile per chunk.
     static std::vector<uint8_t> sprrom;
+    const size_t SPR_CHUNK = is_rdft2 ? 0x600000 : 0x400000;
     if (sprrom.empty()) {
-        const size_t SPR_BASE = 0x0A80000;   // see rtl/spi_defs.vh
+        // SDR_SPRITES_BASE in rtl/spi_defs.vh. This said 0x0A80000 until now,
+        // which is where the sprites lived before the map was re-laid for the
+        // 26-bit widening -- so this whole check has been comparing against
+        // tile data for a while and reporting mismatches nobody read.
+        const size_t SPR_BASE = 0x1100000;
         sprrom.assign(sdram.begin() + SPR_BASE,
-                      sdram.begin() + SPR_BASE + 3 * 0x400000);
-        // MAME decrypts each 4 MB chunk independently.
-        seibuspi_sprite_decrypt(sprrom.data(), 0x400000);
+                      sdram.begin() + SPR_BASE + 3 * SPR_CHUNK);
+        if (is_rdft2) {
+            // The SDRAM image is ALREADY sprite_reorder()ed -- rom_loader does
+            // it at load time (M_SPR_R10). MAME's decryptor reorders at the
+            // end, so undo ours first and let MAME's put it back; otherwise the
+            // permutation is applied twice. The inverse here is the same
+            // formula tb_rom_loader.cpp checks against MAME's sprite_reorder.
+            std::vector<uint8_t> tmp(sprrom.size());
+            for (size_t i = 0; i < sprrom.size(); i++) {
+                size_t j = (i & ~(size_t)0x3F) | ((i & 0x1E) << 1)
+                                               | ((i & 0x20) >> 4) | (i & 1);
+                tmp[i] = sprrom[j];
+            }
+            sprrom.swap(tmp);
+            seibuspi_rise10_sprite_decrypt(sprrom.data(), (int)SPR_CHUNK);
+        } else {
+            seibuspi_sprite_decrypt(sprrom.data(), (int)SPR_CHUNK);
+        }
     }
     auto ref_spr_pix = [&](uint32_t tile, int row, int px) -> int {
         auto rb = [&](int chunk, uint32_t bit) -> int {
-            uint32_t byteidx = (uint32_t)chunk * 0x400000 + (bit >> 3);
+            uint32_t byteidx = (uint32_t)chunk * (uint32_t)SPR_CHUNK + (bit >> 3);
             return (sprrom[byteidx] >> (7 - (bit & 7))) & 1;
         };
         uint32_t base = tile * 512u + (uint32_t)row * 32u;

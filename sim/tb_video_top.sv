@@ -11,6 +11,14 @@ module tb_video_top
 	input             clk,
 	input             reset,
 
+	// Per-set configuration, driven from the capture's `game` line rather than
+	// hardcoded: the tile/text keys, the fore layer's tile base (which follows
+	// the tile region SIZE), and the sprite chunk stride and crypt.
+	input      [15:0] bg_fore_pos,
+	input      [23:0] tkey1, tkey2, tkey3,
+	input      [25:0] spr_chunk_stride,
+	input             rise10,
+
 	// CRTC state
 	input       [4:0] layer_enable,
 	input             rowscroll_enable,
@@ -79,7 +87,7 @@ module tb_video_top
 	output      [5:0] dbg_spr_pix,
 	output signed [10:0] dbg_spr_emitx,
 	output     [15:0] dbg_spr_code,
-	output     [15:0] dbg_spr_tile,
+	output     [16:0] dbg_spr_tile,
 	output      [3:0] dbg_spr_ry,
 	output      [3:0] dbg_spr_px,
 	output      [8:0] dbg_spr_sx, dbg_spr_sy,
@@ -136,9 +144,8 @@ module tb_video_top
 		.rowscroll_enable(rowscroll_enable), .layer_off(layer_enable[3:0]),
 		.fore_layer_d13(fore_layer_d13),
 		.rf2_layer_bank(rf2_layer_bank),
-		// rdfts: 6 MB of tiles, and the SEI252 key triple.
-		.bg_fore_pos(16'h4000),
-		.tkey1(24'h5A3845), .tkey2(24'h77CF5B), .tkey3(24'h1378DF),
+		.bg_fore_pos(bg_fore_pos),
+		.tkey1(tkey1), .tkey2(tkey2), .tkey3(tkey3),
 		.tm_addr(tm_ra), .tm_data(tm_rd),
 		.sdr_addr(sdr_addr), .sdr_dout(sdr_dout),
 		.sdr_req(sdr_req), .sdr_ack(sdr_ack),
@@ -170,8 +177,7 @@ module tb_video_top
 		.clk(clk), .reset(reset),
 		.vcnt(vcnt), .line_start(line_start),
 		.enable(~layer_enable[4]),
-		// rdfts: SEI252 crypt at the 4 MB chunk stride.
-		.spr_chunk_stride(26'h040_0000), .rise10(1'b0),
+		.spr_chunk_stride(spr_chunk_stride), .rise10(rise10),
 		.spr_addr(spr_ra), .spr_data(spr_rd),
 		.sdr_addr(spr_sdr_addr), .sdr_dout(spr_sdr_dout),
 		.sdr_req(spr_sdr_req), .sdr_ack(spr_sdr_ack),
