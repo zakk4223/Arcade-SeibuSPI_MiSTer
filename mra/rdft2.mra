@@ -21,10 +21,9 @@
     <category>Shooter</category>
 
     <!--
-      DO NOT EXPECT THIS TO BOOT YET. The video path is verified -- ten captured
-      scenes, story through demo play, render pixel-identical to MAME with no
-      sprites dropped, the densest at 16,572 y-hits in a frame. What is missing
-      is SOUND, and it is missing in the core rather than in this file.
+      NOT YET RUN ON HARDWARE. The video path is verified in simulation -- ten
+      captured scenes, story through demo play, render pixel-identical to MAME
+      with no sprites dropped, the densest at 16,572 y-hits in a frame.
 
       rdft2 keeps its Z80 program in sound1.u0222 at 0x60000-0x7FFFF and the 386
       reads it through the sound01 window before releasing the Z80. rdft does
@@ -32,13 +31,9 @@
       rdft can drop sound01 entirely. Measured rather than assumed -- with the
       flash already programmed, rdft2 still issues exactly 131,072 dword reads
       over 0x1380000-0x13FFFFC, which is sound1.u0222[0x60000..0x7FFFF] and
-      nothing else.
-
-      spi_cpu.sv decodes main RAM, I/O and PRG ROM; everything else reads as
-      zero. So the 386 would download 128 KB of zeros into the Z80's RAM -- and
-      it also waits on the Z80 during boot, so expect a hang rather than just
-      silence. Until the core carries that window this file is here to be
-      loaded and looked at, not played. See PLAN.md "what rdft2 still needs".
+      nothing else. Loader part 16 below carries exactly that slice, and
+      spi_cpu.sv answers the window out of SDRAM: packed one byte per dword,
+      since the region's other three byte lanes are zero.
     -->
 
     <!--
@@ -91,6 +86,8 @@
                           through port 0x688 and releases the Z80 with 0x68C.
         0x0240000  192 KB text tiles
         0x0280000  2 MB   YMF271 samples: the pre-programmed flash image
+        0x0480000  128 KB the Z80 program the 386 reads through sound01,
+                          packed one byte per 386 dword
         0x0500000  12 MB  background tiles, two 6 MB groups
         0x1100000  18 MB  sprites, three 6 MB plane-pair chunks
     -->
@@ -159,11 +156,20 @@
         <!--
           Loader part 15, CODEC_BPE_DPCM: the compressed tail. 0x4C665 bytes in,
           0x730ED out. This is a LENGTH-LIMITED slice on purpose -- the rest of
-          sound1.u0222 is not sample data. 0x60000-0x7FFFF is rdft2's Z80
-          program, which the 386 downloads over port 0x688 at runtime rather
-          than the loader placing it, exactly as on rdft.
+          sound1.u0222 is not sample data.
         -->
         <part name="sound1.u0222" crc="b7bd3703" length="0x04C665"/>
+
+        <!--
+          Loader part 16: the SAME ROM again, at 0x60000, which is rdft2's Z80
+          program. Not a duplicate by accident -- the file holds two unrelated
+          things, and this is the half the 386 copies into the Z80's RAM over
+          port 0x688 before releasing it from reset. It reaches it through the
+          sound01 window rather than out of maincpu, which is the one way rdft2
+          differs from rdft here, so the loader has to place it and spi_cpu.sv
+          has to decode 0x1380000 to answer.
+        -->
+        <part name="sound1.u0222" crc="b7bd3703" offset="0x060000" length="0x020000"/>
     </rom>
 
     <!--

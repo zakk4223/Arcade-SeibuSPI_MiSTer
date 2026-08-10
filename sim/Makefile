@@ -215,10 +215,17 @@ lint-top:
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 
 
-# Boots the real 386 against the real SDRAM image. STEPS is clk_ram half-steps.
+# Boots the real 386 against the real SDRAM image. STEPS is clk_ram half-steps
+# (8 per clk_cpu cycle). GAME picks the board, and on the cartridge sets the run
+# ends by checking the Z80 program the 386 downloaded against the ROM -- for
+# rdft2 that is the sound01 window's only customer, so it is the check that says
+# whether the window works. Reaching the download takes far more than the
+# default STEPS; ~400M is the right order for rdft2.
+#
+#   make run-boot GAME=rdft2 SDRAM=/tmp/sdram_rdft2.bin STEPS=600000000
 STEPS ?= 40000000
 run-boot: obj_dir/Vtb_boot_top
-	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS)
+	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS) $(GAME)
 
 obj_dir/Vtb_boot_top: tb_boot_top.sv tb_boot.cpp lint.vlt $(CORE_SRCS) $(Z386_SRCS) \
                       $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \

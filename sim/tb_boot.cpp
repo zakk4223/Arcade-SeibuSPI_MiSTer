@@ -14,7 +14,22 @@
 //  A black screen on hardware is consistent with several failures; this pins
 //  down which one without needing the hardware.
 //
-//  usage: Vtb_boot_top <sdram.bin> [cycles]
+//  On the SXX2C cartridge there is a second question, and for rdft2 it is the
+//  important one: its Z80 program is not a loader part but something the 386
+//  reads through the sound01 window and pushes into the Z80's RAM a byte at a
+//  time. Both halves of that are modelled here -- sound01 answers out of the
+//  SDRAM image, and the download's writes land in it -- so the run can end by
+//  comparing what reached the Z80's memory against what was in the ROM. That
+//  covers spi_cpu.sv's sound01 window, rom_loader's part for it and spi_io's
+//  port 0x688 path in one go, with the game's own code driving all three.
+//
+//  What it CANNOT tell you is whether the game then runs: the Z80 is a stub
+//  here (sim/T80s.sv), so after the download the 386 waits forever on a sound
+//  FIFO that never answers, and a cartridge run ends on a black screen no
+//  matter how healthy the core is. Judge those runs by the download check and
+//  the register log, not by the picture.
+//
+//  usage: Vtb_boot_top <sdram.bin> [cycles] [rdfts|rdft|rdft2]
 //============================================================================
 
 #include "Vtb_boot_top.h"
@@ -29,7 +44,13 @@
 #include <set>
 #include <string>
 
-static const uint32_t SDR_SIZE = 0x1680000;
+// The whole map (rtl/spi_defs.vh), not just as far as rdfts reaches: rdft2's
+// image tops out at 35 MB.
+static const uint32_t SDR_SIZE  = 0x2900000;
+static const uint32_t Z80_BASE  = 0x0200000;
+static const uint32_t Z80_SIZE  = 0x0040000;
+static const uint32_t SND01_BASE = 0x0480000;
+static const uint32_t SND01_SIZE = 0x0020000;
 
 static std::vector<uint8_t> sdram;
 
@@ -58,6 +79,18 @@ int main(int argc, char **argv)
 
     uint64_t max_steps = (argc > 2) ? strtoull(argv[2], nullptr, 0) : 40000000ull;
 
+    // Which board. rdfts is the default so the original invocation still means
+    // what it did; the cartridge sets change the mod bits the same way the
+    // MRA's mod byte does (rtl/spi_defs.vh).
+    const char *setname = (argc > 3) ? argv[3] : "rdfts";
+    int  set_id    = !strcmp(setname, "rdft2") ? 2 : !strcmp(setname, "rdft") ? 1 : 0;
+    bool set_sxx2c = set_id != 0;
+    if (strcmp(setname, "rdfts") && strcmp(setname, "rdft") && strcmp(setname, "rdft2")) {
+        printf("FAIL: unknown set %s (want rdfts, rdft or rdft2)\n", setname);
+        return 2;
+    }
+    printf("set: %s (set_id=%d, sxx2c=%d)\n", setname, set_id, set_sxx2c);
+
     FILE *f = fopen(argv[1], "rb");
     if (!f) { printf("FAIL: cannot open %s\n", argv[1]); return 2; }
     sdram.resize(SDR_SIZE, 0);
@@ -71,15 +104,28 @@ int main(int argc, char **argv)
     for (int i = 0; i < 16; i++) printf(" %02X", sdram[0x1FFFF0 + i]);
     printf("\n");
 
+    // The download's own copy of the Z80 program, kept pristine for the compare
+    // at the end: the writes land in `sdram` itself, and on rdfts they land on
+    // top of the loader's copy.
+    std::vector<uint8_t> z80_src(sdram.begin() + Z80_BASE,
+                                 sdram.begin() + Z80_BASE + Z80_SIZE);
+
     Vtb_boot_top *dut = new Vtb_boot_top;
 
-    Chan cprg, cgfx, cspr;
+    // cdl is not a channel, only an owner tag: the download shares ch3 with the
+    // Z80 fetch and writes rather than reads, so it retires differently.
+    Chan cprg, cgfx, cspr, cz80, cdl;
 
     dut->reset     = 1;
     dut->rom_ready = 0;
+    dut->set_id    = set_id;
+    dut->set_sxx2c = set_sxx2c;
     dut->clk_sys = dut->clk_cpu = dut->clk_ram = 0;
     dut->sdr_prg_ack = dut->sdr_gfx_ack = dut->sdr_spr_ack = 0;
     dut->sdr_prg_dout = dut->sdr_gfx_dout = dut->sdr_spr_dout = 0;
+    dut->sdr_z80_ack = 0;
+    dut->sdr_z80_dout = 0;
+    dut->z80dl_sdr_ack = 0;
 
     // Observations
     uint64_t rom_fetches = 0;
@@ -90,6 +136,16 @@ int main(int argc, char **argv)
     uint64_t io_wr_total = 0;
     uint64_t inta_cycles = 0;
     uint64_t stall_cycles = 0;               // valid held with no ready
+
+    // The Z80 program download, and the sound01 reads that feed it on rdft2.
+    uint64_t snd01_fetches = 0;
+    uint64_t z80dl_writes  = 0;
+    uint32_t z80dl_lo = 0xFFFFFFFF, z80dl_hi = 0;
+    std::vector<uint8_t> z80_written(Z80_SIZE, 0);
+    uint8_t  z80dl_req_d = 0;
+    int      z80dl_delay = -1;
+    uint64_t z80_run_cycles = 0;
+    uint8_t  z80_rst_d = 0;
 
     uint8_t io_wr_d = 0, tm_d = 0, pal_d = 0, spr_d = 0, vbl_d = 0;
 
@@ -168,12 +224,45 @@ int main(int argc, char **argv)
             latch(cprg, dut->sdr_prg_req, dut->sdr_prg_addr);
             latch(cgfx, dut->sdr_gfx_req, dut->sdr_gfx_addr);
             latch(cspr, dut->sdr_spr_req, dut->sdr_spr_addr);
+            latch(cz80, dut->sdr_z80_req, dut->sdr_z80_addr);
+            if (cprg.delay == 0 && cprg.addr >= SND01_BASE
+                                && cprg.addr <  SND01_BASE + SND01_SIZE)
+                snd01_fetches++;
+
+            // The Z80 program download is the other master on ch3. It is a
+            // 16-bit masked write, so it takes a bus slot like anything else --
+            // and the 386 is stalled until it retires, which is what makes the
+            // download take the time it does.
+            if (dut->z80dl_sdr_req != z80dl_req_d && z80dl_delay < 0) {
+                z80dl_req_d = dut->z80dl_sdr_req;
+                z80dl_delay = 0;
+            }
 
             if (bus_busy > 0) {
                 if (--bus_busy == 0 && bus_owner) {
                     if      (bus_owner == &cprg) retire(cprg, dut->sdr_prg_ack, dut->sdr_prg_dout);
                     else if (bus_owner == &cgfx) retire(cgfx, dut->sdr_gfx_ack, dut->sdr_gfx_dout);
-                    else                         retire(cspr, dut->sdr_spr_ack, dut->sdr_spr_dout);
+                    else if (bus_owner == &cspr) retire(cspr, dut->sdr_spr_ack, dut->sdr_spr_dout);
+                    else if (bus_owner == &cz80) retire(cz80, dut->sdr_z80_ack, dut->sdr_z80_dout);
+                    else {
+                        // The download's masked 16-bit write, retiring.
+                        uint32_t a = dut->z80dl_sdr_addr & ~1u;
+                        uint16_t d = dut->z80dl_sdr_din;
+                        uint8_t be = dut->z80dl_sdr_be;
+                        for (int lane = 0; lane < 2; lane++) {
+                            if (!(be & (1 << lane))) continue;
+                            uint32_t ba = a + lane;
+                            if (ba < SDR_SIZE) sdram[ba] = (d >> (8 * lane)) & 0xFF;
+                            if (ba >= Z80_BASE && ba < Z80_BASE + Z80_SIZE) {
+                                z80_written[ba - Z80_BASE] = 1;
+                                if (ba < z80dl_lo) z80dl_lo = ba;
+                                if (ba > z80dl_hi) z80dl_hi = ba;
+                            }
+                        }
+                        z80dl_writes++;
+                        z80dl_delay = -1;
+                        dut->z80dl_sdr_ack = z80dl_req_d;
+                    }
                     bus_owner = nullptr;
                 }
             }
@@ -185,6 +274,10 @@ int main(int argc, char **argv)
             else if (cgfx.delay == 0) { bus_owner = &cgfx; bus_busy = burst_len(); }
             else if (cprg.delay == 0) { bus_owner = &cprg; bus_busy = burst_len(); }
             else if (cspr.delay == 0) { bus_owner = &cspr; bus_busy = burst_len(); }
+            // ch3 last, both directions: the Z80 fetch and then the download,
+            // which is the priority the real arbiter gives them.
+            else if (cz80.delay == 0) { bus_owner = &cz80; bus_busy = burst_len(); }
+            else if (z80dl_delay == 0) { bus_owner = &cdl;  bus_busy = burst_len(); z80dl_delay = 1; }
         }
 
         dut->eval();
@@ -243,6 +336,13 @@ int main(int argc, char **argv)
 
             if (dut->p_cpu_inta) inta_cycles++;
             if (dut->p_cpu_valid && !dut->p_cpu_ready) stall_cycles++;
+            if (dut->p_z80_rst_n) z80_run_cycles++;
+            if (dut->p_z80_rst_n && !z80_rst_d)
+                printf("  [%.1fM] Z80 released from reset\n", t / 1e6);
+            if (!dut->p_z80_rst_n && z80_rst_d)
+                printf("  [%.1fM] Z80 put back into reset (last PC %04X)\n",
+                       t / 1e6, dut->p_snd_pc);
+            z80_rst_d = dut->p_z80_rst_n;
         }
 
         if (BUCKET && (t % BUCKET) == BUCKET - 1) {
@@ -284,6 +384,58 @@ int main(int argc, char **argv)
     printf("tilemap DMA triggers   : %llu\n", (unsigned long long)n_dma_tm);
     printf("palette DMA triggers   : %llu\n", (unsigned long long)n_dma_pal);
     printf("sprite  DMA triggers   : %llu\n", (unsigned long long)n_dma_spr);
+    // Always zero, and not a fault: sim/T80s.sv is a stand-in with no CPU in
+    // it, because the real core is VHDL. So the Z80 fetches nothing, answers
+    // nothing, and the 386 spins on the sound FIFO once it has handed the
+    // program over -- which is why a cartridge run ends on a black screen here
+    // even when everything works. The frame itself is verified elsewhere, by
+    // replaying MAME's captured state (PLAN.md 12).
+    printf("Z80 fetches (ch3)      : %llu%s\n", (unsigned long long)cz80.count,
+           cz80.count ? "" : "  (expected: the Verilator T80 is a stub)");
+    printf("Z80 out-of-reset cycles: %llu, last opcode fetch at %04X\n",
+           (unsigned long long)z80_run_cycles, dut->p_snd_pc);
+    printf("sound01 fetches        : %llu\n", (unsigned long long)snd01_fetches);
+    printf("Z80 download writes    : %llu\n", (unsigned long long)z80dl_writes);
+
+    // What actually reached the Z80's memory, and whether it is the program
+    // that was in the ROM. On rdft2 that program came through the sound01
+    // window, so a byte-exact match here exercises the whole path: the loader
+    // part, spi_cpu's window, and port 0x688.
+    int dl_rc = 0;
+    if (z80dl_writes) {
+        uint64_t covered = 0, bad = 0;
+        uint32_t first_bad = 0;
+        for (uint32_t i = 0; i < Z80_SIZE; i++) {
+            if (!z80_written[i]) continue;
+            covered++;
+            // rdft2's source is the sound01 slice; rdfts/rdft download a copy
+            // of what is already in the Z80 region, so compare against the
+            // pristine copy taken before the run.
+            uint8_t want = (set_id == 2)
+                         ? (i < SND01_SIZE ? sdram[SND01_BASE + i] : 0)
+                         : z80_src[i];
+            if (sdram[Z80_BASE + i] != want) { if (!bad) first_bad = i; bad++; }
+        }
+        printf("Z80 RAM bytes written  : %llu, 0x%X..0x%X\n",
+               (unsigned long long)covered,
+               z80dl_lo - Z80_BASE, z80dl_hi - Z80_BASE);
+        if (bad) {
+            printf("Z80 program MISMATCH   : %llu of %llu bytes, first at 0x%X "
+                   "(got %02X want %02X)\n",
+                   (unsigned long long)bad, (unsigned long long)covered, first_bad,
+                   sdram[Z80_BASE + first_bad],
+                   set_id == 2 ? sdram[SND01_BASE + first_bad] : z80_src[first_bad]);
+            dl_rc = 1;
+        }
+        else {
+            printf("Z80 program matches the ROM byte for byte over that range\n");
+        }
+    }
+    else if (set_sxx2c) {
+        printf("Z80 RAM bytes written  : none -- the 386 never reached the "
+               "download, so the Z80 has no program\n");
+        dl_rc = 1;
+    }
 
     (void)first_fetch; (void)fetch_pages;
 
@@ -313,5 +465,7 @@ int main(int argc, char **argv)
         printf("CPU boots and drives the video DMAs.\n");
 
     delete dut;
-    return 0;
+    // The download check is the only pass/fail here; everything else is a
+    // report, because "how far did it get" is the question this answers.
+    return dl_rc;
 }

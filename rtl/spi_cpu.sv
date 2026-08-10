@@ -8,8 +8,22 @@
 //    0000_0000 - 0003_FFFF   main RAM, 256 KB, on chip
 //      0000_0400 - 0000_07FF   memory-mapped I/O, overlaying RAM
 //    0020_0000 - 003F_FFFF   PRG ROM, 2 MB, in SDRAM
+//    0138_0000 - 013F_FFFF   sound01, rdft2 only, 512 KB of the window, in SDRAM
 //    FFE0_0000 - FFFF_FFFF   the same ROM again, for the real-mode reset vector
 //    anything else            reads as 0, writes dropped
+//
+//  The sound01 window (MAME maps the whole region at 00A0_0000-013F_FFFF) is
+//  where rdft2 keeps its Z80 program: sound1.u0222[0x60000..0x7FFFF], loaded
+//  ROM_LOAD32_BYTE on lane 0, so it occupies region 0x980000-0x9FFFFC and the
+//  386 reads it as 131,072 dwords with only byte 0 meaningful. Measured, with
+//  the sample flash pre-programmed that is the ONLY part of the window rdft2
+//  touches, so only that 512 KB of 386 space is decoded and only the 128 KB
+//  behind it is stored -- PACKED, one byte per dword, at SDR_SND01_BASE. A
+//  4-dword cache line is then four consecutive bytes, one 64-bit SDRAM read.
+//  Everything else in the window keeps falling through to S_NULL, which is
+//  what MAME's ERASE00 region reads as anyway. rdft and rdfts leave the whole
+//  thing undecoded (snd01_en low): they never read it, and their SDRAM there
+//  is not written by any part.
 //
 //  The I/O registers really do live inside the RAM address space with nothing
 //  to mark them uncacheable, so the z386 data cache is instantiated with its
@@ -38,6 +52,7 @@ module spi_cpu
 	input             reset,
 	input             cpu_en,       // 0 = stall the CPU (pause, throttle)
 	input             z80dl_stall,  // SXX2C: a Z80 download byte is in flight
+	input             snd01_en,     // rdft2: decode the sound01 read window
 
 	// SDRAM channel 1 - PRG ROM
 	output reg [25:0] sdr_addr,
@@ -232,6 +247,8 @@ module spi_cpu
 	wire sel_ram = (byte_addr[31:18] == 14'd0) && !sel_io;
 	wire sel_rom = ((byte_addr[31:22] == 10'd0) && byte_addr[21])   // 0020_0000
 	            ||  (byte_addr[31:21] == 11'h7FF);                  // FFE0_0000
+	// 0138_0000-013F_FFFF, the tail of MAME's sound01 window: 0x27 * 512 KB.
+	wire sel_s01 = snd01_en && (byte_addr[31:19] == 13'h027);
 
 	// ------------------------------------------------------------------
 	// Main RAM
@@ -304,6 +321,10 @@ module spi_cpu
 	reg  [7:0] burst_left;
 	reg [29:0] cur_dw;        // running dword address
 	reg [63:0] rom_data;
+	// This fetch is a sound01 read, not a program-ROM read. Latched with the
+	// address in S_IDLE: the two share S_ROM_REQ/ACK/OUT and differ only in
+	// where the group comes from and how the dword is cut out of it.
+	reg        s01;
 	// Read delivery is two stages deep, not one: `ram_addr` is only visible to
 	// the RAM the cycle AFTER it is assigned, and the RAM registers its output,
 	// so data is valid two cycles after the issuing state.
@@ -344,6 +365,16 @@ module spi_cpu
 	// SDRAM 64-bit reads must be 8-byte aligned, so this is the address of the
 	// aligned group containing cur_dw, i.e. (cur_dw & ~1) * 4.
 	wire [25:0] rom_grp_addr = SDR_PRG_BASE + {4'd0, cur_dw[18:1], 3'b000};
+
+	// sound01: the dword index within the window IS the packed byte index, so
+	// one 64-bit read covers eight consecutive dwords. cur_dw[16:0] spans the
+	// whole 128 KB; the window test above has already fixed the bits above it.
+	wire [25:0] s01_grp_addr = SDR_SND01_BASE + {9'd0, cur_dw[16:3], 3'b000};
+	wire  [7:0] s01_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
+
+	// Where the group ends: a program dword pair spans one group, eight packed
+	// sound01 bytes do, so a burst crossing the end needs a fresh fetch.
+	wire        grp_last     = s01 ? (cur_dw[2:0] == 3'b111) : cur_dw[0];
 
 	// Snoop the GDT the boot code builds at byte 0x800 (dword index 0x200).
 	//
@@ -475,7 +506,8 @@ module spi_cpu
 					io_cyc_rd <= 1'b1;
 					state     <= S_IO_RD;
 				end
-				else if (sel_rom) begin
+				else if (sel_rom || sel_s01) begin
+					s01   <= sel_s01;
 					state <= S_ROM_REQ;
 				end
 				else begin
@@ -500,7 +532,7 @@ module spi_cpu
 			end
 
 			S_ROM_REQ: begin
-				sdr_addr <= rom_grp_addr;
+				sdr_addr <= s01 ? s01_grp_addr : rom_grp_addr;
 				sdr_req  <= ~sdr_req;
 				state    <= S_ROM_ACK;
 			end
@@ -511,7 +543,10 @@ module spi_cpu
 			end
 
 			S_ROM_OUT: begin
-				mem_din        <= cur_dw[0] ? rom_data[63:32] : rom_data[31:0];
+				// sound01 answers one packed byte in lane 0 and zeroes above,
+				// which is what MAME's ROM_LOAD32_BYTE region holds there.
+				mem_din        <= s01 ? {24'd0, s01_byte}
+				                      : (cur_dw[0] ? rom_data[63:32] : rom_data[31:0]);
 				mem_resp_valid <= 1'b1;
 				cur_dw         <= cur_dw + 30'd1;
 				burst_left     <= burst_left - 8'd1;
@@ -519,7 +554,7 @@ module spi_cpu
 				if (burst_left == 8'd1)  state <= S_IDLE;
 				// Crossing into the next 8-byte group needs a fresh fetch;
 				// otherwise the next dword is already in rom_data.
-				else if (cur_dw[0])      state <= S_ROM_REQ;
+				else if (grp_last)       state <= S_ROM_REQ;
 			end
 
 			// Unmapped read: answer with zeroes.

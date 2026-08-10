@@ -28,6 +28,12 @@ localparam [25:0] SDR_PRG_BASE     = 26'h000_0000;  //  2 MB   386 program
 localparam [25:0] SDR_Z80_BASE     = 26'h020_0000;  // 256 KB  Z80 program
 localparam [25:0] SDR_CHARS_BASE   = 26'h024_0000;  // 192 KB  text tiles
 localparam [25:0] SDR_PCM_BASE     = 26'h028_0000;  // 2.5 MB  YMF271 samples
+// rdft2's Z80 program, read by the 386 through the sound01 window. It lives in
+// the half megabyte the sample region has spare above the 2 MB flash image, so
+// nothing else in the map moves; the YMF271 only ever addresses the low 2 MB of
+// SDR_PCM_BASE (ymf271_synth.sv masks to [20:0]), so the two cannot collide.
+// Stored PACKED, one byte per 386 dword -- see spi_cpu.sv.
+localparam [25:0] SDR_SND01_BASE   = 26'h048_0000;  // 128 KB  rdft2 sound01
 localparam [25:0] SDR_TILES_BASE   = 26'h050_0000;  //  12 MB  background tiles
 localparam [25:0] SDR_SPRITES_BASE = 26'h110_0000;  //  24 MB  sprites (3 chunks)
 localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total

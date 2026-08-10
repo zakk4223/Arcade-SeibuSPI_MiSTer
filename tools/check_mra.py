@@ -45,6 +45,7 @@ BASES = {
     "z80":     0x0200000,
     "chars":   0x0240000,
     "pcm":     0x0280000,
+    "snd01":   0x0480000,
     "tiles":   0x0500000,
     "sprites": 0x1100000,
 }
@@ -79,8 +80,11 @@ SETS = {
                   skip=("audiocpu", "sound01", "soundflash1"),
                   spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     # rdft2 skips the same three, plus the PAL dumps, which are not ROM data.
-    # Its sound01 IS read -- that is where the compressed tail comes from -- but
-    # the MRA carries sound1.u0222 directly rather than the assembled window.
+    # Its sound01 IS read, twice over, but never as the assembled window: the
+    # MRA carries two slices of sound1.u0222 directly -- the compressed sample
+    # tail, and the Z80 program at 0x60000 that the 386 fetches through the
+    # window. Both are length-limited <part>s, which the ROM-order check below
+    # skips as slices of a synthesised image.
     "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x03,
                   skip=("audiocpu", "sound01", "soundflash1", "pals"),
                   # RISE10 sets carry MAME's sprite_reorder() as well as the
@@ -273,6 +277,7 @@ def resolve_base(expr):
     e = expr
     for k, v in (("SDR_PRG_BASE", BASES["prg"]), ("SDR_Z80_BASE", BASES["z80"]),
                  ("SDR_CHARS_BASE", BASES["chars"]), ("SDR_PCM_BASE", BASES["pcm"]),
+                 ("SDR_SND01_BASE", BASES["snd01"]),
                  ("SDR_TILES_BASE", BASES["tiles"]), ("SDR_SPRITES_BASE", BASES["sprites"]),
                  ("SPR_CHUNK_SIZE", 0x400000)):
         e = e.replace(k, hex(v))

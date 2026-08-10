@@ -130,7 +130,7 @@ module rom_loader
 	// individually, by walking that part's MRA members.
 	localparam [4:0] NPARTS_RDFTS = 5'd14;
 	localparam [4:0] NPARTS_RDFT  = 5'd15;
-	localparam [4:0] NPARTS_RDFT2 = 5'd16;
+	localparam [4:0] NPARTS_RDFT2 = 5'd17;
 
 	reg [4:0] nparts;
 	always @* case (set_id)
@@ -151,9 +151,10 @@ module rom_loader
 	// instead of a word plus a byte, and it has NO Z80 part at all -- that
 	// region is RAM the 386 fills through port 0x688 before releasing the Z80
 	// from reset. The sample part is the pre-programmed flash image the MRA
-	// assembles from the cartridge's own sound ROMs, and `sound01` is absent:
-	// measured, the 386 never reads that window once the flash is programmed
-	// (section 0).
+	// assembles from the cartridge's own sound ROMs, and `sound01` is absent
+	// for rdft: measured, the 386 never reads that window once the flash is
+	// programmed (section 0). rdft2 is the exception -- it keeps its Z80
+	// program there, so its table carries one 128 KB slice of it.
 	// ------------------------------------------------------------------
 	reg [4:0]  part;
 	reg [25:0] in_off;     // bytes of this part taken from ioctl
@@ -198,7 +199,14 @@ module rom_loader
 		//   * the sample flash is two parts: the region stamp plus a verbatim
 		//     slice of pcm.u0217, then sound1.u0222 COMPRESSED. The MRA marks
 		//     that last part CODEC_BPE_DPCM, so its size here is the
-		//     compressed length -- 0x4C665 in, 0x730ED out (PLAN.md 0).
+		//     compressed length -- 0x4C665 in, 0x730ED out (PLAN.md 0)
+		//   * a 17th part that neither rdft nor rdfts has: a SECOND slice of
+		//     sound1.u0222, at 0x60000, which is rdft2's Z80 program. The 386
+		//     reads it through the sound01 window before releasing the Z80, so
+		//     unlike rdft's (whose copy is already in maincpu) it has to be in
+		//     SDRAM for spi_cpu to answer that window at all. Stored PACKED,
+		//     one byte per 386 dword; the window's other three byte lanes are
+		//     zero in MAME's region too.
 		SET_RDFT2: case (part)
 		//                                                    base   size          mode
 		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.tun
@@ -216,7 +224,8 @@ module rom_loader
 		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 1: obj2.u0431 + obj2b.u0432
 		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 2: obj1.u0429 + obj1b.u0430
 		5'd14: begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
-		default:begin part_base = SDR_PCM_BASE + 26'h017_C247;      part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
+		5'd15: begin part_base = SDR_PCM_BASE + 26'h017_C247;       part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
+		default:begin part_base = SDR_SND01_BASE;                   part_size = 26'h002_0000; part_mode = M_LINEAR; end // sound1.u0222[0x60000..0x7FFFF]: the Z80 program
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----

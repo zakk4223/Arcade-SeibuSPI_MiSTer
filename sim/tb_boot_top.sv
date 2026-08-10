@@ -6,6 +6,13 @@
 //  instantiates the whole board with a real SDRAM image behind it and exposes
 //  enough internal state for the C++ side to answer one question: does the CPU
 //  come out of reset, fetch from ROM, and reach the video DMA triggers?
+//
+//  The board is now selectable, because the question worth asking on the SXX2C
+//  cartridge is a different one: rdft2's 386 reads its Z80 program out of the
+//  sound01 window and pushes it, a byte at a time, into what is SDRAM here.
+//  Both ends of that are exposed -- the ch3 write port the download turns into
+//  and the ch3 read port the Z80 fetches from -- so the C++ side can check that
+//  what lands in the Z80's memory is the program that was in the ROM.
 //============================================================================
 
 module tb_boot_top
@@ -15,6 +22,10 @@ module tb_boot_top
 	input             clk_ram,
 	input             reset,
 	input             rom_ready,
+
+	// Which board and set, so one testbench covers rdfts and the cartridge.
+	input             set_sxx2c,
+	input       [1:0] set_id,
 
 	// SDRAM services, driven by the C++ model
 	output     [25:0] sdr_prg_addr,
@@ -31,6 +42,19 @@ module tb_boot_top
 	input      [63:0] sdr_spr_dout,
 	output            sdr_spr_req,
 	input             sdr_spr_ack,
+
+	// ch3, both directions. The Z80 program download writes it and the Z80
+	// itself reads it back; on the cartridge boards that is the same memory.
+	output     [25:0] sdr_z80_addr,
+	input      [63:0] sdr_z80_dout,
+	output            sdr_z80_req,
+	input             sdr_z80_ack,
+
+	output     [25:0] z80dl_sdr_addr,
+	output     [15:0] z80dl_sdr_din,
+	output      [1:0] z80dl_sdr_be,
+	output            z80dl_sdr_req,
+	input             z80dl_sdr_ack,
 
 	// probes
 	output            p_io_wr,
@@ -53,6 +77,11 @@ module tb_boot_top
 	output            p_dma_busy,
 	output            p_prg_outstanding,
 
+	// The Z80 side of the cartridge: whether it has been let out of reset, and
+	// the last address it fetched an opcode from.
+	output            p_z80_rst_n,
+	output     [15:0] p_snd_pc,
+
 	// video out, so the testbench can see what the core actually draws
 	output            v_ce_pix,
 	output      [7:0] v_r,
@@ -74,7 +103,11 @@ module tb_boot_top
 		.clk_ram      (clk_ram),
 		.reset        (reset),
 		.rom_ready    (rom_ready),
-		.set_id       (2'd0),      // rdfts
+		.set_sxx2c    (set_sxx2c),
+		.set_id       (set_id),
+		// SXX2C jumpers, as SeibuSPI.sv sends them: NOT update mode, which
+		// would park the sound program in the reflash path forever.
+		.jumpers      (8'hFC),
 		.dbg_en       (1'b0),
 		// These grew on spi_top for the JTAG debug plumbing. Leaving them
 		// unconnected made Verilator drive dbg_mask with X, which ORs into the
@@ -112,6 +145,14 @@ module tb_boot_top
 		.tm_dwords_out(),
 		.scroll_out   (),
 		.lay_en_out   (),
+		.snd_pc       (p_snd_pc),
+		.snd_fifo_rd  (),
+		.snd_ymf_wr   (),
+		.snd_stall    (),
+		.ymf_overrun  (),
+		.ymf_active   (),
+		.snd_f2_wr    (),
+		.snd_f2_rd    (),
 
 		.sdr_prg_addr (sdr_prg_addr),
 		.sdr_prg_dout (sdr_prg_dout),
@@ -127,6 +168,17 @@ module tb_boot_top
 		.sdr_spr_dout (sdr_spr_dout),
 		.sdr_spr_req  (sdr_spr_req),
 		.sdr_spr_ack  (sdr_spr_ack),
+
+		.sdr_z80_addr (sdr_z80_addr),
+		.sdr_z80_dout (sdr_z80_dout),
+		.sdr_z80_req  (sdr_z80_req),
+		.sdr_z80_ack  (sdr_z80_ack),
+
+		.z80dl_sdr_addr (z80dl_sdr_addr),
+		.z80dl_sdr_din  (z80dl_sdr_din),
+		.z80dl_sdr_be   (z80dl_sdr_be),
+		.z80dl_sdr_req  (z80dl_sdr_req),
+		.z80dl_sdr_ack  (z80dl_sdr_ack),
 
 		.sdr_pcm_addr (sdr_pcm_addr),
 		.sdr_pcm_dout (64'd0),
@@ -168,5 +220,6 @@ module tb_boot_top
 	assign p_dma_own     = dut.cpu.dma_own;
 	assign p_dma_busy    = dut.dma_busy;
 	assign p_prg_outstanding = dut.sdr_prg_req ^ dut.sdr_prg_ack;
+	assign p_z80_rst_n       = dut.z80_rst_n;
 
 endmodule

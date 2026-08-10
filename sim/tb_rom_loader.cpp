@@ -33,6 +33,7 @@ static const uint32_t PRG_BASE     = 0x0000000;
 static const uint32_t Z80_BASE     = 0x0200000;
 static const uint32_t CHARS_BASE   = 0x0240000;
 static const uint32_t PCM_BASE     = 0x0280000;
+static const uint32_t SND01_BASE   = 0x0480000;
 static const uint32_t TILES_BASE   = 0x0500000;
 static const uint32_t SPRITES_BASE = 0x1100000;
 static const uint32_t SDR_SIZE     = 0x2900000;
@@ -88,8 +89,9 @@ static const Part parts_sxx2c[] = {
 // rdft2, SPI cartridge, sample flash DECODED rather than concatenated. Read off
 // MAME's ROM_START(rdft2): 12 MB of tiles in two 6 MB groups, text lanes in the
 // order 1/0/2, and 18 MB of sprites as three 6 MB plane-pair chunks -- which are
-// contiguous at that stride, so all six ROMs are one LINEAR part. The last part
-// is the compressed tail and its size is the COMPRESSED length.
+// contiguous at that stride, so all six ROMs are one LINEAR part. Part 15 is the
+// compressed sample tail and its size is the COMPRESSED length; part 16 is the
+// Z80 program, which is the other half of the same file.
 static const Part parts_rdft2[] = {
     { "prg0.tun",                    PRG_BASE,                0x080000,  W32_B0  },
     { "prg1.bin",                    PRG_BASE,                0x080000,  W32_B1  },
@@ -107,6 +109,10 @@ static const Part parts_rdft2[] = {
     { "sprites chunk 2",             SPRITES_BASE + 4,        0x600000,  SPR_ILV_R },
     { "flash head: stamp + pcm",     PCM_BASE,                0x17C247,  LINEAR  },
     { "flash tail: sound1, packed",  PCM_BASE + 0x17C247,     0x04C665,  LINEAR  },
+    // A second slice of sound1.u0222, at 0x60000: rdft2's Z80 program, which
+    // the 386 reads through the sound01 window. Packed one byte per dword, so
+    // the loader just copies it -- the unpacking is spi_cpu.sv's job.
+    { "sound1.u0222[0x60000..]",     SND01_BASE,              0x020000,  LINEAR  },
 };
 
 static uint32_t dest_of(const Part &p, uint32_t i)
@@ -442,7 +448,7 @@ int main(int argc, char **argv)
     rc = run_set(parts_sxx2c, (int)(sizeof(parts_sxx2c) / sizeof(parts_sxx2c[0])),
                  1, "SXX2C with a CODEC_BPE_DPCM sample part", 14);
     if (rc) return rc;
-    // rdft2 for real: the table the MRA drives, with part 13 decoded. The
+    // rdft2 for real: the table the MRA drives, with part 15 decoded. The
     // stream is synthetic (tb_rom_decode.cpp is what checks the codec against
     // rdft2's actual data); what this checks is that 34 MB lands where MAME's
     // region layout says, across a 6 MB tile stride, a six-ROM sprite run and

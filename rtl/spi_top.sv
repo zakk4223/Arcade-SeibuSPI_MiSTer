@@ -244,6 +244,9 @@ module spi_top
 	spi_cpu cpu
 	(
 		.z80dl_stall (z80dl_stall),
+		// Only rdft2 reads the sound01 window, and only rdft2's loader table
+		// puts anything behind it -- see spi_cpu.sv's map.
+		.snd01_en  (set_id == SET_RDFT2),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),

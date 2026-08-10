@@ -33,13 +33,17 @@ BASE = {
     "z80":     0x0200000,
     "chars":   0x0240000,
     "pcm":     0x0280000,
+    "snd01":   0x0480000,
     "tiles":   0x0500000,
     "sprites": 0x1100000,
 }
 SDRAM_SIZE = 0x2900000
 
-# (region, crc32, size, mode, offset-within-region)
-# Mode names match the scatter modes in rtl/rom_loader.sv.
+# (region, crc32, size, mode, offset-within-region[, source-index bias[, slice]])
+# Mode names match the scatter modes in rtl/rom_loader.sv. `slice` is a byte
+# offset into the FILE, for the one part that takes a piece of a ROM rather than
+# all of it; `size` is then the length of that piece and the CRC still covers the
+# whole file, the way the MRA's crc= attribute does.
 PARTS_RDFTS = [
     ("prg",     0xe278dddd,  0x80000, "W32_B0",  0),
     ("prg",     0x58ccb10c,  0x80000, "W32_B1",  0),
@@ -87,6 +91,10 @@ PARTS_RDFT2 = [
     ("sprites", 0xc2c50f02, 0x400000, "SPR_ILV_R", 4, 0x000000),
     ("sprites", 0x5259321f, 0x200000, "SPR_ILV_R", 4, 0x400000),
     # pcm is not a part: rdft2's sample flash is derived, see FLASH below.
+    # sound1.u0222's second half is rdft2's Z80 program, which the 386 reads
+    # through the sound01 window. Packed one byte per 386 dword, so it is a
+    # plain copy here and spi_cpu.sv does the unpacking.
+    ("snd01",   0xb7bd3703,  0x20000, "LINEAR",  0, 0, 0x60000),
 ]
 
 # Sets, detected by the CRC of their first program ROM.
@@ -163,16 +171,21 @@ def main():
     for part in PARTS:
         region, crc, size, mode, off = part[:5]
         skip = part[5] if len(part) > 5 else 0
+        sl = part[6] if len(part) > 6 else None
         if want_regions and region not in want_regions:
             continue
         name = by_crc.get(crc)
         if name is None:
             raise SystemExit("missing ROM crc %08x for region %s" % (crc, region))
         data = zf.read(name)
-        if len(data) != size:
-            raise SystemExit("%s is %d bytes, expected %d" % (name, len(data), size))
+        # The CRC covers the whole file whether or not this part is a slice of
+        # it, so check it before cutting.
         if binascii.crc32(data) & 0xFFFFFFFF != crc:
             raise SystemExit("%s failed CRC check" % name)
+        if sl is not None:
+            data = data[sl:sl + size]
+        if len(data) != size:
+            raise SystemExit("%s is %d bytes, expected %d" % (name, len(data), size))
 
         base = BASE[region] + off
         for i, b in enumerate(data):
@@ -192,9 +205,19 @@ def main():
         print("  %-8s %-28s %8d  derived" % ("pcm", "sample flash", len(flash)))
 
     if concat:
+        # This has to be the MRA's <part> order, which is the loader's table
+        # order -- not the order of PARTS, whose sample-flash parts are derived
+        # and so are not in it at all. The snd01 slice is table part 16 and
+        # therefore follows them, even though it is listed above them here.
+        def part_bytes(part):
+            data = zf.read(by_crc[part[1]])
+            sl = part[6] if len(part) > 6 else None
+            return data if sl is None else data[sl:sl + part[2]]
+
         blob = bytearray()
         for part in PARTS:
-            blob += zf.read(by_crc[part[1]])
+            if part[0] != "snd01":
+                blob += part_bytes(part)
         if cfg["flash"]:
             # Exactly what mra/rdft2.mra sends for the two sample parts: the
             # stamp and a slice of pcm, then the COMPRESSED tail. The loader
@@ -203,6 +226,9 @@ def main():
             blob += bytes(image[BASE["pcm"]:BASE["pcm"] + 4])   # region stamp
             blob += zf.read("pcm.u0217")[4:0x17C247]
             blob += zf.read("sound1.u0222")[:0x4C665]
+        for part in PARTS:
+            if part[0] == "snd01":
+                blob += part_bytes(part)
         with open(outpath, "wb") as f:
             f.write(blob)
         print("wrote %s (concatenated stream, %d bytes)" % (outpath, len(blob)))
