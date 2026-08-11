@@ -34,6 +34,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/seibu_partial_add.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_tile_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_spr_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rise10_decrypt.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rise11_decrypt.sv
 
 # z386 CPU. z386_pkg.sv must be listed first: it declares the types the rest use.
 set_global_assignment -name SEARCH_PATH rtl/z386

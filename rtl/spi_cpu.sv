@@ -13,17 +13,22 @@
 //    anything else            reads as 0, writes dropped
 //
 //  The sound01 window (MAME maps the whole region at 00A0_0000-013F_FFFF) is
-//  where rdft2 keeps its Z80 program: sound1.u0222[0x60000..0x7FFFF], loaded
-//  ROM_LOAD32_BYTE on lane 0, so it occupies region 0x980000-0x9FFFFC and the
-//  386 reads it as 131,072 dwords with only byte 0 meaningful. Measured, with
-//  the sample flash pre-programmed that is the ONLY part of the window rdft2
-//  touches, so only that 512 KB of 386 space is decoded and only the 128 KB
-//  behind it is stored -- PACKED, one byte per dword, at SDR_SND01_BASE. A
-//  4-dword cache line is then four consecutive bytes, one 64-bit SDRAM read.
-//  Everything else in the window keeps falling through to S_NULL, which is
-//  what MAME's ERASE00 region reads as anyway. rdft and rdfts leave the whole
-//  thing undecoded (snd01_en low): they never read it, and their SDRAM there
-//  is not written by any part.
+//  where the cartridge sets that have a second sound ROM keep their Z80
+//  program. sound1.u0222 is loaded ROM_LOAD32_BYTE on lane 0 at region
+//  0x800000, so its 512 KB occupies 2 MB of 386 space at 0120_0000-013F_FFFF
+//  and the 386 reads it as 524,288 dwords with only byte 0 meaningful. That
+//  whole 2 MB is decoded and the ROM is stored whole -- PACKED, one byte per
+//  dword, at SDR_SND01_BASE. A 4-dword cache line is then four consecutive
+//  bytes, one 64-bit SDRAM read.
+//
+//  Decoding the whole ROM rather than just the program is deliberate. rdft2's
+//  program is at 0x60000 and rfjet's at 0x44000, and rfjet's LENGTH has never
+//  been measured; carrying the region whole makes both facts irrelevant here.
+//  Everything else in the sound01 window keeps falling through to S_NULL,
+//  which is what MAME's ERASE00 region reads as anyway, and so do the three
+//  dead lanes of every dword in this one. rdft and rdfts leave the whole thing
+//  undecoded (snd01_en low): they have no second sound ROM, they never read
+//  the window, and their SDRAM there is not written by any part.
 //
 //  The I/O registers really do live inside the RAM address space with nothing
 //  to mark them uncacheable, so the z386 data cache is instantiated with its
@@ -247,8 +252,10 @@ module spi_cpu
 	wire sel_ram = (byte_addr[31:18] == 14'd0) && !sel_io;
 	wire sel_rom = ((byte_addr[31:22] == 10'd0) && byte_addr[21])   // 0020_0000
 	            ||  (byte_addr[31:21] == 11'h7FF);                  // FFE0_0000
-	// 0138_0000-013F_FFFF, the tail of MAME's sound01 window: 0x27 * 512 KB.
-	wire sel_s01 = snd01_en && (byte_addr[31:19] == 13'h027);
+	// 0120_0000-013F_FFFF: the whole of sound1.u0222 inside MAME's sound01
+	// window, which is 0x09 * 2 MB. That ROM is loaded ROM_LOAD32_BYTE on lane 0
+	// at region 0x800000, so 512 KB of ROM occupies 2 MB of 386 space.
+	wire sel_s01 = snd01_en && (byte_addr[31:21] == 11'h009);
 
 	// ------------------------------------------------------------------
 	// Main RAM
@@ -367,9 +374,9 @@ module spi_cpu
 	wire [25:0] rom_grp_addr = SDR_PRG_BASE + {4'd0, cur_dw[18:1], 3'b000};
 
 	// sound01: the dword index within the window IS the packed byte index, so
-	// one 64-bit read covers eight consecutive dwords. cur_dw[16:0] spans the
-	// whole 128 KB; the window test above has already fixed the bits above it.
-	wire [25:0] s01_grp_addr = SDR_SND01_BASE + {9'd0, cur_dw[16:3], 3'b000};
+	// one 64-bit read covers eight consecutive dwords. cur_dw[18:0] spans the
+	// whole 512 KB; the window test above has already fixed the bits above it.
+	wire [25:0] s01_grp_addr = SDR_SND01_BASE + {7'd0, cur_dw[18:3], 3'b000};
 	wire  [7:0] s01_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
 
 	// Where the group ends: a program dword pair spans one group, eight packed

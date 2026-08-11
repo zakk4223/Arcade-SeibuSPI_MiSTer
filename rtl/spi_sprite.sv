@@ -55,12 +55,14 @@ module spi_sprite
 	input             enable,       // layer_enable[4] inverted
 
 	// Per set. `spr_chunk_size` is the SOURCE size of one plane-pair chunk --
-	// 4 MB for the SEI252 games, 6 MB for rdft2. It is no longer an address
-	// stride, because the chunks are interleaved rather than laid end to end;
-	// it survives because MAME's extra-bank rule is stated in terms of it
-	// (elements = chunk / 64). `rise10` picks the decryption.
+	// 4 MB for the SEI252 games, 6 MB for rdft2, 8 MB for rfjet. It is no longer
+	// an address stride, because the chunks are interleaved rather than laid end
+	// to end; it survives because MAME's extra-bank rule is stated in terms of it
+	// (elements = chunk / 64). `rise10` and `rise11` pick the decryption; both
+	// low is SEI252, and they are never both high.
 	input      [25:0] spr_chunk_size,
 	input             rise10,
+	input             rise11,
 
 	// Sprite RAM (1024 dwords), read port
 	output reg  [9:0] spr_addr,
@@ -224,10 +226,13 @@ module spi_sprite
 	// ------------------------------------------------------------------
 	// Graphics address: tile*192 + row*12, in the interleaved layout
 	// ------------------------------------------------------------------
-	// Both permutations the sprite ROM needs -- the interleave, and RISE10's
-	// sprite_reorder() -- are folded into where the LOADER puts each byte
-	// (M_SPR_ILV / M_SPR_ILV_R), so the fetch sees neither. It costs the loader
-	// nothing, since it computes a destination per byte regardless.
+	// Both permutations the sprite ROM needs -- the interleave, and the RISE
+	// sets' sprite_reorder() -- are folded into where the LOADER puts each byte
+	// (M_SPR_ILV / M_SPR_ILV_R), so the ADDRESS arithmetic here sees neither. It
+	// costs the loader nothing, since it computes a destination per byte
+	// regardless. RISE11 is the one place any of it leaks back into the fetch,
+	// and only as a number: it needs the pre-reorder index of the word it is
+	// decrypting, which is derived at the decrypt site below.
 	reg phase;                           // which of the row's two reads
 	reg [63:0] rd0;                      // the first one, held for the join
 
@@ -268,7 +273,7 @@ module spi_sprite
 	reg        r_flipx[0:1];
 	reg  [5:0] r_colr[0:1];
 	reg  [1:0] r_pri[0:1];
-	reg  [3:0] r_ry[0:1];      // only for the debug tap, but it has to match
+	reg  [3:0] r_ry[0:1];      // the debug tap, and RISE11's word index
 	reg  [1:0] rv;                        // which banks hold a row ready to emit
 	reg        fb, eb;                    // fetch bank, emit bank
 
@@ -278,12 +283,13 @@ module spi_sprite
 	wire [15:0] y2 = half ? r_y2b[eb] : r_y2a[eb];
 	wire [15:0] y3 = half ? r_y3b[eb] : r_y3a[eb];
 
-	// Both crypts, muxed. They present the same 48-bits-in, eight-pens-out
+	// All three crypts, muxed. They present the same 48-bits-in, eight-pens-out
 	// interface and the same pen bit order, so the mux is on the result and
-	// nothing else in the emitter changes. RISE10 is address independent and
-	// much the smaller of the two; SEI252 carries the key table.
+	// nothing else in the emitter changes. RISE10 is address independent and much
+	// the smallest; SEI252 carries the key table; RISE11 needs the word index.
 	wire [5:0] s0, s1_, s2_, s3, s4, s5, s6, s7;
 	wire [5:0] r0, r1, r2, r3, r4, r5, r6, r7;
+	wire [5:0] q0, q1, q2, q3, q4, q5, q6, q7;
 
 	spi_spr_decrypt dec_sei252
 	(
@@ -300,14 +306,40 @@ module spi_sprite
 		.pix4(r4), .pix5(r5), .pix6(r6), .pix7(r7)
 	);
 
-	wire [5:0] p0 = rise10 ? r0 : s0;
-	wire [5:0] p1 = rise10 ? r1 : s1_;
-	wire [5:0] p2 = rise10 ? r2 : s2_;
-	wire [5:0] p3 = rise10 ? r3 : s3;
-	wire [5:0] p4 = rise10 ? r4 : s4;
-	wire [5:0] p5 = rise10 ? r5 : s5;
-	wire [5:0] p6 = rise10 ? r6 : s6;
-	wire [5:0] p7 = rise10 ? r7 : s7;
+	// RISE11's plane210 sum takes MAME's loop variable `i` as its addend, so the
+	// index has to be reconstructed here -- and it is the index BEFORE
+	// sprite_reorder, which is not the position the word was read from.
+	//
+	// A chunk holds 32 words per tile, and reorder permutes only inside that
+	// group: it sends input word j to output word {j[3:0], j[4]}. What this fetch
+	// knows is the OUTPUT position, {ry, half} -- twelve bytes per row, two words
+	// of it per chunk -- so the input index is that permutation run backwards,
+	//
+	//     j = {o[0], o[4:1]} = {half, ry}
+	//
+	// and the global index is the tile's 32 words plus that. Both halves of it
+	// come from the EMITTING bank, like the SEI252 address above; `half` is the
+	// emitter's own. Get this wrong and the pens are silently wrong -- there is
+	// nothing downstream that could notice -- so tb_rise11_decrypt walks the
+	// words in exactly this order and checks them against MAME's final image.
+	wire [23:0] r11_i = {2'd0, r_tcode[eb], half, r_ry[eb]};
+
+	spi_rise11_decrypt dec_rise11
+	(
+		.y1(y1), .y2(y2), .y3(y3),
+		.i(r11_i),
+		.pix0(q0), .pix1(q1), .pix2(q2), .pix3(q3),
+		.pix4(q4), .pix5(q5), .pix6(q6), .pix7(q7)
+	);
+
+	wire [5:0] p0 = rise11 ? q0 : rise10 ? r0 : s0;
+	wire [5:0] p1 = rise11 ? q1 : rise10 ? r1 : s1_;
+	wire [5:0] p2 = rise11 ? q2 : rise10 ? r2 : s2_;
+	wire [5:0] p3 = rise11 ? q3 : rise10 ? r3 : s3;
+	wire [5:0] p4 = rise11 ? q4 : rise10 ? r4 : s4;
+	wire [5:0] p5 = rise11 ? q5 : rise10 ? r5 : s5;
+	wire [5:0] p6 = rise11 ? q6 : rise10 ? r6 : s6;
+	wire [5:0] p7 = rise11 ? q7 : rise10 ? r7 : s7;
 
 	reg [2:0] pcnt;
 	reg [5:0] pix_raw;

@@ -98,6 +98,18 @@ SETS = {
                   flash=dict(parts=(14, 15), decoded=15, size=0x200000,
                              sha256="c0da4614a8d07a7bce24b7712b756435f2c5f"
                                     "d1ef74dc44333657afdecc6c67c")),
+    # rfjet is rdft2's board, generation and part shape with different numbers
+    # in every field, which is the reason to check it rather than eyeball it:
+    # 8 MB sprite chunks instead of 6, and a flash split at 0x189DD5 instead of
+    # 0x17C247. It shares rdft2's skip list for the same reasons.
+    "rfjet": dict(mra="rfjet.mra", table="rfjet", mod=0x05,
+                  skip=("audiocpu", "sound01", "soundflash1", "pals"),
+                  # RISE11 carries sprite_reorder() as well as the interleave,
+                  # exactly as RISE10 does.
+                  spr_mode="M_SPR_ILV_R", spr_chunk=0x800000,
+                  flash=dict(parts=(14, 15), decoded=15, size=0x200000,
+                             sha256="fb02c059e7ee1b0a26c97ccb5d6eb60eaaa1c"
+                                    "48a7e65c76c2d2628475cb4e621")),
 }
 
 

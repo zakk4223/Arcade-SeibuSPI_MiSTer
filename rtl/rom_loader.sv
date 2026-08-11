@@ -41,8 +41,9 @@ module rom_loader
 	input       [7:0] ioctl_dout,
 	output reg        ioctl_wait,
 
-	// Which part table to walk: SET_RDFTS / SET_RDFT / SET_RDFT2, decoded in
-	// SeibuSPI.sv from the MRA's index-1 mod byte. It must be stable before the
+	// Which part table to walk: SET_RDFTS / SET_RDFT / SET_RDFT2 / SET_RFJET,
+	// decoded in SeibuSPI.sv from the MRA's index-1 mod byte. It must be
+	// stable before the
 	// index-0 download starts, which it is: the HPS sends the mod byte first.
 	input       [1:0] set_id,
 
@@ -131,11 +132,13 @@ module rom_loader
 	localparam [4:0] NPARTS_RDFTS = 5'd14;
 	localparam [4:0] NPARTS_RDFT  = 5'd15;
 	localparam [4:0] NPARTS_RDFT2 = 5'd17;
+	localparam [4:0] NPARTS_RFJET = 5'd17;
 
 	reg [4:0] nparts;
 	always @* case (set_id)
 		SET_RDFT : nparts = NPARTS_RDFT;
 		SET_RDFT2: nparts = NPARTS_RDFT2;
+		SET_RFJET: nparts = NPARTS_RFJET;
 		default  : nparts = NPARTS_RDFTS;
 	endcase
 
@@ -227,13 +230,14 @@ module rom_loader
 		//     slice of pcm.u0217, then sound1.u0222 COMPRESSED. The MRA marks
 		//     that last part CODEC_BPE_DPCM, so its size here is the
 		//     compressed length -- 0x4C665 in, 0x730ED out (PLAN.md 0)
-		//   * a 17th part that neither rdft nor rdfts has: a SECOND slice of
-		//     sound1.u0222, at 0x60000, which is rdft2's Z80 program. The 386
-		//     reads it through the sound01 window before releasing the Z80, so
-		//     unlike rdft's (whose copy is already in maincpu) it has to be in
-		//     SDRAM for spi_cpu to answer that window at all. Stored PACKED,
-		//     one byte per 386 dword; the window's other three byte lanes are
-		//     zero in MAME's region too.
+		//   * a 17th part that neither rdft nor rdfts has: sound1.u0222 AGAIN,
+		//     this time whole, because it also holds rdft2's Z80 program. The
+		//     386 reads that through the sound01 window before releasing the
+		//     Z80, so unlike rdft's (whose copy is already in maincpu) it has to
+		//     be in SDRAM for spi_cpu to answer that window at all. Stored
+		//     PACKED, one byte per 386 dword; the window's other three byte
+		//     lanes are zero in MAME's region too. The whole ROM rather than
+		//     just the program at 0x60000: see SDR_SND01_BASE in spi_defs.vh.
 		SET_RDFT2: case (part_sel)
 		//                                                    base   size          mode
 		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.tun
@@ -252,7 +256,52 @@ module rom_loader
 		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 2: obj1.u0429 + obj1b.u0430
 		5'd14: begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
 		5'd15: begin part_base = SDR_PCM_BASE + 26'h017_C247;       part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
-		default:begin part_base = SDR_SND01_BASE;                   part_size = 26'h002_0000; part_mode = M_LINEAR; end // sound1.u0222[0x60000..0x7FFFF]: the Z80 program
+		default:begin part_base = SDR_SND01_BASE;                   part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x60000
+		endcase
+
+		// ---- TABLE rfjet: SPI cartridge, decoded sample flash (SXX2C) ----
+		//
+		// The same shape as rdft2 -- same board, same updater generation, same
+		// three text lanes in the same order -- with four differences, all read
+		// off MAME's ROM_START(rfjet):
+		//   * 9 MB of tiles, not 12. The second bg group still sits at +6 MB
+		//     (bg-2d loads at region 0x600000), but both of its ROMs are half
+		//     rdft2's size. 9 MB is still over the 6 MB threshold, so the fore
+		//     layer base is 0x8000 the same as rdft2's -- spi_top.sv.
+		//   * 24 MB of sprites as three 8 MB chunks, and here MAME's file order
+		//     IS the numeric one: obj-1 at region 0, obj-2 at 8 MB, obj-3 at 16.
+		//     rdft2's is obj3, obj2, obj1, which is exactly the sort of thing
+		//     that gets carried across by mistake. M_SPR_ILV_R again: RISE11
+		//     carries sprite_reorder like RISE10 does.
+		//   * a different flash payload -- 0x189DD5 copied from pcm-d.u0227,
+		//     then 0x41C08 compressed bytes of sound1.u0222 expanding to
+		//     0x5F6F5. Both lengths come out of tools/build_soundflash.py,
+		//     which reports source bytes consumed as well as bytes produced;
+		//     the decoded one cannot be read off the job record, whose `len`
+		//     field is the OUTPUT length.
+		//   * the Z80 program is at sound1.u0222[0x44000], not [0x60000] -- but
+		//     part 16 carries the ROM whole for both sets, so nothing here
+		//     depends on that and rfjet's unmeasured program LENGTH does not
+		//     matter either. See SDR_SND01_BASE in spi_defs.vh.
+		SET_RFJET: case (part_sel)
+		//                                                    base   size          mode
+		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.u0211
+		5'd1 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B1;  end // prg1.u0212
+		5'd2 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B2;  end // prg2.u0221
+		5'd3 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B3;  end // prg3.u0220
+		5'd4 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B1;  end // fix0.u0524
+		5'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B0;  end // fix1.u0518
+		5'd6 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // fixp.u0514
+		5'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-1d.u0543
+		5'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0544
+		5'd9 : begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h020_0000; part_mode = M_24_W01; end // bg-2d.u0545
+		5'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;     part_size = 26'h010_0000; part_mode = M_24_B2;  end // bg-2p.u0546
+		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-1.u0442
+		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-2.u0443
+		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-3.u0444
+		5'd14: begin part_base = SDR_PCM_BASE;                      part_size = 26'h018_9DD5; part_mode = M_LINEAR; end // flash head: region stamp + pcm-d.u0227
+		5'd15: begin part_base = SDR_PCM_BASE + 26'h018_9DD5;       part_size = 26'h004_1C08; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
+		default:begin part_base = SDR_SND01_BASE;                   part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x44000
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----

@@ -31,9 +31,9 @@
       rdft can drop sound01 entirely. Measured rather than assumed -- with the
       flash already programmed, rdft2 still issues exactly 131,072 dword reads
       over 0x1380000-0x13FFFFC, which is sound1.u0222[0x60000..0x7FFFF] and
-      nothing else. Loader part 16 below carries exactly that slice, and
-      spi_cpu.sv answers the window out of SDRAM: packed one byte per dword,
-      since the region's other three byte lanes are zero.
+      nothing else. Loader part 16 below carries that ROM whole, and spi_cpu.sv
+      answers the window out of SDRAM: packed one byte per dword, since the
+      region's other three byte lanes are zero.
     -->
 
     <!--
@@ -86,8 +86,8 @@
                           through port 0x688 and releases the Z80 with 0x68C.
         0x0240000  192 KB text tiles
         0x0280000  2 MB   YMF271 samples: the pre-programmed flash image
-        0x0480000  128 KB the Z80 program the 386 reads through sound01,
-                          packed one byte per 386 dword
+        0x0480000  512 KB sound1.u0222, which the 386 reads through the sound01
+                          window, packed one byte per 386 dword
         0x0500000  12 MB  background tiles, two 6 MB groups
         0x1100000  18 MB  sprites, three 6 MB plane-pair chunks
     -->
@@ -161,15 +161,22 @@
         <part name="sound1.u0222" crc="b7bd3703" length="0x04C665"/>
 
         <!--
-          Loader part 16: the SAME ROM again, at 0x60000, which is rdft2's Z80
-          program. Not a duplicate by accident -- the file holds two unrelated
-          things, and this is the half the 386 copies into the Z80's RAM over
-          port 0x688 before releasing it from reset. It reaches it through the
-          sound01 window rather than out of maincpu, which is the one way rdft2
-          differs from rdft here, so the loader has to place it and spi_cpu.sv
-          has to decode 0x1380000 to answer.
+          Loader part 16: the SAME ROM again, whole. Not a duplicate by
+          accident -- the file holds two unrelated things, and one of them is
+          rdft2's Z80 program at 0x60000, which the 386 copies into the Z80's
+          RAM over port 0x688 before releasing it from reset. It reaches it
+          through the sound01 window rather than out of maincpu, which is the
+          one way rdft2 differs from rdft here, so the loader has to place it
+          and spi_cpu.sv has to decode 0x1200000-0x13FFFFF to answer.
+
+          The WHOLE 512 KB rather than just the program: the window then
+          answers with whatever MAME's region holds at any address inside it,
+          so where each set's program starts stops being a constant this core
+          has to know. rfjet's is at 0x44000 instead and its length has never
+          been measured -- see SDR_SND01_BASE in rtl/spi_defs.vh. The extra
+          384 KB is 1% of this download and the region reserves room for it.
         -->
-        <part name="sound1.u0222" crc="b7bd3703" offset="0x060000" length="0x020000"/>
+        <part name="sound1.u0222" crc="b7bd3703" length="0x080000"/>
     </rom>
 
     <!--

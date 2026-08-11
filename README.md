@@ -1,19 +1,20 @@
 # SlopperPI — Seibu SPI / SXX2E for MiSTer
 
 Raiden Fighters on Seibu **SXX2E** single-board hardware (MAME set `rdfts`),
-and on the **SPI cartridge** board it shares almost everything with — `rdft`
-and `rdft2`, both pre-flashed so they skip the cartridge's first-boot sample
-reflash.
+and on the **SPI cartridge** board it shares almost everything with — `rdft`,
+`rdft2` and `rfjet`, all pre-flashed so they skip the cartridge's first-boot
+sample reflash.
 
 ## Status
 
 **The rendered frame is bit-exact against MAME** — every one of 76,800 pixels,
 on two independent captures with different register state, plus ten rdft2
-scenes. All three sets — `rdfts`, `rdft` and `rdft2` — boot and run on real
-hardware, and **`rdft2`'s sound has been matched against MAME** over two
-minutes of attract (envelope r = 0.951, spectrum r = 0.993, zero dropouts).
-The hardware ROM checker verifies all four regions on the board (`ok bits
-1111`). See `PLAN.md` for the full design notes and the task list.
+scenes. `rdfts`, `rdft` and `rdft2` boot and run on real hardware, and
+**`rdft2`'s sound has been matched against MAME** over two minutes of attract
+(envelope r = 0.951, spectrum r = 0.993, zero dropouts). The hardware ROM
+checker verifies all four regions on the board (`ok bits 1111`). `rfjet` is
+wired end to end and passes every offline check, but has never been rendered or
+run. See `PLAN.md` for the full design notes and the task list.
 
 | block | state |
 |---|---|
@@ -54,13 +55,20 @@ The music itself matches; this is fidelity. `PLAN.md` T-K.
 |---|---|---|---|---|
 | `rdfts.mra` | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | runs on hardware |
 | `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
-| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.1 MB | runs on hardware |
+| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.5 MB | runs on hardware |
+| `rfjet.mra` | `rfjet`, SPI cartridge, pre-flashed | `rfjet.zip` | 37.5 MB | **built, never run** |
 
-The two cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
+The three cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
 several-minute "techno music" reflash the real cartridge does on first boot is
-skipped. rdft's image is assembled by the MRA; rdft2's cannot be, because half a
-megabyte of it is compressed — the core decompresses that during the download
-(`rtl/spi_rom_decode.sv`).
+skipped. rdft's image is assembled by the MRA; rdft2's and rfjet's cannot be,
+because a chunk of each is compressed — the core decompresses that during the
+download (`rtl/spi_rom_decode.sv`).
+
+**rfjet has never been run.** Every per-set difference findable in MAME's driver
+is selected, its part list agrees with `ROM_START(rfjet)` and its flash image
+matches MAME's own bit for bit, and its RISE11 sprite crypt is checked against
+MAME both in MAME's word order and in the order the fetch walks the words. But
+no rfjet frame has been rendered and no board has loaded it. `PLAN.md` T-L/T-M.
 
 **rdft2 runs on hardware** — story intro, then the title screen with sprites,
 with music that matches MAME's. Its download is byte-exact: 35,752,108 bytes
@@ -77,8 +85,9 @@ section 10c is the hunt for that one and is worth reading before touching the
 loader.
 
 SDRAM: **32 MB is enough for rdfts and rdft** (both reach 29 MB in the map).
-**rdft2 needs 64 MB** — its sprites are 18 MB rather than 12, which puts the top
-of the image at 35 MB.
+**rdft2 and rfjet need 64 MB** — rdft2's sprites are 18 MB rather than 12, which
+puts the top of its image at 35 MB, and rfjet's are 24 MB, which puts its top at
+41 MB.
 
 ## Building
 
@@ -138,7 +147,12 @@ There is also a whole-board run, which needs no capture — just an SDRAM image:
 It boots the real 386 against that image and reports how far it gets: ROM
 fetches, every I/O register written, the DMA triggers. On the cartridge sets it
 finishes by checking the Z80 program the 386 downloaded against the ROM it came
-from, which is the only test of `spi_cpu.sv`'s `sound01` window. Do not judge
+from, which is the only test of `spi_cpu.sv`'s `sound01` window. For `rdft2` and
+`rfjet` it does not assume where in `sound1.u0222` that program lives — it
+searches the region for the offset that reproduces every downloaded byte and
+prints the range it found. That is the only measurement of rfjet's, and it came
+out at `[0x44000..0x7FFFF]`, 240 KB — neither of the two lengths that were
+available to copy from the other sets. Do not judge
 these runs by the picture — the Verilator Z80 is a stub, so a cartridge run
 ends on a black screen with the 386 waiting on a sound FIFO that never answers.
 

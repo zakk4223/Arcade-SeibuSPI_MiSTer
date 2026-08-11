@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound capture run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-video run-dma run-boot run-sdram
+.PHONY: all clean lint lint-top lint-sound capture run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_decode run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-ymf271-math run-ymf271
+all: run-rom_decode run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -106,6 +106,22 @@ obj_dir/Vspi_rise10_decrypt: $(RTL)/spi_rise10_decrypt.sv $(RTL)/seibu_partial_a
 
 # RISE10 constants, parsed out of MAME.
 $(RTL)/spi_rise10_tables.vh: $(TOOLS)/gen_rise10_tables.py
+	python3 $< $(MAME) > $@
+
+# RISE11 (rfjet). Same two-path arrangement as RISE10, plus a second pass that
+# walks the words in the order the FETCH sees them -- RISE11 takes the word
+# index as an operand, so the inverse of sprite_reorder is part of the contract
+# and is checked here rather than only on screen.
+run-rise11: obj_dir/Vspi_rise11_decrypt
+	@./obj_dir/Vspi_rise11_decrypt
+
+obj_dir/Vspi_rise11_decrypt: $(RTL)/spi_rise11_decrypt.sv $(RTL)/seibu_partial_add.sv \
+                             $(RTL)/spi_rise11_tables.vh tb_rise11_decrypt.cpp spi_ref.h lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_rise11_decrypt \
+	    $(RTL)/spi_rise11_decrypt.sv $(RTL)/seibu_partial_add.sv tb_rise11_decrypt.cpp
+
+# RISE11 constants, parsed out of MAME.
+$(RTL)/spi_rise11_tables.vh: $(TOOLS)/gen_rise11_tables.py
 	python3 $< $(MAME) > $@
 
 # Produce the golden capture and the SDRAM image the two reference tests need.
@@ -211,7 +227,7 @@ lint-top:
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
 	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
 	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_rom_decode.sv \
-	    $(RTL)/spi_rise10_decrypt.sv 2>&1 | \
+	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise11_decrypt.sv 2>&1 | \
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 
 

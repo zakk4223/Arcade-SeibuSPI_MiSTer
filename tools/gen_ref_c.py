@@ -121,6 +121,19 @@ static inline u32 seibu_partial_carry_sum32(u32 a, u32 b, u32 m) { return seibu_
         r"void seibuspi_rise10_sprite_decrypt\(u8 \*rom, int size\)\s*\{.*?\n\}",
         "seibuspi_rise10_sprite_decrypt"))
 
+    # RISE11 (rfjet). The shared static function plus rfjet's wrapper, which is
+    # where the five keys live -- the testbench must call the wrapper so the
+    # keys travel this path too, not just the gathers.
+    out.append(grab(
+        spr,
+        r"static void seibuspi_rise11_sprite_decrypt\(u8 \*rom, int size,"
+        r".*?\n\{.*?\n\}",
+        "seibuspi_rise11_sprite_decrypt"))
+    out.append(grab(
+        spr,
+        r"void seibuspi_rise11_sprite_decrypt_rfjet\(u8 \*rom, int size\)\s*\{.*?\n\}",
+        "seibuspi_rise11_sprite_decrypt_rfjet"))
+
     print("\n\n".join(out))
 
 

@@ -166,6 +166,12 @@ class Fetcher:
     def __init__(self, prg, region, addr, mode, gen):
         self.prg, self.region, self.esi = prg, region, addr
         self.mode, self.gen, self.cache = mode, gen, 0
+        # Every hand-out is one byte of one ROM file, whatever the lane mode, so
+        # this counts SOURCE FILE bytes. That is the number an MRA has to slice
+        # with and the number rom_loader carries as the part size, and for a
+        # decoded job it is the only way to know it -- the job record's `len` is
+        # the OUTPUT length. Reading one byte too many shifts every later part.
+        self.n = 0
 
     def _read32(self, addr):
         src, o = ((self.prg, addr - PRG_BASE) if addr < S01_BASE
@@ -188,6 +194,7 @@ class Fetcher:
                 self.esi += 2
         if self.esi >= 0x400000 and self.esi % 0x200000 == 0:
             self.esi += 0x200000
+        self.n += 1
         return al
 
 
@@ -286,9 +293,9 @@ def build(zf, setname, decoded_out=None, quiet=False):
             if len(out) != length:
                 print("  warning: job declared %d bytes, decoded %d"
                       % (length, len(out)), file=sys.stderr)
-        say("  %-6s src=%#09x mode=%d -> flash[%#x..%#x] (%d bytes)"
+        say("  %-6s src=%#09x mode=%d -> flash[%#x..%#x] (%d in, %d out)"
             % ("copy" if verbatim else "decode", src, mode, start, pos - 1,
-               pos - start))
+               fetch.n, pos - start))
         job += 0xC
 
     say("  payload ends at %#x, rest is erased 0xFF" % (pos - 1))

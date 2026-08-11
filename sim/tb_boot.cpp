@@ -50,7 +50,7 @@ static const uint32_t SDR_SIZE  = 0x2900000;
 static const uint32_t Z80_BASE  = 0x0200000;
 static const uint32_t Z80_SIZE  = 0x0040000;
 static const uint32_t SND01_BASE = 0x0480000;
-static const uint32_t SND01_SIZE = 0x0020000;
+static const uint32_t SND01_SIZE = 0x0080000;   // sound1.u0222, whole
 
 static std::vector<uint8_t> sdram;
 
@@ -83,10 +83,15 @@ int main(int argc, char **argv)
     // what it did; the cartridge sets change the mod bits the same way the
     // MRA's mod byte does (rtl/spi_defs.vh).
     const char *setname = (argc > 3) ? argv[3] : "rdfts";
-    int  set_id    = !strcmp(setname, "rdft2") ? 2 : !strcmp(setname, "rdft") ? 1 : 0;
+    int  set_id    = !strcmp(setname, "rfjet") ? 3 : !strcmp(setname, "rdft2") ? 2
+                   : !strcmp(setname, "rdft")  ? 1 : 0;
     bool set_sxx2c = set_id != 0;
-    if (strcmp(setname, "rdfts") && strcmp(setname, "rdft") && strcmp(setname, "rdft2")) {
-        printf("FAIL: unknown set %s (want rdfts, rdft or rdft2)\n", setname);
+    // Sets whose Z80 program comes through the sound01 window rather than out
+    // of the already-loaded Z80 region.
+    bool from_snd01 = (set_id == 2) || (set_id == 3);
+    if (strcmp(setname, "rdfts") && strcmp(setname, "rdft") &&
+        strcmp(setname, "rdft2") && strcmp(setname, "rfjet")) {
+        printf("FAIL: unknown set %s (want rdfts, rdft, rdft2 or rfjet)\n", setname);
         return 2;
     }
     printf("set: %s (set_id=%d, sxx2c=%d)\n", setname, set_id, set_sxx2c);
@@ -403,32 +408,80 @@ int main(int argc, char **argv)
     // part, spi_cpu's window, and port 0x688.
     int dl_rc = 0;
     if (z80dl_writes) {
-        uint64_t covered = 0, bad = 0;
-        uint32_t first_bad = 0;
-        for (uint32_t i = 0; i < Z80_SIZE; i++) {
-            if (!z80_written[i]) continue;
-            covered++;
-            // rdft2's source is the sound01 slice; rdfts/rdft download a copy
-            // of what is already in the Z80 region, so compare against the
-            // pristine copy taken before the run.
-            uint8_t want = (set_id == 2)
-                         ? (i < SND01_SIZE ? sdram[SND01_BASE + i] : 0)
-                         : z80_src[i];
-            if (sdram[Z80_BASE + i] != want) { if (!bad) first_bad = i; bad++; }
-        }
+        uint64_t covered = 0;
+        for (uint32_t i = 0; i < Z80_SIZE; i++) covered += z80_written[i] ? 1 : 0;
         printf("Z80 RAM bytes written  : %llu, 0x%X..0x%X\n",
                (unsigned long long)covered,
                z80dl_lo - Z80_BASE, z80dl_hi - Z80_BASE);
-        if (bad) {
-            printf("Z80 program MISMATCH   : %llu of %llu bytes, first at 0x%X "
-                   "(got %02X want %02X)\n",
-                   (unsigned long long)bad, (unsigned long long)covered, first_bad,
-                   sdram[Z80_BASE + first_bad],
-                   set_id == 2 ? sdram[SND01_BASE + first_bad] : z80_src[first_bad]);
-            dl_rc = 1;
+
+        if (from_snd01) {
+            // The program came out of the sound01 window, and the loader put
+            // the WHOLE of sound1.u0222 behind that window, so where inside it
+            // the program starts is not something this bench is told -- it is
+            // something this bench MEASURES. Find the offset that reproduces
+            // every downloaded byte and report it. rdft2's is known to be
+            // 0x60000; rfjet's has never been measured any other way, and the
+            // point of searching rather than asserting is that a wrong guess
+            // would show up here as "no offset" instead of as a silent pass on
+            // a hardcoded constant that happens to match.
+            //
+            // Anchor on the first written bytes, then verify each candidate in
+            // full -- a run over all 512 KB offsets is otherwise 128 G compares.
+            std::vector<uint32_t> cand;
+            uint32_t lo = z80dl_lo - Z80_BASE;
+            for (uint32_t k = 0; k + 16 <= SND01_SIZE; k++)
+                if (!memcmp(&sdram[SND01_BASE + k], &sdram[Z80_BASE + lo], 16))
+                    cand.push_back(k);
+
+            std::vector<uint32_t> hits;
+            for (uint32_t k : cand) {
+                bool ok = true;
+                for (uint32_t i = lo; i < Z80_SIZE && ok; i++) {
+                    if (!z80_written[i]) continue;
+                    uint32_t s = k + (i - lo);
+                    ok = (s < SND01_SIZE) && (sdram[Z80_BASE + i] == sdram[SND01_BASE + s]);
+                }
+                if (ok) hits.push_back(k);
+            }
+
+            if (hits.empty()) {
+                printf("Z80 program MISMATCH   : no offset in sound1.u0222 "
+                       "reproduces the %llu downloaded bytes (%zu anchor "
+                       "candidates tried)\n",
+                       (unsigned long long)covered, cand.size());
+                dl_rc = 1;
+            }
+            else {
+                printf("Z80 program matches sound1.u0222[0x%X..0x%X] byte for "
+                       "byte -- %llu bytes%s\n",
+                       hits[0], hits[0] + (uint32_t)covered - 1,
+                       (unsigned long long)covered,
+                       hits.size() > 1 ? " (offset not unique; the program "
+                                         "repeats in the ROM)" : "");
+            }
         }
         else {
-            printf("Z80 program matches the ROM byte for byte over that range\n");
+            // rdfts/rdft download a copy of what is already in the Z80 region,
+            // so compare against the pristine copy taken before the run.
+            uint64_t bad = 0;
+            uint32_t first_bad = 0;
+            for (uint32_t i = 0; i < Z80_SIZE; i++) {
+                if (!z80_written[i]) continue;
+                if (sdram[Z80_BASE + i] != z80_src[i]) {
+                    if (!bad) first_bad = i;
+                    bad++;
+                }
+            }
+            if (bad) {
+                printf("Z80 program MISMATCH   : %llu of %llu bytes, first at "
+                       "0x%X (got %02X want %02X)\n",
+                       (unsigned long long)bad, (unsigned long long)covered,
+                       first_bad, sdram[Z80_BASE + first_bad], z80_src[first_bad]);
+                dl_rc = 1;
+            }
+            else {
+                printf("Z80 program matches the ROM byte for byte over that range\n");
+            }
         }
     }
     else if (set_sxx2c) {

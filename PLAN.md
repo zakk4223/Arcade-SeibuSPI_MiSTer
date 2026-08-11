@@ -694,20 +694,142 @@ address-independent, so the fetch has to supply it.
 rdft2's is at 0x60000 and the note above says so, so this is exactly the kind of
 constant that gets copied across by mistake. Verified by signature: `C3 67 00`
 (`jp 0x0067`) occurs at precisely one place in the whole rfjet set, and 0x44000
-is where it is. It sits immediately past the compressed audio, which ends at
-0x41BC7 -- consistent, and the same "program follows the samples" arrangement as
-rdft2, just at a different offset because the payload is smaller.
+is where it is. It sits past the compressed audio, which ends at 0x41C08 (the
+figure here used to read 0x41BC7 and was wrong; `build_soundflash.py` now
+reports it) -- consistent, and the same "program follows the samples"
+arrangement as rdft2, just at a different offset because the payload is smaller.
 
-**The length is NOT confirmed.** 0x44000..0x7FFFF is 0x3C000 (240 KB), which is
-neither rdft's 256 KB nor rdft2's 128 KB, so do not assume it. Pin it with a tap
-on the 0x688 transfer (`z80_prg_transfer_w`) the way section 0 did for rdft --
-count the bytes and compare both ends against the ROM.
+**MEASURED 2026-08-11, and the warning was justified: 245,760 bytes,
+`sound1.u0222[0x44000..0x7FFFF]`.** That is 0x3C000, 240 KB, running to the very
+end of the ROM -- neither rdft's 256 KB nor rdft2's 128 KB, so anyone who had
+copied either constant across would have been wrong by 16 or 112 KB.
 
-**4. rfjet is a 46.44 MB set** -- 2 program + 0.25 Z80 + 0.19 chars + 9 tiles +
-24 sprites + 10 sound01 + 1 flash. Pre-flashed it drops sound01 only if the Z80
-program is lifted out of it separately, so budget the sprites and tiles: this
-needs a **64 MB module** and cannot ride along on a 32 MB build. That is a
-board requirement, not an RTL one (`sdram.sv` already routes addr[25]/addr[26]).
+Not measured with a MAME tap in the end. `make -C sim run-boot GAME=rfjet` boots
+the real 386 against the real SDRAM image and watches the 0x688 transfer, which
+is the same event a tap would have caught, and the bench then SEARCHES
+`sound1.u0222` for the offset that reproduces every downloaded byte rather than
+being told where to look. 245,760 writes, 245,760 bytes matched, one offset.
+
+**Neither number is load-bearing any more**, which is why the measurement is
+confirmation rather than a dependency: the loader carries `sound1.u0222` WHOLE
+and the window decodes all of it, so nothing in the core knows either one. See
+the next section.
+
+**4. rfjet is a big set** -- and it needs a **64 MB module**, which is a board
+requirement rather than an RTL one (`sdram.sv` already routes addr[25]/addr[26]).
+The 46.44 MB figure here counted the whole 10 MB `sound01` region; pre-flashed,
+with only the 512 KB `sound1.u0222` lifted out of it, the download is
+**37.5 MB** and it lands in a 41 MB map. Either way it cannot ride along on a
+32 MB build.
+
+### rfjet is wired end to end in the core, and unrun (2026-08-11)
+
+Everything the section above lists is now built, and `make verify` passes. What
+does NOT exist is a single frame of rfjet compared against MAME, or a hardware
+run. Treat this the way rdft2 was treated at the same stage.
+
+**The RISE11 unit, and the one genuinely new idea in it.** `rtl/spi_rise11_decrypt.sv`,
+constants parsed out of MAME by `tools/gen_rise11_tables.py`, reference copied
+out of MAME by `tools/gen_ref_c.py` -- the same two-path arrangement RISE10 uses,
+so agreement validates the parser rather than being self-consistent.
+
+RISE11's plane210 sum takes **the word index** as its addend. That is the whole
+difference from RISE10 and it is not a detail: the loader has already applied
+`sprite_reorder()` as an address swizzle, so the position the fetch reads from is
+the POST-reorder one and the index the crypt needs is the PRE-reorder one. Inside
+a 32-word group reorder sends input word j to output `{j[3:0], j[4]}`, so the
+inverse is `j = {o[0], o[4:1]}`, and what the fetch holds as `o` is `{ry, half}`.
+The index is therefore
+
+    i = {r_tcode[eb], half, r_ry[eb]}
+
+a pure wire permutation at the decrypt site. Get it wrong and every pen is wrong
+with nothing downstream able to notice, so `sim/tb_rise11_decrypt.cpp` runs TWO
+passes: MAME's word order (which checks the arithmetic and that reorder is not
+part of the unit), and then the FETCH's order through that inverse, compared
+against MAME's final image. Breaking the inverse deliberately fails the second
+pass and not the first -- 1920 of 12288 bytes -- which is the check that it is
+really testing something. A third assertion catches the degenerate case where the
+`i` port is not connected at all.
+
+The generator also refuses to emit constants it cannot vouch for: the two gathers
+must consume all 48 source bits of b1/b2/b3 exactly once, and `R11_MASK543` must
+not carry out of bit 23 (which is what makes a 24-bit adder equivalent to MAME's
+`seibu_partial_carry_sum32` call on 24-bit operands).
+
+**The per-set wiring.** `SET_RFJET` = 3, mod byte 0x05, and with it: the tile and
+text keys (`TKEY*_RFJET` were already defined and already checked against MAME),
+`SPR_CHUNK_SIZE_RFJET` = 8 MB, RISE11 selected in the sprite fetch, and
+`bg_fore_pos` = 0x8000 -- rfjet has 9 MB of tiles, which is nothing like rdft2's
+12 but lands in the same bracket of MAME's region-LENGTH rule. `set_id` is now
+full at 2 bits; a fifth set has to widen it in three places, which
+`rtl/spi_defs.vh` says.
+
+**The sound01 window was generalised rather than parameterised, and that is the
+part worth reading.** rdft2 keeps its Z80 program at `sound1.u0222[0x60000]` and
+rfjet's is at `[0x44000]` -- exactly the sort of per-set constant the section
+above warns gets copied across wrong -- and rfjet's program LENGTH had never been
+measured at all. Rather than carry two offsets and a guessed length, the loader
+now stores **the whole 512 KB of `sound1.u0222`** and `spi_cpu` decodes the whole
+2 MB the ROM occupies in the 386's map (0x1200000-0x13FFFFF, its
+`ROM_LOAD32_BYTE` lane-0 span) instead of just the top 512 KB. The window then
+answers with whatever MAME's region holds at any address inside it, and where
+each program starts stops being something the core knows. The fit is exact and
+free: `SDR_SND01_BASE` to `SDR_TILES_BASE` is 512 KB to the byte.
+
+This changed rdft2, which was working. `make -C sim run-boot GAME=rdft2` still
+downloads all 131,072 bytes byte-exact, and it no longer asserts where they came
+from -- it SEARCHES the region for the offset that reproduces them and prints it.
+It reports `sound1.u0222[0x60000..0x7FFFF]`, which is rdft2's known answer
+derived rather than assumed, and is what makes the same bench a measurement for
+rfjet instead of a restatement of a guess.
+
+**And rfjet's own boot run then answered the open question.** 245,760 bytes over
+port 0x688, matching `sound1.u0222[0x44000..0x7FFFF]` -- 240 KB, to the end of
+the ROM. The 0x44000 the `C3 67 00` signature predicted is right; the length is
+neither of the two that were available to copy. The 386 also reaches attract in
+that run: 147 tilemap and palette DMA triggers, 148 sprite ones, 833,227
+sound01 fetches, and `0x680` last carrying 0x38, which is rfjet's region-stamp
+build ID arriving on the sound FIFO. The screen stays black because the
+Verilator Z80 is a stub, exactly as it does for rdft2.
+
+**The part table and MRA**, `mra/rfjet.mra` plus a fourth arm in `rom_loader`,
+seventeen parts, **39,303,645 bytes (37.5 MB)**. Four independent things agree on
+that number and on the layout behind it:
+
+* `tools/check_mra.py` against MAME's `ROM_START(rfjet)` -- order, name, CRC,
+  size, scatter mode and destination, part by part;
+* the same tool rebuilding the 2 MB sample flash from the MRA's OWN slices and
+  matching `sha256 fb02c059…`, the image MAME's flash devices hold;
+* `sim/tb_rom_loader.cpp`'s independent model, which walks 24 MB of sprites at an
+  8 MB chunk size through the interleave and `sprite_reorder` and lands every
+  byte where MAME's region layout says;
+* `tools/build_sdram_image.py --concat`, whose stream is the same length.
+
+**None of rfjet's numbers are rdft2's**, which is the reason to check rather than
+eyeball: the flash splits at 0x189DD5 against 0x17C247, the compressed tail is
+0x41C08 in / 0x5F6F5 out against 0x4C665 / 0x730ED, the second bg group is half
+the size (at the same 6 MB base), and **MAME's sprite order is the numeric one
+here** -- obj-1 is chunk 0 -- where rdft2's is obj3, obj2, obj1.
+
+**`build_soundflash.py` now reports source bytes consumed as well as produced.**
+That number is the MRA slice length and the loader's `part_size`, and for a
+DECODED job it cannot be read off the job record at all -- that field carries the
+output length. It was previously being taken from a table in this file, and this
+file had it slightly wrong: the compressed input ends at 0x41C08, not the
+0x41BC7 written above. The counter is validated by rdft2, where it reproduces the
+0x4C665 already in the shipped MRA.
+
+**Still missing, in the order it matters:** an rfjet golden capture and a frame
+compare (there is no reference to compare against yet, the same gap rdft2 had),
+then a hardware run -- which needs a **64 MB module**, 37.5 MB of download into a
+41 MB map. `spi_romcheck`'s region sums are still rdfts' constants and will
+report failures on any other set; that is pre-existing and unrelated.
+
+What the boot run does NOT cover, and the frame compare would: the whole video
+path. It renders black because the Z80 is a stub, so the RISE11 fetch -- the one
+thing in this work with a failure mode nothing else can see -- is still checked
+only unit by unit.
 
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
@@ -2851,6 +2973,18 @@ whether it is RIGHT.
       words exact across the 12 MB region against the reference image, and the
       sum computed over that image equals what the hardware reported. Section
       10d; `build_sdram_image.py --sums` stops it recurring.
+- [ ] **T-L** rfjet's first frame against MAME. Everything findable in the
+      driver is selected and every part list agrees with MAME, but no rfjet
+      frame has ever been rendered -- exactly where rdft2 stood before its
+      golden capture, and rdft2's capture is what found its 17th sprite
+      tile-code bit. `tools/build_sdram_image.py` already knows rfjet's layout,
+      so this is `make capture GAME=rfjet` and `make run-video`. The RISE11
+      fetch path is the thing it would exercise that nothing else does: the
+      unit is checked against MAME word by word, but only a frame checks that
+      the fetch hands it the right words with the right index.
+- [ ] **T-M** rfjet on hardware. Needs a **64 MB module** -- 37.5 MB of
+      download into a 41 MB map, 24 MB of it sprites. Do T-L first; it is
+      cheaper and it is where rdft2's real bug was.
 - [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.

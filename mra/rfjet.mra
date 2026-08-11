@@ -1,0 +1,196 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SlopperPI.                                     -->
+<!--                                                                     -->
+<!-- SlopperPI is free software: you can redistribute it and/or modify   -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters Jet (Europe, SPI cartridge, pre-flashed)</name>
+    <setname>rfjet</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1998</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>Europe</region>
+    <category>Shooter</category>
+
+    <!--
+      NOT YET RUN ON HARDWARE, and NOT YET COMPARED AGAINST MAME FRAME BY
+      FRAME. What is verified is the RISE11 sprite crypt this set is the only
+      user of -- against MAME's own function, in MAME's word order and again in
+      the order the fetch walks the words (`make -C sim run-rise11`) -- and the
+      part list below, against MAME's ROM_START(rfjet) and against the flash
+      image MAME's own flash devices hold.
+
+      THIS SET NEEDS A 64 MB SDRAM MODULE. 37.4 MB of download landing in a
+      41 MB map: 24 MB of sprites alone, which is more than the whole of rdfts.
+
+      rfjet is a SXX2C cartridge, NOT the SXX2G single board rfjets. MAME runs
+      it on the rdft2 machine config, so the YMF271 stays at 16.9344 MHz and
+      the Z80 at 7.159 MHz -- none of the SXX2G clock arithmetic applies here.
+
+      Like rdft2, rfjet keeps its Z80 program in sound1.u0222 and the 386 reads
+      it through the sound01 window before releasing the Z80 from reset. Unlike
+      rdft2 it lives at 0x44000, not 0x60000, and its LENGTH has never been
+      measured. Loader part 16 carries that ROM whole for both sets, so neither
+      fact matters here -- the window answers with whatever MAME's region holds
+      at the address asked for. See SDR_SND01_BASE in rtl/spi_defs.vh.
+    -->
+
+    <!--
+      LIKE rdft AND rdft2, THE CARTRIDGE HAS NO SAMPLE ROM: the YMF271 plays out
+      of two Intel E28F008SA flash chips the game programs itself on first boot.
+      This MRA ships that flash pre-programmed so the several-minute reflash is
+      skipped.
+
+      rfjet's updater is the same generation as rdft2's -- a copy job and then a
+      compressed one -- so the core decodes the tail during the download with
+      rtl/spi_rom_decode.sv, selected by the codec config below. Same codec,
+      byte pair encoding over DPCM; only the lengths differ.
+
+        flash[0x000000-0x000003] = maincpu[0x1FFFFC-0x1FFFFF]   region + build
+        flash[0x000004-0x189DD4] = pcm-d.u0227[4..]             verbatim
+        flash[0x189DD5-0x1E94C9] = decode(sound1.u0222[0..0x41C07])
+        flash[0x1E94CA-0x1FFFFF] = 0xFF, erased and never addressed
+
+      Every one of those numbers is read out of the job table in the game's own
+      386 program by tools/build_soundflash.py, which reproduces the whole 2 MB
+      bit-for-bit and is checked by sha256 against the image MAME's flash
+      devices end up holding. NONE of them is copied from rdft2: the copy is
+      0x189DD1 bytes against rdft2's 0x17C243 and the decode 0x41C08 against
+      0x4C665, and the decoded length in particular cannot be read off the job
+      record at all -- that field carries the OUTPUT size.
+
+      The four header bytes are the region lock, not a checksum: a verbatim copy
+      of the last four bytes of the 386 program, region byte plus build ID.
+      rfjet's is 80 4A 4A 38, one past rdft2's 37 and rdft's 36. A stamp that
+      does not match the program makes the game reflash, so this image belongs
+      to THIS set's program ROMs and no other region's.
+    -->
+
+    <!--
+      Part order is significant. rtl/rom_loader.sv walks this list with a fixed
+      table -- selected by the mod byte below -- and performs MAME's
+      ROM_LOAD24_* / ROM_LOAD32_* byte scatter in hardware, because MRA
+      <interleave> cannot express the 3-byte period the Seibu "D + P" graphics
+      ROM pairs need. Do not reorder or insert parts without updating the rfjet
+      table in rom_loader.sv to match. `make check-mra` checks them against each
+      other and against MAME's driver.
+
+      Layout produced in SDRAM (see rtl/spi_defs.vh):
+        0x0000000  2 MB   386 program
+        0x0200000  256 KB Z80 program -- RAM, NOT loaded here. The 386 fills it
+                          through port 0x688 and releases the Z80 with 0x68C.
+        0x0240000  192 KB text tiles
+        0x0280000  2 MB   YMF271 samples: the pre-programmed flash image
+        0x0480000  512 KB sound1.u0222, which the 386 reads through the sound01
+                          window, packed one byte per 386 dword
+        0x0500000  9 MB   background tiles, two groups 6 MB apart
+        0x1100000  24 MB  sprites, three 8 MB plane-pair chunks
+    -->
+
+    <!--
+      Mod byte 0x05: bit 0 selects the SXX2C cartridge board wiring, bits 3:1
+      select set 2 on that board, which is rfjet. rdft2.mra sends 0x03 (same
+      board, set 1), rdft.mra 0x01 and rdfts.mra nothing at all.
+
+      The second element is the codec config: pairs of {part index, codec id}.
+      Part 15 is the compressed sample tail, and codec 1 is CODEC_BPE_DPCM.
+      Parts default to codec 0, a straight copy, so nothing else is listed.
+      Ids live in rtl/spi_defs.vh and the decoders in rtl/spi_rom_decode.sv.
+
+      IT MUST COME BEFORE THE index="0" ROM. Main_MiSTer sends the <rom>
+      elements in file order, so an index-1 that follows the image arrives
+      AFTER the loader has already walked its table -- the download then runs
+      against the wrong layout and every part after the first lands wrong.
+    -->
+    <rom index="1">
+        <part>05</part>
+        <part>0F 01</part>
+    </rom>
+
+    <rom index="0" zip="rfjet.zip" md5="none">
+        <!-- 386 program: four byte lanes -->
+        <part name="prg0.u0211" crc="e5a3b304"/>
+        <part name="prg1.u0212" crc="395e6da7"/>
+        <part name="prg2.u0221" crc="82f7a57e"/>
+        <part name="prg3.u0220" crc="cbdf100d"/>
+
+        <!-- text layer: three byte lanes, and the lane order is 1, 0, 2 -->
+        <part name="fix0.u0524" crc="8bc080be"/>
+        <part name="fix1.u0518" crc="bded85e7"/>
+        <part name="fixp.u0514" crc="015d0748"/>
+
+        <!--
+          Background tiles: 9 MB, two D+P groups. The second still starts 6 MB
+          in, as rdft2's does, but both of its ROMs are half the size -- the
+          group base and the group SIZE are independent and only the base is
+          shared with rdft2.
+        -->
+        <part name="bg-1d.u0543" crc="edfd96da"/>
+        <part name="bg-1p.u0544" crc="a4cc4631"/>
+        <part name="bg-2d.u0545" crc="731fbb59"/>
+        <part name="bg-2p.u0546" crc="03652c25"/>
+
+        <!--
+          Sprites: 24 MB in three 8 MB plane-pair chunks, one ROM each, and here
+          MAME's order IS the numeric one -- obj-1 is chunk 0. rdft2's is obj3,
+          obj2, obj1, so this is not a detail to carry across by eye.
+
+          The loader INTERLEAVES the three chunks so a 16-pixel row is twelve
+          contiguous bytes and costs two SDRAM reads instead of three, and it
+          also folds in MAME's sprite_reorder(), which RISE11 carries the same
+          way RISE10 does. RISE11 then needs the PRE-reorder index of each word
+          back at fetch time, because its plane210 sum takes that index as an
+          operand; spi_sprite.sv derives it and sim/tb_rise11_decrypt.cpp checks
+          the derivation against MAME's final image.
+        -->
+        <part name="obj-1.u0442" crc="58a59896"/>
+        <part name="obj-2.u0443" crc="a121d1e3"/>
+        <part name="obj-3.u0444" crc="bc2c0c63"/>
+
+        <!--
+          YMF271 sample flash, pre-programmed. Loader part 14: the region stamp
+          plus 0x189DD1 bytes of pcm-d.u0227 at identity offset,
+          4 + 0x189DD1 = 0x189DD5.
+        -->
+        <part>80 4A 4A 38</part>
+        <part name="pcm-d.u0227" crc="8ee3ff45" offset="0x000004" length="0x189DD1"/>
+
+        <!--
+          Loader part 15, CODEC_BPE_DPCM: the compressed tail. 0x41C08 bytes in,
+          0x5F6F5 out. This is a LENGTH-LIMITED slice on purpose -- the rest of
+          sound1.u0222 is not sample data, it is the Z80 program and the gap
+          before it.
+        -->
+        <part name="sound1.u0222" crc="d4fc3da1" length="0x041C08"/>
+
+        <!--
+          Loader part 16: the SAME ROM again, whole. Not a duplicate by
+          accident -- the file holds two unrelated things, and one of them is
+          rfjet's Z80 program at 0x44000, which the 386 copies into the Z80's
+          RAM over port 0x688 before releasing it from reset. Carried whole so
+          that neither that offset nor the program's unmeasured length has to
+          be right here; spi_cpu.sv answers the whole window from it.
+        -->
+        <part name="sound1.u0222" crc="d4fc3da1" length="0x080000"/>
+    </rom>
+
+    <!--
+      Same control layout as rdft2; the names map to joystick bits 4 upwards IN
+      ORDER and SeibuSPI.sv decodes them at exactly those positions.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
+             default="A,B,X,Start,Select,R,L" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>

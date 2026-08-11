@@ -28,12 +28,21 @@ localparam [25:0] SDR_PRG_BASE     = 26'h000_0000;  //  2 MB   386 program
 localparam [25:0] SDR_Z80_BASE     = 26'h020_0000;  // 256 KB  Z80 program
 localparam [25:0] SDR_CHARS_BASE   = 26'h024_0000;  // 192 KB  text tiles
 localparam [25:0] SDR_PCM_BASE     = 26'h028_0000;  // 2.5 MB  YMF271 samples
-// rdft2's Z80 program, read by the 386 through the sound01 window. It lives in
-// the half megabyte the sample region has spare above the 2 MB flash image, so
-// nothing else in the map moves; the YMF271 only ever addresses the low 2 MB of
-// SDR_PCM_BASE (ymf271_synth.sv masks to [20:0]), so the two cannot collide.
-// Stored PACKED, one byte per 386 dword -- see spi_cpu.sv.
-localparam [25:0] SDR_SND01_BASE   = 26'h048_0000;  // 128 KB  rdft2 sound01
+// The cartridge sets' Z80 program, read by the 386 through the sound01 window.
+// It lives in the half megabyte the sample region has spare above the 2 MB
+// flash image, so nothing else in the map moves; the YMF271 only ever addresses
+// the low 2 MB of SDR_PCM_BASE (ymf271_synth.sv masks to [20:0]), so the two
+// cannot collide. Stored PACKED, one byte per 386 dword -- see spi_cpu.sv.
+//
+// The WHOLE of sound1.u0222 goes here, all 512 KB, for every set that has one.
+// Only part of it is the Z80 program -- rdft2's is at 0x60000, rfjet's at
+// 0x44000 -- but which part is a per-set constant of exactly the kind PLAN.md's
+// rfjet notes warn gets copied across wrong, and rfjet's LENGTH has never been
+// measured at all. Storing the region whole makes both facts irrelevant: the
+// window answers with whatever MAME's region holds at that address, so the
+// question of where the program starts is the game's business and not ours.
+// The fit is exact, which is why this costs nothing: 0x500000 - 0x480000.
+localparam [25:0] SDR_SND01_BASE   = 26'h048_0000;  // 512 KB  sound1.u0222
 localparam [25:0] SDR_TILES_BASE   = 26'h050_0000;  //  12 MB  background tiles
 localparam [25:0] SDR_SPRITES_BASE = 26'h110_0000;  //  24 MB  sprites (3 chunks)
 localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
@@ -46,6 +55,7 @@ localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
 // is stated in terms of.
 localparam [25:0] SPR_CHUNK_SIZE       = 26'h040_0000;  // SEI252 sets
 localparam [25:0] SPR_CHUNK_SIZE_RDFT2 = 26'h060_0000;
+localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
 
 // --------------------------------------------------------------------------
 // Which ROM set is loading. The MRA's mod byte says so: bit 0 picks the SXX2C
@@ -55,12 +65,16 @@ localparam [25:0] SPR_CHUNK_SIZE_RDFT2 = 26'h060_0000;
 //   mod 0x00  SXX2E, set 0  -> rdfts
 //   mod 0x01  SXX2C, set 0  -> rdft
 //   mod 0x03  SXX2C, set 1  -> rdft2
+//   mod 0x05  SXX2C, set 2  -> rfjet
 //
-// rfjet becomes SXX2C set 2 (mod 0x05) and costs one more arm in rom_loader.
+// set_id is 2 bits and rfjet fills it. A fifth set needs it widened here, in
+// rom_loader's `set_id` port and in SeibuSPI.sv's decode -- the mod byte itself
+// has room for eight.
 // --------------------------------------------------------------------------
 localparam [1:0] SET_RDFTS = 2'd0;
 localparam [1:0] SET_RDFT  = 2'd1;
 localparam [1:0] SET_RDFT2 = 2'd2;
+localparam [1:0] SET_RFJET = 2'd3;
 
 // --------------------------------------------------------------------------
 // ROM download codecs (rtl/spi_rom_decode.sv).

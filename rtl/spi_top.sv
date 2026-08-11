@@ -244,9 +244,11 @@ module spi_top
 	spi_cpu cpu
 	(
 		.z80dl_stall (z80dl_stall),
-		// Only rdft2 reads the sound01 window, and only rdft2's loader table
-		// puts anything behind it -- see spi_cpu.sv's map.
-		.snd01_en  (set_id == SET_RDFT2),
+		// Only the sets with a second sound ROM read the sound01 window, and
+		// only their loader tables put anything behind it -- see spi_cpu.sv's
+		// map. rdft's Z80 program is inside `maincpu` instead and rdfts has a
+		// real Z80 ROM, so neither one ever looks.
+		.snd01_en  ((set_id == SET_RDFT2) || (set_id == SET_RFJET)),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),
@@ -496,17 +498,23 @@ module spi_top
 	// bg_fore_pos is the fore layer's tile base and it follows the SIZE of the
 	// tile region (seibuspi_v.cpp:585): 0x2000 up to 3 MB, 0x4000 up to 6 MB,
 	// 0x8000 beyond. rdfts and rdft have exactly 0x600000 of tiles; rdft2 has
-	// 0xC00000, which is the only case that needs the 16th code bit.
+	// 0xC00000 and rfjet 0x900000, and both of those need the 16th code bit.
+	// Note it is the REGION length that decides, not the game -- rfjet's 9 MB
+	// is nothing like rdft2's 12 and lands in the same bracket.
 	//
 	// The decryption keys are simply per game. The same triple does text and
 	// background -- MAME's text_decrypt and bg_decrypt take the same three
 	// constants -- so one selection covers both layers.
 	// ------------------------------------------------------------------
-	wire [15:0] bg_fore_pos = (set_id == SET_RDFT2) ? 16'h8000 : 16'h4000;
+	wire big_tiles = (set_id == SET_RDFT2) || (set_id == SET_RFJET);
+	wire [15:0] bg_fore_pos = big_tiles ? 16'h8000 : 16'h4000;
 
-	wire [23:0] tkey1 = (set_id == SET_RDFT2) ? TKEY1_RDFT2 : TKEY1_SEI252;
-	wire [23:0] tkey2 = (set_id == SET_RDFT2) ? TKEY2_RDFT2 : TKEY2_SEI252;
-	wire [23:0] tkey3 = (set_id == SET_RDFT2) ? TKEY3_RDFT2 : TKEY3_SEI252;
+	reg [23:0] tkey1, tkey2, tkey3;
+	always @* case (set_id)
+		SET_RDFT2: begin tkey1 = TKEY1_RDFT2;  tkey2 = TKEY2_RDFT2;  tkey3 = TKEY3_RDFT2;  end
+		SET_RFJET: begin tkey1 = TKEY1_RFJET;  tkey2 = TKEY2_RFJET;  tkey3 = TKEY3_RFJET;  end
+		default:   begin tkey1 = TKEY1_SEI252; tkey2 = TKEY2_SEI252; tkey3 = TKEY3_SEI252; end
+	endcase
 
 	// Lead the line-buffer read by one pixel: the mixer's composite is only
 	// stable a pixel after its palette lookups finish.
@@ -584,12 +592,23 @@ module spi_top
 	wire [14:0] lb_spr;
 	wire        spr_busy;
 
-	// rdft2 is the RISE10 set: 6 MB plane-pair chunks instead of 4, and the
-	// address-independent crypt instead of SEI252's keyed one. The chunk size
-	// is no longer an address stride -- the loader interleaves the chunks -- it
-	// is what MAME's extra-bank rule counts tiles with.
+	// Three crypts over three chunk sizes, and the two are selected separately
+	// rather than from one flag because they do not have to agree: rdft2us pairs
+	// RISE10 with a different board. The chunk size is no longer an address
+	// stride -- the loader interleaves the chunks -- it is what MAME's
+	// extra-bank rule counts tiles with.
+	//
+	//   rdfts / rdft   SEI252, 4 MB chunks
+	//   rdft2          RISE10, 6 MB
+	//   rfjet          RISE11, 8 MB
 	wire        spr_rise10 = (set_id == SET_RDFT2);
-	wire [25:0] spr_chunk  = spr_rise10 ? SPR_CHUNK_SIZE_RDFT2 : SPR_CHUNK_SIZE;
+	wire        spr_rise11 = (set_id == SET_RFJET);
+	reg  [25:0] spr_chunk;
+	always @* case (set_id)
+		SET_RDFT2: spr_chunk = SPR_CHUNK_SIZE_RDFT2;
+		SET_RFJET: spr_chunk = SPR_CHUNK_SIZE_RFJET;
+		default:   spr_chunk = SPR_CHUNK_SIZE;
+	endcase
 
 	spi_sprite sprites
 	(
@@ -600,6 +619,7 @@ module spi_top
 		.enable     (~layer_en_dbg[4]),
 		.spr_chunk_size(spr_chunk),
 		.rise10     (spr_rise10),
+		.rise11     (spr_rise11),
 		.spr_addr   (spr_ra),
 		.spr_data   (spr_rd),
 		.sdr_addr   (sdr_spr_addr),

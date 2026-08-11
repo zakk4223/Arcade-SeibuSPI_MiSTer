@@ -109,10 +109,36 @@ static const Part parts_rdft2[] = {
     { "sprites chunk 2",             SPRITES_BASE + 4,        0x600000,  SPR_ILV_R },
     { "flash head: stamp + pcm",     PCM_BASE,                0x17C247,  LINEAR  },
     { "flash tail: sound1, packed",  PCM_BASE + 0x17C247,     0x04C665,  LINEAR  },
-    // A second slice of sound1.u0222, at 0x60000: rdft2's Z80 program, which
-    // the 386 reads through the sound01 window. Packed one byte per dword, so
-    // the loader just copies it -- the unpacking is spi_cpu.sv's job.
-    { "sound1.u0222[0x60000..]",     SND01_BASE,              0x020000,  LINEAR  },
+    // sound1.u0222 again, whole: rdft2's Z80 program is at 0x60000 inside it
+    // and the 386 reads it through the sound01 window. Packed one byte per
+    // dword, so the loader just copies it -- the unpacking is spi_cpu.sv's job.
+    { "sound1.u0222",                SND01_BASE,              0x080000,  LINEAR  },
+};
+
+// rfjet, the third SXX2C set and the only RISE11 one. Same board, same updater
+// generation and the same seventeen parts as rdft2, with different numbers in
+// nearly every field -- 9 MB of tiles rather than 12, three 8 MB sprite chunks
+// rather than 6 MB ones, and a flash split at 0x189DD5 rather than 0x17C247.
+// That similarity is the reason to run it: a value carried across from rdft2 by
+// mistake would still produce a plausible-looking table.
+static const Part parts_rfjet[] = {
+    { "prg0.u0211",                  PRG_BASE,                0x080000,  W32_B0  },
+    { "prg1.u0212",                  PRG_BASE,                0x080000,  W32_B1  },
+    { "prg2.u0221",                  PRG_BASE,                0x080000,  W32_B2  },
+    { "prg3.u0220",                  PRG_BASE,                0x080000,  W32_B3  },
+    { "fix0.u0524",                  CHARS_BASE,              0x010000,  W24_B1  },
+    { "fix1.u0518",                  CHARS_BASE,              0x010000,  W24_B0  },
+    { "fixp.u0514",                  CHARS_BASE,              0x010000,  W24_B2  },
+    { "bg-1d.u0543",                 TILES_BASE,              0x400000,  W24_W01 },
+    { "bg-1p.u0544",                 TILES_BASE,              0x200000,  W24_B2  },
+    { "bg-2d.u0545",                 TILES_BASE + 0x600000,   0x200000,  W24_W01 },
+    { "bg-2p.u0546",                 TILES_BASE + 0x600000,   0x100000,  W24_B2  },
+    { "obj-1.u0442",                 SPRITES_BASE + 0,        0x800000,  SPR_ILV_R },
+    { "obj-2.u0443",                 SPRITES_BASE + 2,        0x800000,  SPR_ILV_R },
+    { "obj-3.u0444",                 SPRITES_BASE + 4,        0x800000,  SPR_ILV_R },
+    { "flash head: stamp + pcm-d",   PCM_BASE,                0x189DD5,  LINEAR  },
+    { "flash tail: sound1, packed",  PCM_BASE + 0x189DD5,     0x041C08,  LINEAR  },
+    { "sound1.u0222",                SND01_BASE,              0x080000,  LINEAR  },
 };
 
 static uint32_t dest_of(const Part &p, uint32_t i)
@@ -480,6 +506,13 @@ int main(int argc, char **argv)
     // a part whose output length is not its input length.
     rc = run_set(parts_rdft2, (int)(sizeof(parts_rdft2) / sizeof(parts_rdft2[0])),
                  2, "rdft2 (SXX2C, decoded sample flash)", 15);
+    if (rc) return rc;
+    // rfjet: 37 MB, and the biggest thing this exercises is 24 MB of sprites at
+    // an 8 MB chunk size -- the interleave and sprite_reorder run over three
+    // times as much data as any other set, and the destinations reach the top
+    // of the 41 MB map.
+    rc = run_set(parts_rfjet, (int)(sizeof(parts_rfjet) / sizeof(parts_rfjet[0])),
+                 3, "rfjet (SXX2C, RISE11)", 15);
     if (rc) return rc;
 
     // The same two sets again with ioctl_wr held for TWO loader clocks, which

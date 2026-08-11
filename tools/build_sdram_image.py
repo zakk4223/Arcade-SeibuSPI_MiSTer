@@ -96,16 +96,46 @@ PARTS_RDFT2 = [
     ("sprites", 0xc2c50f02, 0x400000, "SPR_ILV_R", 4, 0x000000),
     ("sprites", 0x5259321f, 0x200000, "SPR_ILV_R", 4, 0x400000),
     # pcm is not a part: rdft2's sample flash is derived, see FLASH below.
-    # sound1.u0222's second half is rdft2's Z80 program, which the 386 reads
-    # through the sound01 window. Packed one byte per 386 dword, so it is a
-    # plain copy here and spi_cpu.sv does the unpacking.
-    ("snd01",   0xb7bd3703,  0x20000, "LINEAR",  0, 0, 0x60000),
+    # sound1.u0222 holds rdft2's Z80 program at 0x60000, which the 386 reads
+    # through the sound01 window. Carried WHOLE -- see SDR_SND01_BASE in
+    # rtl/spi_defs.vh -- and packed one byte per 386 dword, so it is a plain
+    # copy here and spi_cpu.sv does the unpacking.
+    ("snd01",   0xb7bd3703,  0x80000, "LINEAR",  0),
 ]
 
-# Sets, detected by the CRC of their first program ROM.
+# rfjet. Same shape as rdft2 and almost no shared numbers: 9 MB of tiles, three
+# 8 MB sprite chunks of one ROM each, and MAME's sprite order is the numeric one
+# here where rdft2's is reversed.
+PARTS_RFJET = [
+    ("prg",     0xe5a3b304,  0x80000, "W32_B0",  0),
+    ("prg",     0x395e6da7,  0x80000, "W32_B1",  0),
+    ("prg",     0x82f7a57e,  0x80000, "W32_B2",  0),
+    ("prg",     0xcbdf100d,  0x80000, "W32_B3",  0),
+    ("chars",   0x8bc080be,  0x10000, "W24_B1",  0),
+    ("chars",   0xbded85e7,  0x10000, "W24_B0",  0),
+    ("chars",   0x015d0748,  0x10000, "W24_B2",  0),
+    ("tiles",   0xedfd96da, 0x400000, "W24_W01", 0),
+    ("tiles",   0xa4cc4631, 0x200000, "W24_B2",  0),
+    ("tiles",   0x731fbb59, 0x200000, "W24_W01", 0x600000),
+    ("tiles",   0x03652c25, 0x100000, "W24_B2",  0x600000),
+    ("sprites", 0x58a59896, 0x800000, "SPR_ILV_R", 0),
+    ("sprites", 0xa121d1e3, 0x800000, "SPR_ILV_R", 2),
+    ("sprites", 0xbc2c0c63, 0x800000, "SPR_ILV_R", 4),
+    ("snd01",   0xd4fc3da1,  0x80000, "LINEAR",  0),
+]
+
+# Sets, detected by the CRC of their first program ROM. `flash_stream` is what
+# the MRA sends for the two derived sample parts, which --concat has to
+# reproduce byte for byte: the verbatim slice, then the COMPRESSED tail. Both
+# lengths come out of tools/build_soundflash.py's job-table walk.
 SETS = {
     "rdfts": dict(parts=PARTS_RDFTS, probe=0xe278dddd, flash=False),
-    "rdft2": dict(parts=PARTS_RDFT2, probe=0x3cb3fdca, flash=True),
+    "rdft2": dict(parts=PARTS_RDFT2, probe=0x3cb3fdca, flash=True,
+                  flash_stream=(("pcm.u0217", 4, 0x17C247),
+                                ("sound1.u0222", 0, 0x4C665))),
+    "rfjet": dict(parts=PARTS_RFJET, probe=0xe5a3b304, flash=True,
+                  flash_stream=(("pcm-d.u0227", 4, 0x189DD5),
+                                ("sound1.u0222", 0, 0x41C08))),
 }
 
 
@@ -224,13 +254,13 @@ def main():
             if part[0] != "snd01":
                 blob += part_bytes(part)
         if cfg["flash"]:
-            # Exactly what mra/rdft2.mra sends for the two sample parts: the
-            # stamp and a slice of pcm, then the COMPRESSED tail. The loader
+            # Exactly what the MRA sends for the two sample parts: the stamp and
+            # a slice of the pcm ROM, then the COMPRESSED tail. The loader
             # decodes the second one on the way in, so the concatenated stream
             # is shorter than the image it produces.
             blob += bytes(image[BASE["pcm"]:BASE["pcm"] + 4])   # region stamp
-            blob += zf.read("pcm.u0217")[4:0x17C247]
-            blob += zf.read("sound1.u0222")[:0x4C665]
+            for name, start, end in cfg["flash_stream"]:
+                blob += zf.read(name)[start:end]
         for part in PARTS:
             if part[0] == "snd01":
                 blob += part_bytes(part)
