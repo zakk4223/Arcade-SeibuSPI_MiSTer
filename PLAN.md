@@ -820,16 +820,64 @@ file had it slightly wrong: the compressed input ends at 0x41C08, not the
 0x41BC7 written above. The counter is validated by rdft2, where it reproduces the
 0x4C665 already in the shipped MRA.
 
-**Still missing, in the order it matters:** an rfjet golden capture and a frame
-compare (there is no reference to compare against yet, the same gap rdft2 had),
-then a hardware run -- which needs a **64 MB module**, 37.5 MB of download into a
-41 MB map. `spi_romcheck`'s region sums are still rdfts' constants and will
-report failures on any other set; that is pre-existing and unrelated.
+**Still missing:** a hardware run, which needs a **64 MB module** -- 37.5 MB of
+download into a 41 MB map. `spi_romcheck`'s region sums are still rdfts'
+constants and will report failures on any other set; that is pre-existing and
+unrelated.
 
-What the boot run does NOT cover, and the frame compare would: the whole video
-path. It renders black because the Z80 is a stub, so the RISE11 fetch -- the one
-thing in this work with a failure mode nothing else can see -- is still checked
-only unit by unit.
+### rfjet renders pixel-identical to MAME, over eleven scenes (2026-08-11)
+
+The gap the section above ends on is closed. **Eleven captured scenes, every one
+0 of 76,800 pixels different**, and no line ever ended with sprites unscanned.
+
+| y-hits | frames |
+|--------|--------|
+| 24,623 and 26,197 | 4200, 4800 |
+| 11,263 to 13,866  | 3600, 5400, 6000 |
+| 672 to 6,426      | 1200, 1800, 2400, 3000, 7200, 8400 |
+
+Those top two are **heavier than anything rdft2 was ever tested at** -- its
+densest capture is 16,572 -- and 0 starved lines at 26k y-hits says the 8 MB
+chunk size and the interleave are not costing the fetch anything.
+
+**Capturing rfjet is easier than rdft2, in the one way that matters.** No PAL
+placeholders: `mame rfjet -verifyroms` reports the stock set good, so the patched
+rompath rdft2 needs is not needed here. It still needs pre-flashed nvram or the
+first boot spends minutes on the updater -- but that does not need an emulated
+flashing run either, because `build_soundflash.py`'s image IS the nvram:
+
+    python3 -c "img=open('rfjet_flash.bin','rb').read();
+      open('nv/rfjet/soundflash1','wb').write(img[:0x100000]);
+      open('nv/rfjet/soundflash2','wb').write(img[0x100000:])"
+
+MAME's `intel_e28f008sa` nvram files are raw contents at identity offset, one per
+1 MB chip. Booted on that, rfjet runs at **3083%** with both chips unchanged --
+the updater skipped, which is the same signature rdft2 gives and is the game
+itself accepting the derived image. That is a third independent confirmation of
+`build_soundflash.py`, after the sha256 and the MRA rebuild.
+
+**Two negative tests, because eleven passes prove nothing on their own.** Both
+against frame 4800, the densest scene:
+
+* RISE10 selected instead of RISE11: **51,151 of 76,800 pixels differ (66.6%)**.
+  So the crypt is load-bearing and the frame check sees it.
+* RISE11 fed the POST-reorder index `{tcode, ry, half}` instead of the
+  pre-reorder `{tcode, half, ry}`: **27,264 differ (35.5%)**. This is the one
+  that matters. It is the exact bug the whole index derivation exists to avoid,
+  it changes nothing about the arithmetic, and `tb_rise11_decrypt`'s second pass
+  and the frame compare are the only two things in the project that can see it.
+
+**Do not capture frame 600.** It is a black screen -- 0 y-hits, 0 non-black
+pixels -- and it "passes" while proving nothing at all. It is in the sweep above
+only as the reminder; 7200 and 8400 replaced it.
+
+**One trap, and it cost a false alarm.** `run-video` on rdfts against a
+two-day-old `/tmp/sdram_rdfts_v.bin` reported 66.54% of pixels differing, which
+looks exactly like a sprite-crypt regression from this work and is not one. The
+SDRAM image predates a map change; rebuilt from the zip with the current
+`build_sdram_image.py`, the same capture passes 0 of 76,800. **Rebuild the SDRAM
+image before believing a regression** -- the captures are MAME state and age
+fine, the images are ours and do not.
 
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
@@ -2973,18 +3021,16 @@ whether it is RIGHT.
       words exact across the 12 MB region against the reference image, and the
       sum computed over that image equals what the hardware reported. Section
       10d; `build_sdram_image.py --sums` stops it recurring.
-- [ ] **T-L** rfjet's first frame against MAME. Everything findable in the
-      driver is selected and every part list agrees with MAME, but no rfjet
-      frame has ever been rendered -- exactly where rdft2 stood before its
-      golden capture, and rdft2's capture is what found its 17th sprite
-      tile-code bit. `tools/build_sdram_image.py` already knows rfjet's layout,
-      so this is `make capture GAME=rfjet` and `make run-video`. The RISE11
-      fetch path is the thing it would exercise that nothing else does: the
-      unit is checked against MAME word by word, but only a frame checks that
-      the fetch hands it the right words with the right index.
+- [x] **T-L** rfjet against MAME frame by frame. **Eleven scenes, every one 0 of
+      76,800 pixels different, 0 starved sprite lines**, including two at 24.6k
+      and 26.2k y-hits -- heavier than rdft2 has ever been tested. Two negative
+      tests confirm the check can fail: RISE10 instead of RISE11 differs on
+      66.6% of pixels, and the post-reorder word index instead of the
+      pre-reorder one on 35.5%. No PAL placeholders needed (unlike rdft2), and
+      the pre-flashed nvram is just `build_soundflash.py`'s image split in two.
 - [ ] **T-M** rfjet on hardware. Needs a **64 MB module** -- 37.5 MB of
-      download into a 41 MB map, 24 MB of it sprites. Do T-L first; it is
-      cheaper and it is where rdft2's real bug was.
+      download into a 41 MB map, 24 MB of it sprites. Everything that can be
+      checked without a board now has been.
 - [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.

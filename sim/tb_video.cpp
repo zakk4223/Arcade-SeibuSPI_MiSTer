@@ -143,19 +143,25 @@ int main(int argc, char **argv)
 
     Vtb_video_top *dut = new Vtb_video_top;
 
-    // Per-set configuration. rdft2 is the only set here that is not SEI252 at
-    // 6 MB of tiles and 4 MB sprite chunks; see rtl/spi_defs.vh.
+    // Per-set configuration, and it must match what spi_top.sv derives from
+    // set_id -- see rtl/spi_defs.vh. The SEI252 sets have 6 MB of tiles and
+    // 4 MB sprite chunks; rdft2 has 12 MB and 6 MB with RISE10; rfjet has 9 MB
+    // and 8 MB with RISE11. Note the fore base follows the tile region LENGTH,
+    // so rfjet's 9 MB lands in the same bracket as rdft2's 12.
     const bool is_rdft2 = (game == "rdft2");
-    dut->bg_fore_pos      = is_rdft2 ? 0x8000 : 0x4000;
-    dut->tkey1            = is_rdft2 ? 0x823146 : 0x5A3845;
-    dut->tkey2            = is_rdft2 ? 0x4DE2F8 : 0x77CF5B;
-    dut->tkey3            = is_rdft2 ? 0x157ADC : 0x1378DF;
-    dut->spr_chunk_size   = is_rdft2 ? 0x600000 : 0x400000;
+    const bool is_rfjet = (game == "rfjet");
+    dut->bg_fore_pos      = (is_rdft2 || is_rfjet) ? 0x8000 : 0x4000;
+    dut->tkey1            = is_rfjet ? 0xAEA754 : is_rdft2 ? 0x823146 : 0x5A3845;
+    dut->tkey2            = is_rfjet ? 0xFE8530 : is_rdft2 ? 0x4DE2F8 : 0x77CF5B;
+    dut->tkey3            = is_rfjet ? 0xCCB666 : is_rdft2 ? 0x157ADC : 0x1378DF;
+    dut->spr_chunk_size   = is_rfjet ? 0x800000 : is_rdft2 ? 0x600000 : 0x400000;
     dut->rise10           = is_rdft2;
+    dut->rise11           = is_rfjet;
     printf("set: %s  (fore_base %04X, keys %06X/%06X/%06X, chunk %06X, %s)\n",
            game.c_str(), (unsigned)dut->bg_fore_pos, (unsigned)dut->tkey1,
            (unsigned)dut->tkey2, (unsigned)dut->tkey3,
-           (unsigned)dut->spr_chunk_size, is_rdft2 ? "RISE10" : "SEI252");
+           (unsigned)dut->spr_chunk_size,
+           is_rfjet ? "RISE11" : is_rdft2 ? "RISE10" : "SEI252");
 
     dut->layer_enable     = regs["layer_enable"].at(0);
     dut->rowscroll_enable = regs["rowscroll"].at(0);
@@ -625,7 +631,7 @@ int main(int argc, char **argv)
     // xoffset STEP8(7,-1) then STEP8(8*2+7,-1), yoffset STEP16(0,8*4),
     // 16*32 bits per tile per chunk.
     static std::vector<uint8_t> sprrom;
-    const size_t SPR_CHUNK = is_rdft2 ? 0x600000 : 0x400000;
+    const size_t SPR_CHUNK = is_rfjet ? 0x800000 : is_rdft2 ? 0x600000 : 0x400000;
     if (sprrom.empty()) {
         // The SDRAM image is interleaved (rom_loader M_SPR_ILV), so pull the
         // three chunks back apart before handing them to MAME's decryptor,
@@ -645,12 +651,13 @@ int main(int argc, char **argv)
                                  + ((i >> 1) & 1) * 6 + (i & 1);
                 sprrom[k * SPR_CHUNK + i] = sdram[SPR_BASE + d];
             }
-        if (is_rdft2) {
+        if (is_rdft2 || is_rfjet) {
             // The SDRAM image is ALREADY sprite_reorder()ed -- rom_loader does
-            // it at load time (M_SPR_R10). MAME's decryptor reorders at the
-            // end, so undo ours first and let MAME's put it back; otherwise the
-            // permutation is applied twice. The inverse here is the same
-            // formula tb_rom_loader.cpp checks against MAME's sprite_reorder.
+            // it at load time (M_SPR_ILV_R), for both RISE sets. MAME's
+            // decryptors reorder at the end, so undo ours first and let MAME's
+            // put it back; otherwise the permutation is applied twice. The
+            // inverse here is the same formula tb_rom_loader.cpp checks against
+            // MAME's sprite_reorder.
             std::vector<uint8_t> tmp(sprrom.size());
             for (size_t i = 0; i < sprrom.size(); i++) {
                 size_t j = (i & ~(size_t)0x3F) | ((i & 0x1E) << 1)
@@ -658,7 +665,8 @@ int main(int argc, char **argv)
                 tmp[i] = sprrom[j];
             }
             sprrom.swap(tmp);
-            seibuspi_rise10_sprite_decrypt(sprrom.data(), (int)SPR_CHUNK);
+            if (is_rfjet) seibuspi_rise11_sprite_decrypt_rfjet(sprrom.data(), (int)SPR_CHUNK);
+            else          seibuspi_rise10_sprite_decrypt(sprrom.data(), (int)SPR_CHUNK);
         } else {
             seibuspi_sprite_decrypt(sprrom.data(), (int)SPR_CHUNK);
         }

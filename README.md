@@ -64,11 +64,12 @@ skipped. rdft's image is assembled by the MRA; rdft2's and rfjet's cannot be,
 because a chunk of each is compressed — the core decompresses that during the
 download (`rtl/spi_rom_decode.sv`).
 
-**rfjet has never been run.** Every per-set difference findable in MAME's driver
-is selected, its part list agrees with `ROM_START(rfjet)` and its flash image
-matches MAME's own bit for bit, and its RISE11 sprite crypt is checked against
-MAME both in MAME's word order and in the order the fetch walks the words. But
-no rfjet frame has been rendered and no board has loaded it. `PLAN.md` T-L/T-M.
+**rfjet renders pixel-identical to MAME but has never run on a board.** Eleven
+captured scenes, every one 0 of 76,800 pixels different with no starved sprite
+lines, two of them heavier than anything rdft2 was tested at. Its part list
+agrees with `ROM_START(rfjet)`, its flash image matches MAME's bit for bit, and
+the game itself accepts that image — booted on it, MAME skips the updater and
+runs at 3083%. What is left is a hardware run. `PLAN.md` T-M.
 
 **rdft2 runs on hardware** — story intro, then the title screen with sprites,
 with music that matches MAME's. Its download is byte-exact: 35,752,108 bytes
@@ -133,10 +134,13 @@ frame after the video RAM snapshot.
     make -C sim run-video                  # render it and diff against MAME
     make -C sim run-dma                    # DMA output vs MAME's video RAMs
 
-`capture` takes `GAME=` (default `rdfts`). rdft2 additionally needs an
-already-flashed `-nvram_directory` via `NVRAM=`, or its first boot spends ~420
-emulated seconds running the sample reflash; `tools/build_soundflash.py` writes
-that image offline and it is byte-identical to the one MAME programs itself.
+`capture` takes `GAME=` (default `rdfts`). rdft2 and rfjet additionally need an
+already-flashed `-nvram_directory` via `NVRAM=`, or the first boot spends ~420
+emulated seconds running the sample reflash. You do not have to sit through one
+to get it: `tools/build_soundflash.py` writes that image offline, it is
+byte-identical to the one MAME programs itself, and MAME's nvram files are just
+that image split into `soundflash1` and `soundflash2` at 1 MB. rdft2 also needs
+a rompath whose zip carries three PAL placeholders; rfjet does not.
 `SECONDS` must cover `FRAME` at **53.99 Hz, not 60**, or the capture silently
 never happens and you get an empty directory.
 
@@ -156,12 +160,19 @@ available to copy from the other sets. Do not judge
 these runs by the picture — the Verilator Z80 is a stub, so a cartridge run
 ends on a black screen with the 386 waiting on a sound FIFO that never answers.
 
-Both currently pass exactly: 0 of 76,800 pixels differ, on rdfts and on all ten
-captured rdft2 scenes, with no starved sprite lines. `FRAME=` picks the
-scene — 600 is the early attract screen, 2400 the title with the jungle
-background and heavy sprite traffic. Capture more than one; a quiet scene hid
-two sprite bugs and a tile-layer offset for weeks, and the rdft2 sweep is what
-turned up its 17th sprite tile-code bit.
+Both currently pass exactly: 0 of 76,800 pixels differ, on rdfts, on all ten
+captured rdft2 scenes and on eleven rfjet ones, with no starved sprite lines.
+`FRAME=` picks the scene — 2400 is the rdfts title with the jungle background
+and heavy sprite traffic. Capture more than one; a quiet scene hid two sprite
+bugs and a tile-layer offset for weeks, and the rdft2 sweep is what turned up
+its 17th sprite tile-code bit. Check the y-hit count in the output before
+believing a pass — rfjet's frame 600 is a black screen and "passes" while
+proving nothing.
+
+If a set that used to pass suddenly does not, **rebuild the SDRAM image before
+believing it**. The captures are MAME state and age fine; the images are ours
+and go stale whenever the map moves. A two-day-old rdfts image reported 66% of
+pixels differing, which looks exactly like a sprite regression and was not one.
 
 Underneath, `tools/mame_capture.lua` takes the registers, video RAMs and bitmap,
 and `tools/build_sdram_image.py` assembles the SDRAM image from a ROM set by
