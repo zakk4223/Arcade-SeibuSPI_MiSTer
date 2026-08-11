@@ -879,6 +879,72 @@ SDRAM image predates a map change; rebuilt from the zip with the current
 image before believing a regression** -- the captures are MAME state and age
 fine, the images are ours and do not.
 
+### rfjet RUNS ON HARDWARE, first try (2026-08-11)
+
+**Attract with sprites and sound on the MiSTer at 192.168.1.125**, and nothing
+had to be fixed to get there -- the first load booted. That is the first set in
+this project that has done so: rdft took three runs (the jumper, then the
+0x4009 bit), rdft2 took a session and a half (the sound01 window, then
+`ioctl_wr`). The difference is that everything checkable offline had been
+checked, and the frame compare in particular. It is worth remembering as the
+cheaper order of operations.
+
+**The build.** Every clock positive with TNS 0.000: clk_ram **+0.357**, clk_sys
++1.394, clk_cpu +2.762, hdmi +0.286, worst hold +0.245. clk_ram is where the
+RISE11 unit could have shown up and it lands within 0.005 ns of the previous
+deployed build's +0.352, so two 24-bit partial adders and a gather cost nothing
+measurable.
+
+**Deploy needs three files, not one, and the third is easy to forget.**
+`rfjet.mra` and `rfjet.zip` obviously; but **`rdft2.mra` had to be re-copied
+too**. Its part 16 changed from a 128 KB slice to the whole 512 KB ROM in this
+work, so the MRA already on the machine would send 128 KB where the new loader
+expects 512 KB and every subsequent part would land shifted. A core change that
+alters a part table invalidates every deployed MRA that uses it.
+
+**The download is byte-exact, and three offline models called it in advance:**
+
+    bytes_in  39,303,645   exactly what check_mra, tb_rom_loader and
+                           build_sdram_image --concat all predicted
+    bytes_out 39,425,226   = bytes_in + 121,581, the codec's expansion
+                           (390,901 out of 269,320 in) to the byte
+    part_end  0x10         = 16, the last part of seventeen.
+                           NOTE the probe prints this in HEX
+
+**`ok bits 0000` is the checker, not the data** -- `spi_romcheck`'s expected
+constants are still rdfts'. Confirmed rather than assumed, the same way T-G was:
+all four sums the hardware reported were compared against the same regions of
+`build_sdram_image.py`'s reference image and **all four match exactly**
+(SPRITES C434328C, TILES 28380112, CHARS A5BBA908, PRG 768415A9). So 24 MB of
+sprites and 9 MB of tiles are in SDRAM correct, checked independently of the
+video path.
+
+**Video**: the Seibu Kaihatsu copyright screen, the title with the jet and the
+logo, the hi-score rank table, and the demo attract over the city and ocean
+backgrounds -- all correct by eye, which is all a screenshot can say, but the
+frame compare has already said the rest.
+
+**Sound is running**: Z80 PC advancing, FIFO reads 6,116 -> 9,562, YMF writes
+978 -> **55,442** between two samples a minute apart, 12 voices sounding,
+**0 synth overruns**.
+
+**Sprite starvation is a non-issue at 24 MB of sprites**, which was the open
+question this set posed. Measured properly -- CPU frozen on a busy scene so the
+counters describe ONE scene, 40 ms sampling so the 16-bit counters cannot wrap
+twice (section 13b's lesson, and the 700 ms `rate` run that preceded this was
+useless for exactly that reason):
+
+    ~14,000 y-hits/frame, 1.0 to 2.0 starved lines per frame of 224, 0 overruns
+
+rdfts starved 6.24 lines/frame at 5,600-5,999 y-hits. rfjet is starving less at
+more than twice the load. **Unfreeze afterwards** -- `jtag_peek.tcl mask 0` --
+the freeze mode leaves the CPU stopped and says so.
+
+**What has NOT been done:** no coin, no start, no gameplay (the same gap T-I
+records for rdft2), and the sound has not been matched against MAME the way 10d
+did for rdft2 -- it plays and the voice count is plausible, which is not the
+same thing.
+
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
 `rtl/spi_rom_decode.sv` sits between ioctl and the SDRAM writer in
@@ -3028,9 +3094,16 @@ whether it is RIGHT.
       66.6% of pixels, and the post-reorder word index instead of the
       pre-reorder one on 35.5%. No PAL placeholders needed (unlike rdft2), and
       the pre-flashed nvram is just `build_soundflash.py`'s image split in two.
-- [ ] **T-M** rfjet on hardware. Needs a **64 MB module** -- 37.5 MB of
-      download into a 41 MB map, 24 MB of it sprites. Everything that can be
-      checked without a board now has been.
+- [x] **T-M** rfjet on hardware. **Boots to attract with sprites and sound,
+      first try** -- the only set that has ever done that. bytes_in 39,303,645
+      exactly as predicted, bytes_out +121,581 (the codec's expansion), all
+      four SDRAM regions checksumming identical to the reference image, 12
+      voices, 0 synth overruns, and 1-2 starved sprite lines per frame at
+      ~14,000 y-hits. Timing +0.357 on clk_ram.
+- [ ] **T-N** Play rfjet, and listen to it against MAME. Attract only so far:
+      no coin, no start, no gameplay, and the sound is "plausible" rather than
+      measured -- 10d's `-wavwrite` comparison is what "measured" means here.
+      Same shape as T-I, and worth doing as one job across both sets.
 - [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.

@@ -9,12 +9,13 @@ sample reflash.
 
 **The rendered frame is bit-exact against MAME** — every one of 76,800 pixels,
 on two independent captures with different register state, plus ten rdft2
-scenes. `rdfts`, `rdft` and `rdft2` boot and run on real hardware, and
-**`rdft2`'s sound has been matched against MAME** over two minutes of attract
-(envelope r = 0.951, spectrum r = 0.993, zero dropouts). The hardware ROM
-checker verifies all four regions on the board (`ok bits 1111`). `rfjet` is
-wired end to end and passes every offline check, but has never been rendered or
-run. See `PLAN.md` for the full design notes and the task list.
+scenes and eleven rfjet ones. **All four sets boot and run on real hardware**,
+and **`rdft2`'s sound has been matched against MAME** over two minutes of
+attract (envelope r = 0.951, spectrum r = 0.993, zero dropouts). The hardware
+ROM checker verifies all four regions on the board (`ok bits 1111` on rdfts;
+its expected sums are still rdfts-only, so other sets are checked by comparing
+the sums it reports against the reference image instead). See `PLAN.md` for the
+full design notes and the task list.
 
 | block | state |
 |---|---|
@@ -56,7 +57,7 @@ The music itself matches; this is fidelity. `PLAN.md` T-K.
 | `rdfts.mra` | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | runs on hardware |
 | `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
 | `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.5 MB | runs on hardware |
-| `rfjet.mra` | `rfjet`, SPI cartridge, pre-flashed | `rfjet.zip` | 37.5 MB | **built, never run** |
+| `rfjet.mra` | `rfjet`, SPI cartridge, pre-flashed | `rfjet.zip` | 37.5 MB | runs on hardware |
 
 The three cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
 several-minute "techno music" reflash the real cartridge does on first boot is
@@ -64,12 +65,15 @@ skipped. rdft's image is assembled by the MRA; rdft2's and rfjet's cannot be,
 because a chunk of each is compressed — the core decompresses that during the
 download (`rtl/spi_rom_decode.sv`).
 
-**rfjet renders pixel-identical to MAME but has never run on a board.** Eleven
-captured scenes, every one 0 of 76,800 pixels different with no starved sprite
-lines, two of them heavier than anything rdft2 was tested at. Its part list
-agrees with `ROM_START(rfjet)`, its flash image matches MAME's bit for bit, and
-the game itself accepts that image — booted on it, MAME skips the updater and
-runs at 3083%. What is left is a hardware run. `PLAN.md` T-M.
+**rfjet boots to attract with sprites and sound, and it did so on the first
+load** — the only set here that has. Eleven captured scenes render 0 of 76,800
+pixels different from MAME, two of them heavier than anything rdft2 was tested
+at, and on the board its download is byte-exact (39,303,645 in, +121,581 for
+the sample codec's expansion) with all four SDRAM regions checksumming
+identical to the reference image. Sprite starvation was the open question at
+24 MB of sprites and the answer is 1–2 lines per frame out of 224 at ~14,000
+y-hits — less than rdfts starves at half the load. Not yet played or
+sound-matched: `PLAN.md` T-N.
 
 **rdft2 runs on hardware** — story intro, then the title screen with sprites,
 with music that matches MAME's. Its download is byte-exact: 35,752,108 bytes
