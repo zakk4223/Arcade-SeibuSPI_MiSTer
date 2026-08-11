@@ -16,21 +16,46 @@
 #include <cstdint>
 #include <vector>
 
-static const uint32_t SDR_SIZE = 0x1680000;
+// Take the size from the FILE, not from a constant. This was 0x1680000 -- the
+// map as it stood before the 26-bit widening -- so the last 8 MB of the image
+// never got loaded, the sprite region read back as zeros, and SPRITES failed on
+// a perfect image. The bench is not in `make verify` (it needs a real ROM set),
+// so nobody saw it, and it is the one test that would have caught the stale
+// SUM_SPRITES constant that T-G turned out to be.
+static uint32_t SDR_SIZE = 0;
 
 int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
     if (argc < 2) { printf("usage: %s <sdram.bin>\n", argv[0]); return 2; }
 
-    std::vector<uint8_t> mem(SDR_SIZE, 0);
     FILE *f = fopen(argv[1], "rb");
     if (!f) { printf("FAIL: cannot open %s\n", argv[1]); return 2; }
-    if (fread(mem.data(), 1, SDR_SIZE, f) != SDR_SIZE) { printf("FAIL: short image\n"); return 2; }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    SDR_SIZE = (uint32_t)fsize;
+
+    // The checker's last region is SPRITES, base + 12 MB. An image that stops
+    // short of that reads as zeros and fails for a reason that has nothing to
+    // do with the download.
+    const uint32_t NEED = 0x1100000 + 0xC00000;
+    if (SDR_SIZE < NEED) {
+        printf("FAIL: %s is %u bytes, need at least %u (sprites end)\n",
+               argv[1], SDR_SIZE, NEED);
+        return 2;
+    }
+
+    std::vector<uint8_t> mem(SDR_SIZE, 0);
+    if (fread(mem.data(), 1, SDR_SIZE, f) != (size_t)SDR_SIZE) { printf("FAIL: short image\n"); return 2; }
     fclose(f);
 
-    // region -> a byte offset inside it, for the corruption cases
-    const uint32_t poke[4] = { 0x000100, 0x0240100, 0x0480100, 0x0A80100 };
+    // region -> a byte offset inside it, for the corruption cases. These are
+    // the CURRENT bases from rtl/spi_defs.vh: tiles moved to 0x500000 and
+    // sprites to 0x1100000 in the widening. The old values pointed the TILES
+    // poke at the snd01 window and the SPRITES poke into the tiles, so two of
+    // the four corruption cases were testing nothing.
+    const uint32_t poke[4] = { 0x0000100, 0x0240100, 0x0500100, 0x1100100 };
     const char *name[4] = { "PRG", "CHARS", "TILES", "SPRITES" };
 
     int failures = 0;

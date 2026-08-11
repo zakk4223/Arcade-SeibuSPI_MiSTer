@@ -2507,6 +2507,26 @@ constants in the form `spi_romcheck.sv` declares them, so re-deriving is one
 command instead of an act of memory. A layout change is not a content change;
 only the former moves these.
 
+**There WAS a bench that would have caught this, and it was rotten in exactly
+the way 10a records for tb_video's sprite check.** `sim/tb_romcheck.cpp` had
+`SDR_SIZE = 0x1680000` -- the map as it stood before the 26-bit widening -- so
+it loaded only the first 23 MB of a 41 MB image and the sprite region read back
+as zeros. Its corruption pokes were pre-widening too: the TILES poke landed in
+the `snd01` window and the SPRITES poke in the tiles, so two of the four cases
+were testing nothing at all. It takes its size from the file now, refuses an
+image that stops short of the sprite region, and pokes the current bases. All
+five cases pass:
+
+    clean image -> F,  PRG -> E,  CHARS -> D,  TILES -> B,  SPRITES -> 7
+
+It is not in `make verify` (it needs a real ROM set), which is why nobody ran
+it and why a stale constant survived. Worth running by hand whenever those
+constants or the map move -- it is the offline half of `ok bits`.
+
+Note the constants are **rdfts'**. On the cartridge sets the regions that
+genuinely differ are expected to mismatch, and what is useful there is the
+reported sum, not the ok bit.
+
 ### rdft2's sound, measured against MAME
 
 The Elgato's DIGITAL input is the one that carries HDMI audio
@@ -2712,7 +2732,13 @@ whether it is RIGHT.
 - [ ] **T-E** Bench rot: `run-sdram` fails its readback compare (identically
       before this work) and is not in `make verify`. `run-boot` was the other
       half of this and is fixed -- it now takes a set, drives ch3 in both
-      directions and checks the Z80 download. Worth re-reading `run-sdram`'s
+      directions and checks the Z80 download. `run-romcheck` was a THIRD case,
+      fixed 2026-08-11: it was sized to the pre-widening map, so it loaded 23 MB
+      of a 41 MB image and failed SPRITES on a perfect one, and two of its four
+      corruption pokes pointed at the wrong regions entirely. All five cases
+      pass now (10d). The pattern is worth naming: every bench that is not in
+      `make verify` has rotted, and each one rotted at the 26-bit widening.
+      Worth re-reading `run-sdram`'s
       failure in the light of 10c: it is the ONE bench that drives the loader
       into a real `sdram.sv`, and it has been failing a readback compare the
       whole time the hardware download has been suspect. Retested after the
