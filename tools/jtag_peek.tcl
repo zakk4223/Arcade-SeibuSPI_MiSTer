@@ -49,9 +49,21 @@ proc peek64 {idx addr} {
     set ack_prev [string index $prev 0]
     set go [expr {$ack_prev eq "1" ? 0 : 1}]
 
-    # source = {go, addr[24:0]}, MSB first
-    set src "${go}[dec2bin $addr 25]"
-    write_source_data -instance_index $idx -value $src
+    # source = {go, addr[25:0]}, MSB first -- 27 bits. `go` is its own bit above
+    # the address; it used to overlap addr[25], which read 32 MB high.
+    #
+    # TWO writes, and the first one is not redundant. `go` and the address share
+    # one ISSP source word and the RTL does not see all 27 bits change in the
+    # same cycle, so a single write can fire the request on a HALF-UPDATED
+    # address -- the read then lands on a neighbouring word and returns data
+    # that looks entirely plausible. Measured on hardware: 17 of 120 sequential
+    # reads wrong that way, every wrong value being another word within +-64
+    # bytes. Writing the address first with `go` HELD, then re-writing the same
+    # word with only `go` flipped, makes the address bits identical across both
+    # writes, so no intermediate state can address anything else: 120 of 120.
+    set hold [expr {$go ? 0 : 1}]
+    write_source_data -instance_index $idx -value "${hold}[dec2bin $addr 26]"
+    write_source_data -instance_index $idx -value "${go}[dec2bin $addr 26]"
 
     for {set i 0} {$i < 400} {incr i} {
         set p [read_probe_data -instance_index $idx]

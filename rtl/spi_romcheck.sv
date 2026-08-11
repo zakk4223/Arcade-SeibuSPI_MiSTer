@@ -50,11 +50,17 @@ module spi_romcheck
 
 `include "spi_defs.vh"
 
-	// Computed from the reference image; see tools/build_sdram_image.py.
+	// Computed from the reference image: `tools/build_sdram_image.py <zip> out
+	// --sums` prints these four lines. Re-derive them after ANY change to how a
+	// region is laid out -- SUM_SPRITES was stale from 68ccd06 until 2026-08-11
+	// because the sprite interleave (21d8192) permuted the bytes within each
+	// tile, which changes a sum over 32-bit words even though every byte is
+	// still present. That reported a SPRITES failure on correct data for a day
+	// and cost a session's worth of suspicion; see T-G.
 	localparam [31:0] SUM_PRG     = 32'h741393AF;
 	localparam [31:0] SUM_CHARS   = 32'h79A0EB60;
 	localparam [31:0] SUM_TILES   = 32'hD3E9E887;
-	localparam [31:0] SUM_SPRITES = 32'hDCD037DA;
+	localparam [31:0] SUM_SPRITES = 32'h76809831;
 
 	reg  [1:0] region;
 	reg [25:0] addr;

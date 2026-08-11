@@ -1976,7 +1976,9 @@ Of those, only the first would ever have produced an obvious symptom.
 
 **rdfts, rdft and rdft2 all boot and run on the MiSTer at 192.168.1.125**, each
 confirmed by screenshot on the build at this commit: every clock positive
-(clk_ram +1.001, TNS 0.000) and `make verify` passing.
+(clk_ram +1.001, TNS 0.000) and `make verify` passing. (2026-08-11: still true
+on the current build, clk_ram +0.352, with rdfts now reporting `ok bits 1111`
+and rdft2 verified by ear and by spectrum -- 10d.)
 
     rdfts   bytes_in 23,396,353  bytes_out 23,396,352   attract plays
     rdft2   bytes_in 35,752,108  bytes_out 35,910,452   title screen, sprites
@@ -1991,21 +1993,20 @@ that set.
 
 ### What is NOT known yet, in the order it matters
 
-1. **Nobody has HEARD rdft2.** The sound01 window, which is the whole reason
-   rdft2 can boot, exists to get the Z80 its program -- and the only check of
-   the result is a byte compare in simulation plus the fact that the 386 gets
-   past the handover on hardware. Whether the YMF271 actually plays rdft2's
-   music has not been established. That is the first thing to do, and 14.6
-   lists what to look at if it is silent.
-2. **rdft2 has only been seen in attract.** No coin, no start, no gameplay, no
+**Four of the five items that were here on 2026-08-10 are closed; see 10d.**
+rdft2 has been heard AND matched against MAME (T-H), the SPRITES checksum was a
+stale constant in the checker rather than bad data (T-G), and the PEEK address
+bit is fixed and confirmed on hardware along with a second instrument bug it
+exposed (T-F). What remains:
+
+1. **rdft2 has only been seen in attract.** No coin, no start, no gameplay, no
    second loop. Sprite starvation and the RISE10 path have been exercised
-   against captures but not against a live game under load.
-3. **T-G, rdfts' SPRITES checksum**, which still mismatches while PRG, CHARS
-   and TILES are byte-exact. Could be the data or could be the checker's own
-   reads under sprite-engine contention -- 10c says how to tell.
-4. **T-F, the PEEK address bit**, which reads 32 MB high and is therefore
-   useless on the 64 MB module rdft2 needs. Fixing it is one line and it is
-   what would settle T-G directly.
+   against captures but not against a live game under load. This is now the
+   top item (T-I).
+2. **rdft's attract** (T-J), still behind the Service Mode DIP in that MRA's
+   saved OSD config.
+3. **Stereo** (T-K, new): the cartridge board outputs stereo and the core
+   sums to mono. Measured against MAME, not guessed. Fidelity, not a fault.
 
 ### How to get back to a running board
 
@@ -2362,10 +2363,18 @@ alias: it reads 32 MB higher, off the end of the image.** The header comment
 says `source = {go, addr[25:0]}`, 27 bits, which is what the code should have
 been.
 
-So: fix `addr` to `source[24:0]` (and widen `source` if the map ever needs the
-full 26), THEN take the dump. Three separate things were being read through a
-broken instrument this session -- the probe width, the field offsets, and this
--- and each one produced a confident wrong number. Fix the instrument first.
+So: fix the address, THEN take the dump. Three separate things were being read
+through a broken instrument this session -- the probe width, the field offsets,
+and this -- and each one produced a confident wrong number. Fix the instrument
+first.
+
+**Fixed 2026-08-11 by widening, not by masking.** The parenthetical above ("widen
+`source` if the map ever needs the full 26") was already true when it was
+written: `SDR_SPRITES_BASE` is 0x1100000 with 24 MB behind it, so the image ends
+at 41 MB and `source[24:0]` would have left the top 9 MB of the sprites
+unreachable -- which is precisely the region T-G asks about. `source` is 27
+bits, `go` is `source[26]`, `addr` is `source[25:0]`, and the Tcl sends 26
+address bits. See T-F.
 
 ### Confirmed on hardware
 
@@ -2414,10 +2423,136 @@ Take one FIRST, before reading a single counter. Reading it:
   reading this session that contradicted the screen was the instrument's fault.
 
 The capture card (Elgato 4K X, `/dev/video2` -- ALWAYS find it with
-`v4l2-ctl --list-devices`) is for motion and for what the analog path does. For
+`v4l2-ctl --list-devices`) is for motion, for what the analog path does, and it
+is the only way to get the AUDIO off the board. For audio it has two input
+profiles and the default is the wrong one:
+
+    pactl set-card-profile alsa_card.usb-Elgato_Elgato_4K_X_...-02 input:iec958-stereo
+    pw-record --target alsa_input.usb-Elgato_Elgato_4K_X_...-02.iec958-stereo \
+              --rate 48000 --channels 2 --format s16 out.wav
+
+`input:analog-stereo` records perfect digital silence from a perfectly healthy
+core, and PipeWire owns the device so `arecord -D hw:N,0` returns EBUSY. Grab a
+frame first and look at it: a silent recording and an unplugged HDMI input are
+the same measurement until you do. For
 "what is the core drawing", the MiSTer's own screenshot is better: no cable, no
 scaler in the way, and it is the core's native 320x240 rather than a 1080p
 rescale.
+
+## 10d. The instrument is trustworthy now, and rdft2's sound matches MAME (2026-08-11)
+
+T-F and T-G are both closed, and neither ended where it was expected to. The
+sound is verified against MAME rather than against an opinion.
+
+### T-F: the address bit, plus a SECOND bug the fix exposed
+
+The widening (see T-F) is confirmed on hardware: `dump` at ten sites across the
+map, 16 words each, against the image `tools/build_sdram_image.py` produces.
+
+    prg, chars, snd01, tiles, sprites at 0x1100000, 0x1FFFF00,
+    0x2000000, 0x2100000, 0x22FFF00                 16/16 exact, every site
+
+0x2000000 and above are the ones that matter: those addresses did not exist as
+far as the old instrument was concerned. The Z80 window at 0x0200000 "failed"
+all 16 and that is the good news -- the loader never writes it, so the
+reference image holds 0xFF there, and what the hardware actually holds is
+`C3 67 00 ...` = `sound1.u0222[0x60000]`, the Z80 program the 386 downloads at
+boot. Both ends of that 128 KB check out (0x200000 and 0x21FF80, 16/16 each),
+which is the first time rdft2's download has been confirmed on hardware rather
+than in simulation.
+
+**The second bug: `go` and the address do not update together.** With T-F fixed
+the dumps were still wrong about one word in seven, and the wrong values were
+always a NEIGHBOURING word. The measurements that pinned it, in order:
+
+* the same address read 30 times -- 30 identical, correct values. So it is not
+  noise, contention or the SDRAM;
+* alternating two addresses -- 0x0000000 sometimes returns the data for
+  0x0000008. One address bit, bit 3, carried over from the previous request;
+* 120 sequential reads, one-phase: 103 correct, 17 wrong, all 17 a word within
+  +-64 bytes.
+
+`go` shares the ISSP source word with the address and the RTL does not see all
+27 bits change in one cycle, so a request can fire on a half-updated address.
+The read then lands on a neighbour and returns entirely plausible data. Fixed
+in `tools/jtag_peek.tcl` alone: write the address with `go` HELD, then re-write
+with only `go` flipped, so both writes carry identical address bits. Same 120
+reads two-phase: **120/120**.
+
+Worth keeping in mind for any future ISSP source that carries a strobe next to
+data: this is a property of the primitive, not of this design. And note what it
+would have done to a debugging session -- every value it returns is real data
+from real SDRAM, just from the wrong place, so nothing looks broken.
+
+### T-G: the data was right and the CHECKER's constant was stale
+
+rdfts' SPRITES sum has mismatched since the interleave landed. It is neither
+the data nor the read path:
+
+* 48 sites x 64 bytes across the whole 12 MB sprite region, hardware against
+  the reference image: **384/384 exact**;
+* the sum computed over the reference image in Python is **76809831** -- which
+  is exactly what the hardware reported. The two agree perfectly.
+
+So the download is right and `spi_romcheck`'s hardcoded `SUM_SPRITES` was
+wrong. `git log -S` dates it: the constant was set in 68ccd06 and the sprite
+interleave landed later in 21d8192, which permutes the bytes within each tile.
+Every byte is still present, so a CRC would not have moved -- but the sum is
+over 32-bit WORDS, and the permutation changes those. The constant was never
+re-derived.
+
+Fixed, and **`ok bits 1111`, `fails 0` on hardware** -- the first time all four
+regions have verified. `build_sdram_image.py --sums` now prints the four
+constants in the form `spi_romcheck.sv` declares them, so re-deriving is one
+command instead of an act of memory. A layout change is not a content change;
+only the former moves these.
+
+### rdft2's sound, measured against MAME
+
+The Elgato's DIGITAL input is the one that carries HDMI audio
+(`pactl set-card-profile ... input:iec958-stereo`); the analog profile records
+digital silence, which looks exactly like a dead core. Confirm the capture path
+with a frame grab before trusting a silent recording -- the same lesson as the
+`/dev/video0` one, in audio.
+
+130 s of attract off the hardware against 200 s of the same attract out of MAME
+(`-wavwrite`, pre-flashed nvram). MAME's own flash, incidentally, came out
+sha256 `c0da4614...`, byte-identical to `tools/build_soundflash.py` -- the codec
+re-confirmed for free.
+
+| measurement                                   | result                        |
+|-----------------------------------------------|-------------------------------|
+| envelope alignment vs MAME (20 ms RMS)        | r = **0.951** over 130 s      |
+| long-term spectrum shape                      | r = **0.9927**                |
+| per-frame spectral correlation                | median **0.967**, 87% > 0.8   |
+| windows where hardware is silent but MAME plays | **0**                       |
+| silent-window agreement                       | 99.9%                         |
+| synth overruns / voices                       | **0** / 23-27 sounding        |
+
+The envelope correlation is the one that says the sound PROGRAM is right: the
+same notes start and stop at the same times for over two minutes. The spectral
+figures say the synthesis is right. Neither could have been had from the
+telemetry, which happily reports a healthy engine playing the wrong thing.
+
+**The one divergence found, and it is real: rdft2 should be STEREO.** Hardware
+L and R never differ by more than 1 LSB (side/mid -73.7 dB -- that 1 LSB is the
+capture path). MAME's rdft2 is genuinely stereo, side/mid -14.5 dB, 14.5% of
+samples differing by more than 256. MAME's driver is explicit about why:
+`spi()` routes `ymf.add_route(0, "speaker", 1.0, 0)` and `(1, ..., 1)` and the
+PCB notes say "CN121 - Output connector for left/right speakers", while
+`sxx2e()` is `add_route(ALL_OUTPUTS, "mono")` with the comment "Single PCBs
+only output mono sound".
+
+`spi_top.sv` hardcodes `audio_l = audio_r = snd_audio`, which is correct for
+rdfts and wrong for the two cartridge sets. The ingredients are already there:
+`ymf271_synth.sv` computes `g0` and `g1` per slot from `p_ch0`/`p_ch1` and then
+throws the separation away at `cvsum <= chclip(g0) + chclip(g1)`. Stereo means
+carrying two accumulators and selecting on `set_id`. See T-K.
+
+Also measured, not explained: MAME's summed output is 2.58x the hardware's
+level. Some of that is MiSTer's own output level and some may be the mono sum
+normalisation; it is not a clean factor of two and nobody has chased it. It is
+a level difference, not a shape difference -- the spectra above are normalised.
 
 ## 10b. Where the project stands (end of 2026-08-09, before the rdft2 arc)
 
@@ -2507,29 +2642,56 @@ whether it is RIGHT.
       for that MRA has Service Mode on, so what was actually seen is the board
       TEST MODE menu. Turn it off on the OSD DIP page and screenshot the
       attract; that closes the last gap left by 10b's unconfirmed claims.
-- [ ] **T-H** Listen to rdft2. The sound01 window exists to get its Z80 a
-      program, and that program has only been checked as bytes: verified
-      byte-exact into the Z80's memory in `run-boot`, and the 386 gets past the
-      handover on hardware. Whether the YMF271 plays rdft2's music is unknown,
-      and the Verilator Z80 is a stub so simulation cannot answer it. If it is
-      silent, 14.6 is the order to check things in and the vital signs panel
-      reports the Z80 PC and both FIFO counters.
+- [x] **T-H** Listen to rdft2. **It plays, and it matches MAME.** Heard first,
+      then measured over 130 s of attract against MAME's own `-wavwrite` of the
+      same sequence: envelope r = 0.951, long-term spectrum r = 0.9927,
+      per-frame spectral median 0.967, and ZERO windows where the hardware is
+      silent while MAME is playing. 0 synth overruns with 23-27 voices
+      sounding. Section 10d. One real divergence fell out of it -- see T-K.
 - [ ] **T-I** Play rdft2. It has only been seen in attract: no coin, no start,
       no gameplay. Sprite starvation and the RISE10 fetch path have been
       checked against captures, never against a live game under load, which is
       exactly where 13b's starvation showed up on rdfts.
-- [ ] **T-F** The JTAG instrument, before anything else on hardware.
-      `spi_jtag_peek.sv`'s `addr` is `source[25:0]` where bit 25 IS the go bit,
-      so every PEEK reads 32 MB high -- harmless on a 32 MB module, useless on
-      the 64 MB one rdft2 needs. One line. Section 10c. (The probe width and
-      the Tcl offsets are fixed already; this is the third instrument bug and
-      the only one still standing.)
-- [ ] **T-G** rdfts' SPRITES checksum still mismatches while PRG, CHARS and
-      TILES are byte-exact. Data, or the checker's own reads under
-      sprite-engine contention -- read `passes` and `sum SPRITES` twice and see
-      whether the sum moves. T-F is what would settle it directly.
+- [x] **T-F** The JTAG instrument. **Confirmed on hardware, and it exposed a
+      second instrument bug on the way** (`go` and the address not updating
+      atomically -- one read in seven landed on a neighbouring word; fixed in
+      the Tcl, 120/120 after). Section 10d has the measurements.
+      `spi_jtag_peek.sv`'s `addr` was `source[25:0]`
+      where bit 25 IS the go bit, so every PEEK read 32 MB high -- harmless on a
+      32 MB module, useless on the 64 MB one rdft2 needs. Section 10c.
+      **Fixed by widening rather than by masking**, which is the option 10c
+      leaves open and the map turns out to require: `SDR_SPRITES_BASE` is
+      0x1100000 and the sprites are 24 MB, so the image runs to 41 MB and a
+      25-bit address could not reach the top 9 MB of it -- exactly the region
+      T-G is about. So `source` is 27 bits now, `go` is `source[26]` and `addr`
+      is a full `source[25:0]`; `tools/jtag_peek.tcl` sends `dec2bin $addr 26`.
+      Builds clean and every clock is still positive with TNS 0.000 (clk_ram
+      +0.961, clk_sys +1.869, clk_cpu +4.293). **Not yet exercised over JTAG**
+      -- the first PEEK on hardware is what confirms it, and T-G is the thing
+      to point it at.
+- [x] **T-G** rdfts' SPRITES checksum. **Neither the data nor the read path:
+      the checker's own expected constant was stale.** The sprite interleave
+      (21d8192) permuted the bytes within each tile, which changes a sum over
+      32-bit words while leaving every byte present, and `SUM_SPRITES` was
+      never re-derived from 68ccd06. Hardware now reports `ok bits 1111`,
+      `fails 0`. Confirmed two independent ways before touching it: 384/384
+      words exact across the 12 MB region against the reference image, and the
+      sum computed over that image equals what the hardware reported. Section
+      10d; `build_sdram_image.py --sums` stops it recurring.
+- [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
+      measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
+      differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.
+      MAME's `spi()` routes YMF output 0 to the left speaker and 1 to the
+      right -- the cartridge PCB has a left/right connector -- while `sxx2e()`
+      is `ALL_OUTPUTS -> mono`. So this is per-BOARD, not per-set, and rdfts is
+      correct as it stands. `ymf271_synth.sv` already computes `g0` and `g1`
+      per slot and then discards the separation in `cvsum`; the work is a
+      second accumulator and a `set_id` select in `spi_top.sv`. Nothing about
+      the music is wrong -- the spectra match -- so this is fidelity, not a
+      fault.
 - [x] **T-A** clk_ram timing. Was -0.292; every build since is positive with
-      TNS 0.000 (the deployed one is **+1.001**), by registering `rom_loader`'s
+      TNS 0.000 (the deployed one is **+0.352**, and it read +0.961 one fit
+      earlier from the same source -- see the warning about spread), by registering `rom_loader`'s
       part table and its destination and `sdram.sv`'s emergency-refresh
       compare. Section 10a(2), worth reading for the fit that got WORSE in the
       middle and for how much clk_ram moves between fits.

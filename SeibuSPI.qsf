@@ -346,3 +346,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/ymf271_synth.sv
 set_global_assignment -name QIP_FILE rtl/t80/T80.qip
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb3.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rom_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rise10_decrypt.sv

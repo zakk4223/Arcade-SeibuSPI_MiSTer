@@ -3,7 +3,7 @@
 //
 //  Two In-System Sources & Probes instances:
 //
-//    PEEK  source = {go, addr[25:0]}   probe = {ack, data[63:0]}
+//    PEEK  source = {go, addr[25:0]}   probe = {ack, data[63:0]}   (27 bits)
 //          Writing an address and flipping `go` issues one 64-bit SDRAM read;
 //          `ack` flips back when `data` is valid. tools/jtag_peek.tcl drives it.
 //
@@ -114,8 +114,12 @@ module spi_jtag_peek
 	                  + 4     // ok
 	                  + 32*4; // sum_sprites, sum_tiles, sum_chars, sum_prg
 
-	wire [25:0] source;
-	wire        go   = source[25];
+	// 27 bits, not 26: `go` sits ABOVE the address, it is not the top address
+	// bit. Sharing bit 25 read every PEEK 32 MB high whenever go was 1, and
+	// capped the reachable address at 32 MB -- which does not cover
+	// SDR_SPRITES_BASE + 24 MB on the 64 MB module rdft2 needs.
+	wire [26:0] source;
+	wire        go   = source[26];
 	wire [25:0] addr = source[25:0];
 
 	reg        ack;
@@ -129,7 +133,7 @@ module spi_jtag_peek
 		.sld_instance_index      (0),
 		.instance_id             ("PEEK"),
 		.probe_width             (65),
-		.source_width            (26),
+		.source_width            (27),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("YES")
 	)

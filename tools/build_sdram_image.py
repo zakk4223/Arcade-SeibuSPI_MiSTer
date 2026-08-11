@@ -17,7 +17,12 @@ DERIVED rather than copied -- built here by the same code as
 tools/build_soundflash.py, which is checked bit-for-bit against MAME.
 
 Usage:
-    tools/build_sdram_image.py rdft.zip out.bin [--region tiles,chars]
+    tools/build_sdram_image.py rdft.zip out.bin [--region tiles,chars] [--sums]
+
+--sums prints the four region checksums in the exact form rtl/spi_romcheck.sv
+declares them, so the hardware checker's constants can be re-derived rather than
+remembered. They go stale whenever a region's LAYOUT changes, which is not the
+same as its contents changing -- see the note above print_romcheck_sums().
 """
 
 import os
@@ -237,6 +242,32 @@ def main():
     with open(outpath, "wb") as f:
         f.write(image)
     print("wrote %s (%d parts, %d bytes)" % (outpath, placed, len(image)))
+
+    if "--sums" in sys.argv:
+        print_romcheck_sums(image)
+
+
+# rtl/spi_romcheck.sv walks four regions on hardware and compares them against
+# constants that live in that file. Nothing checked those constants against the
+# image, so when the sprite interleave permuted the sprite bytes the SPRITES
+# constant went stale and the checker reported a failure on a perfect download.
+# Print them here, where they are derived, so re-deriving is one command.
+def print_romcheck_sums(image):
+    import struct
+
+    regions = [
+        ("SUM_PRG",     BASE["prg"],     0x200000),
+        ("SUM_CHARS",   BASE["chars"],   0x030000),
+        ("SUM_TILES",   BASE["tiles"],   0x600000),
+        ("SUM_SPRITES", BASE["sprites"], 0xC00000),
+    ]
+    print("\nrtl/spi_romcheck.sv constants for this image:")
+    for name, base, size in regions:
+        total = 0
+        for off in range(base, base + size, 8):
+            lo, hi = struct.unpack_from("<II", image, off)
+            total = (total + lo + hi) & 0xFFFFFFFF
+        print("\tlocalparam [31:0] %-11s = 32'h%08X;" % (name, total))
 
 
 if __name__ == "__main__":
