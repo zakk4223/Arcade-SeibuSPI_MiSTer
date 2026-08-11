@@ -660,6 +660,55 @@ address feeding a `call`. Then disassemble THAT call to classify the generation.
 Cross-check the summed `len` against the payload extent in MAME's nvram before
 believing any of it.
 
+### Resume point: what rfjet still needs (2026-08-11)
+
+The flash image is done. What is left is the same list rdft2 worked through, and
+most of it is already written down elsewhere in this file: the tile/text keys
+(section 5.2's table -- `0xAEA754 / 0xFE8530 / 0xCCB666`), the 8 MB sprite chunk
+stride (section 4), `set_id = 05` and one more arm in `rom_loader` (the rdft2
+part-table section), and RISE11's shape (section "What else `seibuspi.cpp`
+covers"). Four things were NOT recorded and are corrections or additions:
+
+**1. The rfjet CARTRIDGE is not SXX2G, and none of the SXX2G clock work applies.**
+MAME runs `rfjet` on the `rdft2` machine config -- `spi()` plus `rdft2_map` --
+so the YMF271 stays at **16.9344 MHz** and the Z80 at 7.159 MHz. The 16.384 MHz
+YMF, the `clock_correction` scaling of every envelope and LFO table, and the
+fractional Z80 CE are `rfjets` / `rfjetsa` problems only. The board table above
+lists rfjet under SXX2C and rfjets under SXX2G, which is correct but easy to
+read the wrong way round; this is the sentence that says it outright.
+
+`rdft2_map` also means `rise_map`, i.e. sprite DMA at 0x562 rather than 0x50E --
+already handled, `spi_io.sv:234` decodes both, and rdft2 exercises it. Not a
+gap, recorded here so it does not get re-investigated.
+
+**2. RISE11's keys for rfjet**, from `seibuspi_rise11_sprite_decrypt_rfjet`:
+
+    0xABCB64, 0x55AADD, 0xAB6A4C, 0xD6375B, 0x8BF23B, and a trailing flag 0
+
+`feversoc` passes a different five and a flag of 1, which is what the flag
+selects between; take all six as inputs the way `spi_tile_decrypt` takes its
+keys. Remember RISE11 also needs the word index `i` -- unlike RISE10 it is NOT
+address-independent, so the fetch has to supply it.
+
+**3. rfjet's Z80 program is at `sound1.u0222[0x44000]`, NOT `[0x60000]`.**
+rdft2's is at 0x60000 and the note above says so, so this is exactly the kind of
+constant that gets copied across by mistake. Verified by signature: `C3 67 00`
+(`jp 0x0067`) occurs at precisely one place in the whole rfjet set, and 0x44000
+is where it is. It sits immediately past the compressed audio, which ends at
+0x41BC7 -- consistent, and the same "program follows the samples" arrangement as
+rdft2, just at a different offset because the payload is smaller.
+
+**The length is NOT confirmed.** 0x44000..0x7FFFF is 0x3C000 (240 KB), which is
+neither rdft's 256 KB nor rdft2's 128 KB, so do not assume it. Pin it with a tap
+on the 0x688 transfer (`z80_prg_transfer_w`) the way section 0 did for rdft --
+count the bytes and compare both ends against the ROM.
+
+**4. rfjet is a 46.44 MB set** -- 2 program + 0.25 Z80 + 0.19 chars + 9 tiles +
+24 sprites + 10 sound01 + 1 flash. Pre-flashed it drops sound01 only if the Z80
+program is lifted out of it separately, so budget the sprites and tiles: this
+needs a **64 MB module** and cannot ride along on a 32 MB build. That is a
+board requirement, not an RTL one (`sdram.sv` already routes addr[25]/addr[26]).
+
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
 `rtl/spi_rom_decode.sv` sits between ioctl and the SDRAM writer in
