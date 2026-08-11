@@ -556,6 +556,110 @@ job table the same way (PC tap -> callers -> the `0x2A1F2B` equivalent) and read
 the jobs off. The codec and the fetcher are library code and will very likely be
 identical.
 
+### EVERY SXX2C cartridge's flash image is now derivable (2026-08-11)
+
+That prediction held, and then some. All seven SXX2C sets in the ROM collection
+build offline and verify **bit-for-bit against MAME's own flash nvram**:
+
+```
+tools/build_soundflash.py <set>.zip out.bin [--set NAME] --verify
+```
+
+| set        | gen | job table  | flash payload | sha256 (2 MB image) |
+|------------|-----|------------|---------------|---------------------|
+| `senkyu`   | A   | `0x302324` | `..0x1EEA11`  | `dd081eba…` |
+| `batlball` | A   | `0x302290` | `..0x1EEA11`  | `09c4b1ec…` |
+| `ejanhs`   | A   | `0x3026AC` | `..0x1FF891`  | `7693933a…` |
+| `viprp1`   | A   | `0x200760` | `..0x18F1FF`  | `27449543…` |
+| `rdft`     | B0  | `0x20174D` | `..0x1D9642`  | `659df8c6…` |
+| `rdft2`    | B1  | `0x201B55` | `..0x1EF333`  | `c0da4614…` |
+| `rfjet`    | B1  | `0x203597` | `..0x1E94C9`  | `fb02c059…` |
+
+**Nothing here was found by running the game.** The tables were located
+statically in the program images, and the emulator was used only afterwards, as
+the check. That is the opposite order from the rdft2 arc and it is the reason
+this took one session instead of three.
+
+**The updater comes in three generations**, and telling them apart is the whole
+job. All three walk the same 12-byte record — `u32 src, u32 len, u8 mode, u8
+flag, u16 pad`, terminated by `src == 0xFFFFFFFF` — reached through the same
+argument struct `{stamp, callback, tableA[, tableB]}`, and all three open the
+flash session at address 4 and write the four stamp bytes LAST. What differs is
+what `mode` and `flag` mean:
+
+| gen | sets                                | `mode` is         | `flag` | jobs are |
+|-----|-------------------------------------|-------------------|--------|----------|
+| A   | `senkyu` `batlball` `ejanhs` `viprp1` | an address STRIDE | unused | always DECODED |
+| B0  | `rdft`                              | a lane-mode enum  | unused | always COPIED |
+| B1  | `rdft2` `rfjet`                     | a lane-mode enum  | used   | per job |
+
+Gen A's fetcher (senkyu `0x33C4B5`) is three instructions — take the byte, add a
+literal stride. A ROM occupying one byte in four is read with stride 4. Gen B's
+(rdft2 `0x2A1C34`) caches a dword and hands out lanes: mode 0 takes 1 byte per
+dword, mode 1 takes 2, otherwise 4. Different encodings of the same idea, and
+both then apply the identical 2 MB bank skip (`cmp esi,0x400000 / test
+esi,0x1fffff / add esi,0x200000`) that walks MAME's `ROM_CONTINUE` split.
+
+**Gen A has no verbatim path at all and gen B0 has no decoder at all.** Those
+two facts are what the byte-9 `flag` reading gets wrong if you assume the rdft2
+layout is universal. rdft's records read `flag == 0` for both jobs, which under
+rdft2's rules would mean "decode" — and rdft's payload is famously a plain
+concatenation. The walkers settle it: rdft's (`0x26D93D`) has no `cmp BYTE PTR
+[ebx+0x9],0x0` branch at all, it just calls the copier. Gen A's walker
+(`0x33C8B4`) likewise reads only `[ebx+8]` and calls one routine, which takes no
+length argument — a copier would need one, a self-terminating decompressor does
+not. **Read the walker, not the record.**
+
+**The codec is bit-identical across generations.** senkyu's decompressor at
+`0x33C560` is the same BPE-over-DPCM as rdft2's `0x2A1D20`, instruction for
+instruction in substance: LE `nblocks`, per-block 256-entry pair table with the
+`>= 0x80` skip code and the `left[i] == i` unused encoding, BE block size, stack
+walk, and a DPCM accumulator zeroed once per call. Gen A holds the table as 256
+*words* (left low, right high) rather than two arrays; that is a storage detail,
+not a format one. So one `expand()` serves all seven sets.
+
+**In gen A the `len` field is output bytes, and it is not used to stop.** It is
+summed up front only to scale the progress bar. That it nonetheless matches the
+real payload extent exactly, on all seven sets, is the cheapest possible check
+that a candidate table is the real one — do that before running anything.
+
+**viprp1 is the odd one out and matters for the MRA.** It has no second sound
+ROM, so its compressed tail lives in the **program ROM**: job 2 is
+`src=0x00365200, mode=1`, reading the 4-way-interleaved 386 image linearly.
+Every other set's decode source is one file read in file order, which an MRA
+slices trivially; viprp1's needs `<interleave>` over `seibu1.211..seibu4.29` from
+file offset `0x59480`. It also consumes 237,614 bytes, which is not a multiple of
+4, so the part cannot end on a dword boundary — the decoder stops itself, but the
+loader's "input spent" condition has to tolerate 2 unconsumed bytes or the next
+part shifts. That is a real trap and it is the one thing in this section that is
+not yet exercised by anything.
+
+**Input/output sizes, which are the MRA slice lengths:**
+
+| set        | job 1                              | job 2                                     |
+|------------|------------------------------------|-------------------------------------------|
+| `senkyu`   | decode `pcm-1[0..]` 1003392→1334444 | decode `fb_7[0..]` 504014→691554          |
+| `batlball` | identical to `senkyu`, byte for byte | identical to `senkyu`                    |
+| `ejanhs`   | decode `pcm1[0..]` 1040986→1397283  | decode `_7[0..]` 485581→697963            |
+| `viprp1`   | decode `v_pcm[0..]` 977063→1291669  | decode **maincpu**`[0x165200]` 237614→343143 |
+| `rdft`     | copy `pcm[4..]` 1708978             | copy `seibu_8[0..]` 230029                |
+| `rdft2`    | copy `pcm[4..]` 1557059            | decode `sound1[0..]` 312933→471277        |
+| `rfjet`    | copy `pcm-d[4..]` 1613265          | decode `sound1[0..]` 269320→390901        |
+
+`batlball` being byte-identical to `senkyu` in its jobs, and differing only in
+the region stamp and in where the table sits (`0x302290` vs `0x302324`), is what
+a region clone looks like here. Do not assume a clone shares the parent's table
+ADDRESS — it does not.
+
+**How to do this for a set not listed.** Build the interleaved program image,
+then scan it **unaligned** (the tables sit at odd addresses — rdft2's is at
+`0x201B55`) for 12-byte records whose `src` lands in `0xA00000..0x13FFFFF`,
+walking to a `0xFFFFFFFF` terminator. Confirm by finding the struct that follows
+the tables, whose first dword is `0x003FFFFC`, and the `push imm32` of its
+address feeding a `call`. Then disassemble THAT call to classify the generation.
+Cross-check the summed `len` against the payload extent in MAME's nvram before
+believing any of it.
+
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
 `rtl/spi_rom_decode.sv` sits between ioctl and the SDRAM writer in
