@@ -1079,21 +1079,52 @@ Level: MAME is 1.35x the hardware here (rms 2324 vs 1728), against 2.58x on
 rdft2. Still unexplained, still a level difference and not a shape one; every
 figure above is normalised.
 
-### The gameplay hitch: instrumented, not yet explained
+### The gameplay hitch went away with the bank fix (2026-08-11)
 
-The quarter-second stalls are NOT explained by the above. The Z80 executes
-entirely out of the fixed 0x0000-0x1FFF window -- 2,160 PC samples, 100% below
-0x2000 -- so zeroed banks corrupt data the driver reads, they do not send it off
-into a NOP field. It keeps servicing the command FIFO.
+Played through with the fixed core and the marks cleared: **worst frame gap
+1054**, one frame, and the two-frame stall latch never fired. The player
+confirms it independently -- the hitching is gone.
 
-The standing suspect is 14.7: ch3 is the bottom of the SDRAM priority list, and
-gameplay is when ch2/ch4 are busiest. A Z80 held off long enough stops draining
-the 512-entry command FIFO, `snd_full` is a real flag now, and the 386 then
-spins in the sound handshake -- a freeze with no video symptom at all.
+**A correction, because the reasoning below it was wrong in a way worth
+recording.** This section previously said the sound FIFO and ch3 starvation were
+both "cleared" as suspects. Every one of those readings was taken on the FIXED
+core. The broken core was never instrumented, so what was actually shown is that
+neither mechanism is active *now* -- not that neither caused the original stall.
+Ruling a cause out requires measuring it under the conditions that produced the
+symptom, and by the time the instruments existed those conditions were gone.
 
-Rather than guess, three high-water marks went into the same build. **All three
-are maxima, not counters**, because every existing counter here wraps between
-JTAG samples and 13b and 14.9 both record being lied to by one:
+The likely mechanism, and it is one none of the four marks watch: the
+**Z80 -> 386** direction. The 386 polls 0x684 d1 for a reply from the sound
+program. `fifo2 push`/`pop` run to about 16 for a whole session, so those
+messages are rare and individually load-bearing. A driver working from a null
+pointer table can easily fail to send one, and then the 386 waits. The marks
+watch the 386 -> Z80 FIFO filling instead, which is the other direction.
+
+Not proven. Proving it means putting the old core back and measuring the stall
+while it happens, which costs a build and a deploy to confirm something already
+fixed. Recorded rather than done, and T-O is left open at low priority in case
+it returns.
+
+### What the instruments say now, and what they are still worth
+
+These were built while the hitch still looked unrelated to the bank bug, and
+the reasoning was: the Z80 executes entirely out of the fixed 0x0000-0x1FFF
+window -- 2,160 PC samples, 100% below 0x2000 -- so zeroed banks corrupt data
+the driver reads, they do not send it off into a NOP field, and it keeps
+servicing the command FIFO. True as far as it goes, and it missed the reply
+direction; see the correction above.
+
+The suspect at the time was 14.7: ch3 is the bottom of the SDRAM priority list,
+and gameplay is when ch2/ch4 are busiest. A Z80 held off long enough stops
+draining the 512-entry command FIFO, `snd_full` is a real flag now, and the 386
+then spins in the sound handshake -- a freeze with no video symptom at all. On
+the fixed core that is measured and small: worst single fetch 1.2 us, FIFO peak
+14 of 511, never full. It is a live measurement of 14.7's concern rather than a
+proof about the stall that has already gone.
+
+Rather than guess, four high-water marks went into the build. **All four are
+maxima, not counters**, because every existing counter here wraps between JTAG
+samples and 13b and 14.9 both record being lied to by one:
 
 * `fifo peak` -- deepest the 386 -> Z80 FIFO has ever got, of 511.
 * `fifo full` -- longest unbroken FIFO-full run, in 1024-clk_sys (17.87 us)
@@ -1107,7 +1138,11 @@ JTAG samples and 13b and 14.9 both record being lied to by one:
   never say: that counter counts misses and wraps, and does not measure how long
   any of them waited.
 
-All four print from `tools/slop sound`.
+All four print from `tools/slop sound`, and `tools/slop clear` (CTRL bit 7)
+re-arms them -- which is not optional, because boot alone puts 0.387 s into
+`frame gap`. A fifth would be worth having if the hitch ever returns: nothing
+here watches the 386 waiting on the Z80's REPLY at 0x684 d1, which is the
+direction the correction above points at.
 
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
@@ -3273,18 +3308,19 @@ whether it is RIGHT.
       Playing it is what found the bank 4-7 bug in the first place. What is
       still owed: actual play -- coin, start, a credit through -- which is also
       what T-O needs.
-- [ ] **T-O** The gameplay hitch: a quarter to half a second, occasionally,
-      during play. NOT explained by the bank bug -- the Z80 executes entirely
-      from the fixed 0x0000-0x1FFF window, so zeroed banks corrupt what it
-      reads without derailing what it runs. Standing suspect is 14.7, ch3 at
-      the bottom of the SDRAM priority list under gameplay sprite load: a Z80
-      held off stops draining the command FIFO, and `snd_full` is a real flag,
-      so the 386 spins in the handshake. Four high-water marks are in the build
-      to settle it -- `fifo peak`, `fifo full`, `frame gap`, `fetch wait` in
-      `tools/slop sound`. Read `frame gap` first: it says whether the 386
-      stopped at all, without assuming why. If `fetch wait` is the culprit, the
-      levers are a wider Z80 line buffer (it is one 8-byte line today) or
-      moving ch3 up the arbiter.
+- [~] **T-O** The gameplay hitch -- a quarter to half a second, occasionally,
+      during play. **Gone with the bank 4-7 fix**: a full play session records a
+      worst frame gap of 1054 units, one frame, and the two-frame stall latch
+      never fires. Left open rather than closed because it was never explained.
+      Every reading that "cleared" the sound FIFO and ch3 was taken on the FIXED
+      core, which shows neither is active now, not that neither caused it. The
+      likely mechanism is the one none of the four marks watch: the 386 waiting
+      at 0x684 d1 for a reply the sound program, working from a null pointer
+      table, never sent -- `fifo2 push`/`pop` run to about 16 for a whole
+      session, so those messages are rare and individually load-bearing.
+      Confirming it means putting the old core back to measure a stall that is
+      already fixed. If it ever returns: `tools/slop clear`, play, then
+      `tools/slop sound` prints `stall at CS:EIP`.
 - [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.

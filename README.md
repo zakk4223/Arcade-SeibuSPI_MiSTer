@@ -94,11 +94,15 @@ rather than the synthesis: the worst of them correlates **0.9972** spectrally,
 so the same sounds are playing at different moments. `tools/compare_audio.py`
 is that measurement, written down.
 
-**One symptom is still open (T-O):** an occasional quarter- to half-second
-hitch during gameplay. Four high-water marks went in to chase it and have
-already cleared two suspects — the sound FIFO never gets deeper than 11 of 511
-and is never full, and the worst single Z80 SDRAM fetch is 1.0 µs, so neither
-the sound handshake nor ch3 starvation is stalling the 386.
+**The gameplay hitch went with it.** rfjet also stalled a quarter to half a
+second occasionally during play; with the fix in, a full play session records a
+worst frame gap of 1054 units — one frame — and the two-frame stall latch never
+fires. Four high-water marks in `tools/slop sound` say so (`clear` re-arms
+them). Note what that does and does not establish: those readings are all from
+the *fixed* core, so they show neither the sound FIFO nor ch3 starvation is
+active now, not that either caused the original stall. The likely mechanism is
+the one none of them watch — the 386 waiting at 0x684 d1 for a reply the sound
+program never sent. `PLAN.md` T-O, left open at low priority.
 
 **rdft2 runs on hardware** — story intro, then the title screen with sprites,
 with music that matches MAME's. Its download is byte-exact: 35,752,108 bytes
