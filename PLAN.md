@@ -945,6 +945,170 @@ records for rdft2), and the sound has not been matched against MAME the way 10d
 did for rdft2 -- it plays and the voice count is plausible, which is not the
 same thing.
 
+### rfjet's music was never playing: banks 4-7 of the Z80 read as zero (2026-08-11)
+
+Played on the board for the first time, and the report was "the sound is very
+bad" plus an occasional quarter-second hitch in gameplay. The sound half is
+settled and it is a one-line constant; the hitch is instrumented rather than
+solved, below.
+
+`spi_sound.sv` read the top half of the 256 KB Z80 region back as a constant
+zero:
+
+```
+// The Z80 ROM is 128 KB in a region padded to 256 KB. MAME fills the pad
+// with zeros; SDRAM would hand back whatever was there at power-on, so the
+// upper half reads as zero here too rather than as noise.
+wire [7:0] rom_byte = rom_off[17] ? 8'h00 : line_byte;
+```
+
+`rom_off[17]` is the top bit of the bank register, so that deletes **banks 4
+through 7** -- and rfjet's Z80 program is 240 KB, not 128. The comment is a
+description of rdfts, written when rdfts was the only set, and it is exactly
+the class of per-set constant the rfjet notes above warn about twice.
+
+**What the game does with those banks, measured rather than assumed**
+(`tools/mame_z80bank.lua`, 75 s of attract):
+
+| set     | banks the driver selects | highest banked byte fetched |
+|---------|--------------------------|------------------------------|
+| `rdfts` | 0, 1, 2                  | 0x1659E                      |
+| `rdft`  | 0, 1                     | 0x0A257                      |
+| `rdft2` | 0, 2                     | 0x14A84                      |
+| `rfjet` | 0, 1, 3, **5**           | **0x2F168**                  |
+
+rfjet spends 19,478 of its 41,657 bank selects in bank 5. So this bug is
+rfjet-only in practice, which is why three sets shipped over it.
+
+It was latent for **rdft** as well, and the fix changes its behaviour: rdft's
+program is a full 256 KB, so MAME's region has real bytes in banks 4-7 where the
+core returned zeros. Attract never goes past bank 1 there, which is why nothing
+showed. rdfts and rdft2 are 128 KB programs and read exactly as before.
+
+**Bank 5 is the music.** The reads start at t=1.0 s with a table of little-endian
+`{pointer, bank}` records at 0x2CC9C -- 0xCCD7/05, 0xCCF2/05, 0xCD54/05 -- and
+then stream sequence data from 0x2CD82, 0x2CEA9, 0x2D1BA onward for as long as
+the game runs. Zeroed, the sequencer is handed a null pointer table.
+
+**Reproduced in MAME, which is what makes this a diagnosis rather than a
+theory.** `tools/mame_z80_zerotop.lua` blanks exactly the same reads inside the
+emulator -- on the read side, because that region is RAM the 386 fills at boot,
+so anything cleared before the machine runs is simply written over. 60 s of
+attract:
+
+| run                              | RMS    | peak  |
+|----------------------------------|--------|-------|
+| stock                            | 2171.5 | 22481 |
+| pass-through tap (control)       | 2171.5 | 22481 |
+| bank >= 4 reads blanked          | **0.0**| **0** |
+
+The control is bit-identical to stock, so the tap is not what silences it.
+
+**And this is why the hardware telemetry said the sound was fine.** With the
+banks blanked MAME still writes the YMF at **1081 registers/s** against a
+healthy **1038/s** -- the driver's per-tick refresh does not care that the
+sequence data is zeros. The board reported 55,442 YMF writes and 12 voices
+sounding and that was recorded as "sound is running". It was running; it was
+playing nothing. Section 10d already said the telemetry "happily reports a
+healthy engine playing the wrong thing" and this is the second instance.
+
+**The fix, and why it is not just deleting the test.** The pad still has to read
+as MAME's zeros rather than as whatever SDRAM held at power-on, so the bound
+became what was actually written: `spi_io` keeps a high-water mark of the 386's
+0x688 download (`z80dl_end`, kept separately because 0x68C rewinds the pointer),
+and SXX2E uses the 128 KB ROM part's size. Compared per 8-byte line, rounded up
+so an unaligned download keeps the valid bytes of its last line. The map has the
+room: `SDR_Z80_BASE` is 0x200000 and `SDR_CHARS_BASE` is 0x240000, a full 256 KB
+apart, so banks 4-7 were addressing dedicated space that simply never got read.
+
+**The address arithmetic itself was checked, not assumed.**
+`tools/mame_z80map.lua` requires every byte MAME's Z80 fetches to equal the byte
+at the region offset the RTL's formula computes -- 65,191,658 fixed-window
+fetches and 3,576 banked ones, 0 disagreements -- and confirms the region is
+0x40000 with eight 32 KB banks. Worth having: the region SIZE in that module was
+wrong, so the rest of it deserved more than a reading.
+
+### rfjet's sound, measured against MAME (2026-08-11)
+
+The fix deployed, and then measured the way 10d measured rdft2 -- because
+"voices went from 12 to 30" is the same grade of evidence as "12 voices, sound
+is running", which is what hid the bug in the first place.
+
+198 s of hardware attract off the Elgato against 420 s of MAME, aligned by
+envelope correlation (the capture starts mid-attract; the lock landed 135.8 s
+into the reference). `tools/compare_audio.py`, which is 10d's measurement
+written down instead of redone by hand.
+
+| measurement                                     | rfjet        | rdft2 (10d) |
+|-------------------------------------------------|--------------|-------------|
+| envelope r vs MAME, 20 ms RMS                   | 0.9025       | 0.951       |
+| long-term spectrum r                            | **0.9855**   | 0.9927      |
+| per-second spectral r, median                   | **0.9844**   | 0.967       |
+| per-second above 0.8                            | **96%**      | 87%         |
+| silence agreement                               | 99.9%        | 99.9%       |
+| windows hardware silent while MAME plays        | 9 of 9,900   | 0           |
+
+**The envelope figure is lower than rdft2's and it is not drift.** Split into
+six 30 s chunks, each aligned independently, four read 0.957-0.981 and two read
+0.677 and 0.407. Uniform clock drift would have lowered all six equally, so
+something is different in two passages.
+
+What is different is the *timing*, not the sound. In the worst chunk -- envelope
+r 0.407 -- the spectrum correlates at **0.9972** with 100% of its seconds above
+0.8. The same instruments and samples are playing; they are playing at different
+moments. That is what an attract DEMO doing different things looks like: it is
+real gameplay, so a small timing difference changes which enemies die when and
+therefore which effects fire. It is not proof -- proving it wants a second
+capture to show the weak windows move -- but wrong synthesis cannot produce a
+0.997 spectrum, and a wrong sequencer cannot produce a 0.98 median across every
+other chunk.
+
+One alignment lesson, the same one 15.4 records: chunk 1's independent search
+preferred an offset 207 s away from the globally consistent one, because the
+attract LOOPS and a 30 s window matches its own repetition slightly better. Its
+correlation at the consistent offset is 0.9527, which is the number that means
+something. Always check that per-chunk offsets are consistent before believing a
+per-chunk correlation.
+
+**T-K reconfirmed for rfjet, independently:** hardware side/mid **-82.4 dB**
+(mono, and that is the capture path's own floor), MAME **-16.3 dB** (genuinely
+stereo). Same divergence 10d found on rdft2 at -73.7 vs -14.5, and the same
+cause -- `spi()` routes YMF output 0 left and 1 right, `sxx2e()` sums to mono.
+
+Level: MAME is 1.35x the hardware here (rms 2324 vs 1728), against 2.58x on
+rdft2. Still unexplained, still a level difference and not a shape one; every
+figure above is normalised.
+
+### The gameplay hitch: instrumented, not yet explained
+
+The quarter-second stalls are NOT explained by the above. The Z80 executes
+entirely out of the fixed 0x0000-0x1FFF window -- 2,160 PC samples, 100% below
+0x2000 -- so zeroed banks corrupt data the driver reads, they do not send it off
+into a NOP field. It keeps servicing the command FIFO.
+
+The standing suspect is 14.7: ch3 is the bottom of the SDRAM priority list, and
+gameplay is when ch2/ch4 are busiest. A Z80 held off long enough stops draining
+the 512-entry command FIFO, `snd_full` is a real flag now, and the 386 then
+spins in the sound handshake -- a freeze with no video symptom at all.
+
+Rather than guess, three high-water marks went into the same build. **All three
+are maxima, not counters**, because every existing counter here wraps between
+JTAG samples and 13b and 14.9 both record being lied to by one:
+
+* `fifo peak` -- deepest the 386 -> Z80 FIFO has ever got, of 511.
+* `fifo full` -- longest unbroken FIFO-full run, in 1024-clk_sys (17.87 us)
+  units. A quarter-second block reads about 13,974.
+* `frame gap` -- longest gap between sprite DMA triggers, same units. The game
+  loop pushes the sprite list once a frame, so one frame at 53.99 Hz is 1036
+  units. This one is deliberately theory-free: it says whether the 386 stopped
+  at all, whatever the cause, and the two above say whether sound is why.
+* `fetch wait` -- longest single Z80 ROM fetch, in raw clk_sys cycles. This is
+  the one that names ch3 starvation directly, and it is what `rom stalls` could
+  never say: that counter counts misses and wraps, and does not measure how long
+  any of them waited.
+
+All four print from `tools/slop sound`.
+
 ### The decoder is in the core, and the MRA chooses it (2026-08-09)
 
 `rtl/spi_rom_decode.sv` sits between ioctl and the SDRAM writer in
@@ -3100,10 +3264,27 @@ whether it is RIGHT.
       four SDRAM regions checksumming identical to the reference image, 12
       voices, 0 synth overruns, and 1-2 starved sprite lines per frame at
       ~14,000 y-hits. Timing +0.357 on clk_ram.
-- [ ] **T-N** Play rfjet, and listen to it against MAME. Attract only so far:
-      no coin, no start, no gameplay, and the sound is "plausible" rather than
-      measured -- 10d's `-wavwrite` comparison is what "measured" means here.
-      Same shape as T-I, and worth doing as one job across both sets.
+- [~] **T-N** Play rfjet, and listen to it against MAME. **The listening half is
+      DONE and passes**: 198 s of attract against 420 s of MAME gives spectrum
+      r 0.9855, per-second median 0.9844 with 96% above 0.8, silence agreement
+      99.9% (`tools/compare_audio.py`). Envelope r is 0.9025 and the two weak
+      30 s chunks are event timing, not synthesis -- the worst of them
+      correlates 0.9972 spectrally, which is the attract demo diverging.
+      Playing it is what found the bank 4-7 bug in the first place. What is
+      still owed: actual play -- coin, start, a credit through -- which is also
+      what T-O needs.
+- [ ] **T-O** The gameplay hitch: a quarter to half a second, occasionally,
+      during play. NOT explained by the bank bug -- the Z80 executes entirely
+      from the fixed 0x0000-0x1FFF window, so zeroed banks corrupt what it
+      reads without derailing what it runs. Standing suspect is 14.7, ch3 at
+      the bottom of the SDRAM priority list under gameplay sprite load: a Z80
+      held off stops draining the command FIFO, and `snd_full` is a real flag,
+      so the 386 spins in the handshake. Four high-water marks are in the build
+      to settle it -- `fifo peak`, `fifo full`, `frame gap`, `fetch wait` in
+      `tools/slop sound`. Read `frame gap` first: it says whether the 386
+      stopped at all, without assuming why. If `fetch wait` is the culprit, the
+      levers are a wider Z80 line buffer (it is one 8-byte line today) or
+      moving ch3 up the arbiter.
 - [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.

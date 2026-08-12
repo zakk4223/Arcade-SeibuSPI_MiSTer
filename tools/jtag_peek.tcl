@@ -166,8 +166,12 @@ if {$mode eq "list"} {
     puts "EIP        = [bin2hex [string range $p 138 169]]"
 } elseif {$mode eq "sound"} {
     set p [read_probe_data -instance_index [index_of "SNDV"]]
-    # 96 bits, MSB first: 0..15 z80 pc, 16..31 fifo reads, 32..47 ymf writes,
-    # 48..63 rom stalls, 64..79 synth overruns, 80..95 slots sounding
+    # 169 bits, MSB first: 0..15 z80 pc, 16..31 fifo reads, 32..47 ymf writes,
+    # 48..63 rom stalls, 64..79 synth overruns, 80..95 slots sounding,
+    # 96..111 f2 writes, 112..127 f2 reads, 128..143 longest FIFO-full run,
+    # 144..152 peak FIFO fill, 153..168 longest sprite-DMA gap,
+    # 169..184 longest single Z80 ROM fetch wait. New fields go on the LSB
+    # side, so the offsets above them never move.
     proc fld {p a n} { return [expr 0b[string range $p $a [expr {$a+$n-1}]]] }
     puts "Z80 PC     = [bin2hex [string range $p 0 15]]  (unchanging = sound CPU not running)"
     puts "fifo reads = [fld $p 16 16]  (commands the Z80 took from the 386)"
@@ -175,6 +179,28 @@ if {$mode eq "list"} {
     puts "rom stalls = [fld $p 48 16]  (line-buffer misses that hit SDRAM)"
     puts "voices     = [fld $p 80 16]  (PCM + FM slots sounding on the last sample)"
     puts "synth ovrun= [fld $p 64 16]  (samples the engine could not finish in time)"
+    # These two are high-water marks, so unlike everything above them they mean
+    # the same thing whatever interval they are sampled over. A Z80 that stops
+    # draining the FIFO blocks the 386 in the sound handshake -- a gameplay
+    # freeze with no video symptom -- and this is what names it.
+    set pk [fld $p 144 9]
+    set fm [fld $p 128 16]
+    puts [format "fifo peak  = %d of 511  (deepest the 386 -> Z80 FIFO has ever got)" $pk]
+    puts [format "fifo full  = %d units = %.3f s  (longest unbroken block of the 386)" \
+          $fm [expr {$fm * 1024.0 / 57272727.0}]]
+    # The game loop pushes the sprite list once a frame. 1036 units is one
+    # frame at 53.99 Hz; anything much larger is the 386 having hitched, and
+    # the fifo readings above say whether the sound handshake caused it.
+    set gp [fld $p 153 16]
+    puts [format "frame gap  = %d units = %.3f s  (longest gap between sprite DMAs; 1 frame = 1036)" \
+          $gp [expr {$gp * 1024.0 / 57272727.0}]]
+    # ch3 is the lowest priority SDRAM channel, so this is how long the worst
+    # single Z80 fetch waited behind tiles, the 386, sprites and PCM. One
+    # unstarved read is tens of cycles; thousands means the sound CPU is being
+    # held off long enough to matter. 65535 means it saturated.
+    set wm [fld $p 169 16]
+    puts [format "fetch wait = %d clk = %.1f us  (worst single Z80 ROM fetch; ch3 is bottom priority)" \
+          $wm [expr {$wm / 57.272727}]]
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits

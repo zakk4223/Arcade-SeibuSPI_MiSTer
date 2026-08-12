@@ -32,7 +32,7 @@ full design notes and the task list.
 | YMF271 PCM synthesis (12 voices) | verified in simulation, music plays on hardware |
 | YMF271 FM (4-op, 2x2-op, 3-op, all 16 algorithms, feedback) | verified in simulation |
 | YMF271 LFO (pitch and amplitude) | verified in simulation |
-| Sound output as a whole | **matched against MAME's own audio on hardware** (`rdft2`) |
+| Sound output as a whole | **matched against MAME's own audio on hardware** (`rdft2`, `rfjet`) |
 
 Known gaps, all in the sound chip and none of them silent-failure risks: PCM
 interpolation and a handful of register fields nothing writes. `PLAN.md`
@@ -72,8 +72,33 @@ at, and on the board its download is byte-exact (39,303,645 in, +121,581 for
 the sample codec's expansion) with all four SDRAM regions checksumming
 identical to the reference image. Sprite starvation was the open question at
 24 MB of sprites and the answer is 1–2 lines per frame out of 224 at ~14,000
-y-hits — less than rdfts starves at half the load. Not yet played or
-sound-matched: `PLAN.md` T-N.
+y-hits — less than rdfts starves at half the load.
+
+**Then it was played, and its music had never been playing at all.**
+`spi_sound.sv` read the top half of the 256 KB Z80 region back as a constant
+zero — correct for a 128 KB program, and rfjet's is 240 KB, so banks 4 through 7
+were deleted. Bank 5 is where rfjet keeps its music: the driver spends 19,478 of
+41,657 bank selects there. Blanking exactly those reads inside MAME takes 60 s
+of attract from RMS 2171 to **RMS 0.0**, and MAME still writes the YMF at
+1081 registers/s while doing it — which is why the board's telemetry read
+"12 voices, 55,442 writes, healthy" the whole time. The region is bounded by
+what was actually written now (the 386's download high-water on a cartridge,
+the ROM part's size on SXX2E) rather than by a constant. `rdft`'s 256 KB
+program was latently affected too; `rdfts` and `rdft2` read as before.
+`PLAN.md` has the full hunt. **Fixed and then measured, not just listened to:**
+198 s of hardware attract against 420 s of MAME gives long-term spectrum
+r **0.9855**, per-second spectral median **0.9844** with **96%** above 0.8, and
+99.9% silence agreement — at or above what rdft2 scored. Envelope r is 0.9025,
+and the two 30 s passages that drag it down are the attract demo diverging
+rather than the synthesis: the worst of them correlates **0.9972** spectrally,
+so the same sounds are playing at different moments. `tools/compare_audio.py`
+is that measurement, written down.
+
+**One symptom is still open (T-O):** an occasional quarter- to half-second
+hitch during gameplay. Four high-water marks went in to chase it and have
+already cleared two suspects — the sound FIFO never gets deeper than 11 of 511
+and is never full, and the worst single Z80 SDRAM fetch is 1.0 µs, so neither
+the sound handshake nor ch3 starvation is stalling the 386.
 
 **rdft2 runs on hardware** — story intro, then the title screen with sprites,
 with music that matches MAME's. Its download is byte-exact: 35,752,108 bytes

@@ -12,7 +12,8 @@
 //    4009       r: FIFO status, d1 = data waiting
 //    400B       nop write
 //    4013       r: COIN port, active low
-//    401B       w: d0-d2 ROM bank at 8000
+//    401B       w: d0-d2 ROM bank at 8000 (eight 32 KB banks over 256 KB;
+//                  d3 is the watchdog and the driver always sets it)
 //    6000-600F  YMF271
 //    8000-FFFF  ROM, 32 KB window selected by the bank register
 //
@@ -66,10 +67,21 @@ module spi_sound
 	output            fifo2_empty,
 	input             fifo2_rd,     // level from clk_cpu; edge detected here
 	input             z80_rst_n,    // 0 = hold the Z80 in reset (0x68C d0)
+	// One past the highest Z80-region byte the 386 has downloaded. Settled
+	// before the Z80 leaves reset and static after that, so it crosses from
+	// clk_cpu the same way z80_rst_n does.
+	input      [18:0] z80dl_end,
 	// Which side of the Z80->386 FIFO is stuck, in one reading.
 	output reg [15:0] dbg_f2_wr,    // pushes by the Z80 (0x4008 write)
 	output reg [15:0] dbg_f2_rd,    // pops by the 386  (0x680 read)
 	output reg [15:0] dbg_ymf_wr,
+	// Both of these are HIGH-WATER marks, not free-running counters. Section
+	// 13b and 14.9 both record the same trap: a 16-bit counter sampled over
+	// JTAG wraps between reads and yields whatever rate you want. A maximum
+	// can be read at any interval and still means one thing.
+	output reg  [8:0] dbg_fifo_peak, // deepest the 386 -> Z80 FIFO has ever got
+	output reg [15:0] dbg_full_max,  // longest unbroken FIFO-full run, /1024 clk
+	output reg [15:0] dbg_wait_max,  // longest single ROM fetch wait, clk_sys
 	output     [15:0] dbg_stall,
 	output     [15:0] dbg_ymf_overrun,
 	output     [15:0] dbg_ymf_active
@@ -187,17 +199,54 @@ module spi_sound
 	wire line_hit = line_valid && (line_tag == rom_off[17:3]);
 	wire [7:0] line_byte = line_data[{rom_off[2:0], 3'b000} +: 8];
 
-	// The Z80 ROM is 128 KB in a region padded to 256 KB. MAME fills the pad
-	// with zeros; SDRAM would hand back whatever was there at power-on, so the
-	// upper half reads as zero here too rather than as noise.
-	wire [7:0] rom_byte = rom_off[17] ? 8'h00 : line_byte;
+	// The region is 256 KB (MAME's :audiocpu region is 0x40000, eight 32 KB
+	// bank entries) and how much of it holds a program is per set. This used to
+	// read the top half back as a constant zero, on the assumption that a
+	// 128 KB program in a padded region is universal. It is not: rfjet's
+	// program is 240 KB and its driver spends nearly half of its bank selects
+	// in bank 5, so that constant deleted the music data it reads there.
+	//
+	// The pad still has to read as MAME's zeros rather than as whatever SDRAM
+	// held at power-on, so the bound is what was actually written -- the 386's
+	// download high-water on a cartridge, and the 128 KB ROM part on SXX2E.
+	// Compared per line, not per byte: a partial line at the end is data the
+	// fetch brought in anyway.
+	// Rounded UP to the line, so a download that does not end on an 8-byte
+	// boundary keeps the valid bytes of its last line.
+	reg [15:0] rom_lim;    // first line with no data behind it
+	always @(posedge clk)
+		rom_lim <= set_sxx2c ? (z80dl_end[18:3] + {15'd0, |z80dl_end[2:0]})
+		                     : 16'h4000;   // 0x20000 >> 3
 
-	wire fetch_miss = rd_active & sel_rom & ~line_hit & ~rom_off[17];
+	wire beyond_prg = ({1'b0, rom_off[17:3]} >= rom_lim);
+
+	wire [7:0] rom_byte = beyond_prg ? 8'h00 : line_byte;
+
+	wire fetch_miss = rd_active & sel_rom & ~line_hit & ~beyond_prg;
 
 	reg        fetching;
 	reg [14:0] fetch_tag;
 	reg [15:0] dbg_stall_c;
 	assign dbg_stall = dbg_stall_c;
+
+	// ch3 is the LOWEST priority channel in sdram.sv (14.7), so a fetch can sit
+	// behind tiles, the 386, sprites and PCM. `dbg_stall_c` counts misses and
+	// wraps; this is how long the worst ONE of them actually waited, in
+	// clk_sys cycles (17.46 ns), saturating rather than wrapping. A Z80 held
+	// off long enough stops draining the command FIFO, and then the 386 stalls
+	// with it -- which is the gameplay hitch this is here to confirm or clear.
+	reg [15:0] wait_run;
+	always @(posedge clk) begin
+		if (reset) begin
+			wait_run     <= 16'd0;
+			dbg_wait_max <= 16'd0;
+		end
+		else if (!fetching) wait_run <= 16'd0;
+		else begin
+			if (!(&wait_run)) wait_run <= wait_run + 16'd1;
+			if ((wait_run + 16'd1) > dbg_wait_max) dbg_wait_max <= wait_run + 16'd1;
+		end
+	end
 
 	always @(posedge clk) begin
 		if (reset) begin
@@ -278,6 +327,47 @@ module spi_sound
 			end
 		end
 		fifo_q <= fifo_mem[fifo_rp];
+	end
+
+	// ------------------------------------------------------------------
+	// How hard the 386 is being blocked by the sound CPU.
+	//
+	// `snd_full` is a real flag, so a Z80 that stops draining makes the 386
+	// spin in the sound handshake -- a gameplay freeze with no video symptom
+	// at all. These two say whether that is happening and for how long, which
+	// is otherwise only visible as "the game hitched".
+	//
+	// The run length ticks every 1024 clk_sys, i.e. 17.87 us, so a full 16-bit
+	// reading is 1.17 s and a quarter-second block reads about 13,974.
+	// ------------------------------------------------------------------
+	wire [8:0] fifo_fill = fifo_wp - fifo_rp;
+
+	reg [9:0]  full_div;
+	reg [15:0] full_run;
+
+	always @(posedge clk) begin
+		if (reset) begin
+			dbg_fifo_peak <= 9'd0;
+			dbg_full_max  <= 16'd0;
+			full_div      <= 10'd0;
+			full_run      <= 16'd0;
+		end
+		else begin
+			if (fifo_fill > dbg_fifo_peak) dbg_fifo_peak <= fifo_fill;
+
+			if (!fifo_full) begin
+				full_div <= 10'd0;
+				full_run <= 16'd0;
+			end
+			else begin
+				full_div <= full_div + 10'd1;
+				if (&full_div) begin
+					full_run <= full_run + 16'd1;
+					if ((full_run + 16'd1) > dbg_full_max)
+						dbg_full_max <= full_run + 16'd1;
+				end
+			end
+		end
 	end
 
 	// ------------------------------------------------------------------

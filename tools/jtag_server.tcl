@@ -94,7 +94,8 @@ set PEEK [idx_of "PEEK"]
 set SUMS [idx_of "SUMS"]
 
 # CTRL bits: [4:0] force a layer off (back, midl, fore, text, sprites),
-#            [5] freeze the CPU, [6] force the vital signs panel on.
+#            [5] freeze the CPU, [6] force the vital signs panel on,
+#            [7] clear the telemetry high-water marks (level, so pulse it).
 set ctrl_val 0
 
 proc write_ctrl {} {
@@ -144,7 +145,14 @@ proc show_vitals {} {
 # probe at 511 bits and VITL is already at 478.
 #   0..15 z80 pc, 16..31 fifo reads, 32..47 ymf writes, 48..63 rom stalls,
 #   64..79 synth overruns, 80..95 slots sounding (PCM voices + FM operators),
-#   96..111 fifo2 pushes (Z80 -> 386), 112..127 fifo2 pops (386 reads 0x680)
+#   96..111 fifo2 pushes (Z80 -> 386), 112..127 fifo2 pops (386 reads 0x680),
+#   128..143 longest FIFO-full run, 144..152 peak FIFO fill,
+#   153..168 longest sprite-DMA gap, 169..184 longest single Z80 fetch wait,
+#   185..216 stall EIP, 217..232 stall CS.
+#
+# Everything up to 127 is a free-running counter that wraps between samples --
+# 13b and 14.9 both record being lied to by one. Everything from 128 up is a
+# HIGH-WATER MARK and means the same thing at any sampling interval.
 proc show_sound {} {
     global SNDV
     set p [read_probe_data -instance_index $SNDV]
@@ -157,6 +165,27 @@ proc show_sound {} {
          [fld $p 80 16] [fld $p 64 16]]
     say [format "  fifo2 push  %d   pop %d   (Z80 -> 386; SXX2C only)" \
          [fld $p 96 16] [fld $p 112 16]]
+    # High-water marks. 1 unit = 1024 clk_sys = 17.87 us; one frame at 53.99 Hz
+    # is 1036 units, and a quarter-second block is about 13,974.
+    set pk [fld $p 144 9]
+    set fm [fld $p 128 16]
+    set gp [fld $p 153 16]
+    set wm [fld $p 169 16]
+    say [format "  fifo peak   %d of 511   full for up to %d = %.3f s   (386 blocked in the handshake)" \
+         $pk $fm [expr {$fm * 1024.0 / 57272727.0}]]
+    say [format "  frame gap   %d = %.3f s   (worst sprite-DMA interval; 1 frame = 1036)" \
+         $gp [expr {$gp * 1024.0 / 57272727.0}]]
+    say [format "  fetch wait  %d clk = %.1f us   (worst single Z80 ROM fetch; ch3 is bottom priority)" \
+         $wm [expr {$wm / 57.272727}]]
+    # Latched the first time the frame gap passed two frames since the last
+    # clear. 00000000 means no hitch that big has happened.
+    set se [bin2hex [string range $p 185 216]]
+    set sc [bin2hex [string range $p 217 232]]
+    if {$se eq "00000000"} {
+        say "  stall at    -- (no gap past two frames since the last clear)"
+    } else {
+        say [format "  stall at    CS %s EIP %s   (386 here when the frame gap passed 2 frames)" $sc $se]
+    }
 }
 
 proc show_sums {} {
@@ -215,10 +244,28 @@ proc handle {line} {
         vitals { show_vitals }
         sound  { show_sound }
         sums   { show_sums }
+        clear {
+            # Zero the telemetry high-water marks and the latched stall
+            # address. Boot is not a stall, and its 0.373 s sprite-DMA gap
+            # otherwise saturates `frame gap` before the game has drawn
+            # anything -- so clear at the moment you want to start watching.
+            #
+            # NOTE for anyone extending this switch: a comment BETWEEN
+            # pattern/body pairs is not a comment. The body of `switch` is a
+            # list, so `#` becomes a pattern and the words after it become
+            # bodies and patterns in turn -- which is how this one first went
+            # in and killed the server with `invalid command name "the"`.
+            # Comments belong inside a body, like this one.
+            set ctrl_val [expr {$ctrl_val | 128}];  write_ctrl
+            after 50
+            set ctrl_val [expr {$ctrl_val & ~128}]; write_ctrl
+            say ">>> telemetry high-water marks cleared"
+            show_sound
+        }
         mask {
             # keep the freeze bit, replace the layer bits
             set v [lindex $line 1]
-            set ctrl_val [expr {($ctrl_val & 32) | ($v & 0x5F)}]
+            set ctrl_val [expr {($ctrl_val & 32) | ($v & 0xDF)}]
             write_ctrl
             say [format ">>> ctrl = 0x%02X (layers %05b, frozen %d)" \
                  $ctrl_val [expr {$ctrl_val & 31}] [expr {($ctrl_val >> 5) & 1}]]
@@ -232,7 +279,8 @@ proc handle {line} {
         mark { say ">>> MARK [lindex $line 1]" }
         help {
             say "ENTER = freeze/resume   freeze | thaw | vitals | sound | sums"
-            say "mask <n> | dump <addr> <count> | mark <text> | quit"
+            say "clear (zero the high-water marks) | mask <n>"
+            say "dump <addr> <count> | mark <text> | quit"
         }
         quit - exit {
             say ">>> releasing JTAG"

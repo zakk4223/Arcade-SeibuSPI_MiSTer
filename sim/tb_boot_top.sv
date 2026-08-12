@@ -153,6 +153,12 @@ module tb_boot_top
 		.ymf_active   (),
 		.snd_f2_wr    (),
 		.snd_f2_rd    (),
+		.snd_fifo_peak(),
+		.snd_full_max (),
+		.spr_gap_max  (),
+		.snd_wait_max (),
+		.stall_eip    (),
+		.stall_cs     (),
 
 		.sdr_prg_addr (sdr_prg_addr),
 		.sdr_prg_dout (sdr_prg_dout),

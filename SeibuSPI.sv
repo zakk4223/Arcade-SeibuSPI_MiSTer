@@ -485,6 +485,12 @@ wire  [17:2] v_ssrc;
 wire  [15:0] v_wspr, v_wtm;
 wire [15:0] v_spc, v_sfr, v_syw, v_sst, v_yov, v_yac;
 wire [15:0] v_f2w, v_f2r;
+wire  [8:0] v_fpk;
+wire [15:0] v_fmx;
+wire [15:0] v_gap;
+wire [15:0] v_wmx;
+wire [31:0] v_seip;
+wire [15:0] v_scs;
 wire  [4:0] ldr_part_end;
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
@@ -580,6 +586,7 @@ spi_jtag_peek peek
 	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
+	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
 	.ctrl(dbg_ctrl)
 );
 
@@ -738,6 +745,7 @@ spi_top spi_top
 	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
+	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
 
 	.sdr_prg_addr (sdr_prg_addr),
 	.sdr_prg_dout (sdr_prg_dout),

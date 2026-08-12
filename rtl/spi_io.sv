@@ -79,6 +79,10 @@ module spi_io
 	output reg        z80dl_req,
 	input             z80dl_ack,
 	output            z80dl_stall,
+	// High-water mark of the download: one past the highest region offset the
+	// 386 has ever written. Everything at or above it is SDRAM nobody has
+	// filled, and `spi_sound` reads it back as MAME's zero padding instead.
+	output reg [18:0] z80dl_end,
 	output reg        z80_rst_n
 );
 
@@ -157,6 +161,7 @@ module spi_io
 			dl_pos    <= 19'd0;
 			dl_pend   <= 1'b0;
 			z80dl_req <= 1'b0;
+			z80dl_end <= 19'd0;
 			// Held in reset until the 386 releases it. On SXX2E the Z80 runs
 			// from ROM and must not be gated, so this reads as 1 there.
 			z80_rst_n <= ~set_sxx2c;
@@ -261,6 +266,10 @@ module spi_io
 					z80dl_req  <= ~z80dl_req;
 					dl_pend    <= 1'b1;
 					dl_pos     <= dl_pos + 19'd1;
+					// 0x68C rewinds dl_pos, so the high-water mark has to be
+					// kept separately. It is the union of every transfer,
+					// which is exactly the set of bytes that hold real data.
+					if ((dl_pos + 19'd1) > z80dl_end) z80dl_end <= dl_pos + 19'd1;
 				end
 
 				default: ;

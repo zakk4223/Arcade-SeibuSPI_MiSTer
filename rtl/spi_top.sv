@@ -69,6 +69,12 @@ module spi_top
 	output     [15:0] ymf_active,
 	output     [15:0] snd_f2_wr,
 	output     [15:0] snd_f2_rd,
+	output      [8:0] snd_fifo_peak,
+	output     [15:0] snd_full_max,
+	output     [15:0] spr_gap_max,
+	output     [15:0] snd_wait_max,
+	output     [31:0] stall_eip,
+	output     [15:0] stall_cs,
 	output     [31:0] eip,
 	output     [15:0] cs,
 	output            irq,
@@ -207,6 +213,7 @@ module spi_top
 	wire  [7:0] z80dl_data;
 	wire        z80dl_req;
 	wire        z80dl_stall;
+	wire [18:0] z80dl_end;
 	wire        z80_rst_n;
 
 	reg dl_req_s1, dl_req_s2, dl_req_s3;
@@ -345,6 +352,7 @@ module spi_top
 		.z80dl_req  (z80dl_req),
 		.z80dl_ack  (z80dl_ack),
 		.z80dl_stall(z80dl_stall),
+		.z80dl_end  (z80dl_end),
 		.z80_rst_n  (z80_rst_n),
 		.clk              (clk_cpu),
 		.reset            (cpu_reset),
@@ -403,6 +411,7 @@ module spi_top
 		.fifo2_empty(fifo2_empty),
 		.fifo2_rd   (fifo2_rd),
 		.z80_rst_n  (z80_rst_n),
+		.z80dl_end  (z80dl_end),
 		.dbg_f2_wr  (snd_f2_wr),
 		.dbg_f2_rd  (snd_f2_rd),
 		.clk        (clk_sys),
@@ -432,7 +441,10 @@ module spi_top
 		.dbg_ymf_wr      (snd_ymf_wr),
 		.dbg_stall       (snd_stall),
 		.dbg_ymf_overrun (ymf_overrun),
-		.dbg_ymf_active  (ymf_active)
+		.dbg_ymf_active  (ymf_active),
+		.dbg_fifo_peak   (snd_fifo_peak),
+		.dbg_full_max    (snd_full_max),
+		.dbg_wait_max    (snd_wait_max)
 	);
 
 	// ------------------------------------------------------------------
@@ -733,6 +745,71 @@ module spi_top
 			if (dma_sprite   && !sq)              n_spr  <= n_spr  + 1'd1;
 		end
 	end
+	// ------------------------------------------------------------------
+	// Longest gap between sprite DMA triggers -- "did the game loop hitch?"
+	//
+	// The 386 pushes the sprite list once a frame, so this is the frame period
+	// as the CPU actually achieves it rather than as the raster does: 18.5 ms
+	// at 53.99 Hz, which is 1036 of these 1024-clk_sys (17.87 us) units. A
+	// quarter-second stall reads about 14,000.
+	//
+	// It is deliberately theory-free. Every other instrument here assumes a
+	// cause -- a starved channel, a full FIFO -- and answers only for that one;
+	// this says whether the CPU stopped at all, and the FIFO high-water beside
+	// it in the same panel says whether the sound handshake is why.
+	//
+	// BOOT IS NOT A STALL, and the first version of this could not tell the
+	// difference. rfjet's own boot has a 0.373 s gap in it -- measured in MAME
+	// with tools/mame_sprdma_gap.lua, which also says every other frame of
+	// three minutes of attract is 0-19 ms -- so the mark saturated before the
+	// game had drawn anything and stayed there. Hence `dbg_mask[7]`: clear the
+	// marks when the machine is where you want to watch it, then play.
+	//
+	// `stall_eip` / `stall_cs` latch where the 386 was the first time a gap
+	// passed two frames. A maximum says a hitch happened; this says what code
+	// was running when it did, which is the difference between another round of
+	// hypotheses and an address to disassemble.
+	// ------------------------------------------------------------------
+	wire tel_clear = mask_s2[7];
+
+	reg  [9:0] gap_div;
+	reg [15:0] gap_run;
+	reg [15:0] gap_max;
+	reg        gap_armed;    // ignore the boot-to-first-frame interval
+	reg [31:0] stall_eip_r;
+	reg [15:0] stall_cs_r;
+	reg        stall_seen;
+
+	// clk_cpu is exactly clk_sys/2 and phase aligned from the same PLL, so this
+	// is a synchronous sample, not a CDC.
+	localparam [15:0] GAP_TRIP = 16'd2072;   // two frames
+
+	always @(posedge clk_sys) begin
+		if (vid_reset || tel_clear) begin
+			gap_div <= 10'd0; gap_run <= 16'd0; gap_max <= 16'd0;
+			gap_armed <= 1'b0;
+			stall_eip_r <= 32'd0; stall_cs_r <= 16'd0; stall_seen <= 1'b0;
+		end
+		else if (dma_sprite && !sq) begin
+			gap_div <= 10'd0; gap_run <= 16'd0; gap_armed <= 1'b1;
+		end
+		else begin
+			gap_div <= gap_div + 10'd1;
+			if (&gap_div && gap_armed) begin
+				gap_run <= gap_run + 16'd1;
+				if ((gap_run + 16'd1) > gap_max) gap_max <= gap_run + 16'd1;
+				if ((gap_run + 16'd1) == GAP_TRIP && !stall_seen) begin
+					stall_eip_r <= eip;
+					stall_cs_r  <= cs;
+					stall_seen  <= 1'b1;
+				end
+			end
+		end
+	end
+	assign spr_gap_max = gap_max;
+	assign stall_eip   = stall_eip_r;
+	assign stall_cs    = stall_cs_r;
+
 	assign lay_en_out = layer_enable;
 	assign c_prg = n_prg; assign c_iowr = n_iowr; assign c_dma_tm = n_tm;
 	assign c_dma_pal = n_pal; assign c_vbl = n_vbl; assign why = cpu_dbg_why;

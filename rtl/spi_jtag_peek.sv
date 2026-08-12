@@ -92,6 +92,17 @@ module spi_jtag_peek
 	// pops without pushes means the Z80 never got room to send.
 	input      [15:0] snd_f2_wr,       // pushes by the Z80 (0x4008 write)
 	input      [15:0] snd_f2_rd,       // pops by the 386  (0x680 read)
+	// How hard the 386 is being blocked in the sound handshake. High-water
+	// marks, so they can be sampled at any interval -- unlike every counter
+	// above them, which wraps.
+	input       [8:0] snd_fifo_peak,   // deepest the 386 -> Z80 FIFO has got
+	input      [15:0] snd_full_max,    // longest FIFO-full run, 17.87 us units
+	input      [15:0] spr_gap_max,     // longest sprite-DMA gap, same units
+	input      [15:0] snd_wait_max,    // longest single Z80 ROM fetch wait
+	// Where the 386 was the first time the frame gap passed two frames. A
+	// maximum says a hitch happened; this says what was running when it did.
+	input      [31:0] stall_eip,
+	input      [15:0] stall_cs,
 
 	// Live layer masks driven from the host, so a rendering fault can be
 	// isolated to a layer without a rebuild for each experiment.
@@ -198,7 +209,7 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (5),
 		.instance_id             ("SNDV"),
-		.probe_width             (128),
+		.probe_width             (233),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
@@ -207,7 +218,9 @@ module spi_jtag_peek
 	(
 		// New fields go on the LSB side; see PLAN.md 14.3.
 		.probe  ({snd_pc, snd_fifo_rd, snd_ymf_wr, snd_stall,
-		          ymf_overrun, ymf_active, snd_f2_wr, snd_f2_rd}),
+		          ymf_overrun, ymf_active, snd_f2_wr, snd_f2_rd,
+		          snd_full_max, snd_fifo_peak, spr_gap_max, snd_wait_max,
+		          stall_eip, stall_cs}),
 		.source ()
 	);
 
