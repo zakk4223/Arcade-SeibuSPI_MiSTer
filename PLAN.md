@@ -1211,6 +1211,41 @@ the images' 1.68) while the fast path does not move at all between the two sets.
 Most of the fast figure is therefore fixed cost -- reconfiguration and
 unzipping -- not transfer.
 
+**ALL FOUR SETS, byte-exact.** `bytes_in` equals what `make check-mra` computes
+for the MRA, to the byte, on every one; `bytes_out` equals it too except where a
+part is decoded, and then by exactly the codec's expansion:
+
+    set     image bytes   bytes_out         slow      fast    gain
+    rdfts     23,396,352  = in            27404 ms   9911 ms  2.76x
+    rdft      23,265,280  = in            27513 ms   9960 ms  2.76x
+    rdft2     36,145,324  +158,344        45059 ms   9200 ms  4.90x
+    rfjet     39,303,645  +121,581        44894 ms   9904 ms  4.53x
+
+Both expansions are the figures already recorded for those sets, which is the
+part that matters: the replay has to stall against the decoder for hundreds of
+cycles and resume in the right place, and landing on the exact expansion says it
+does. rdfts additionally gives `ok bits 1111` against `spi_romcheck`'s
+constants.
+
+**rdft checksums three of its four regions for free.** `ok bits 1110`: CHARS
+`79A0EB60`, TILES `D3E9E887` and SPRITES `76809831` are byte-identical to
+rdfts', which is what the same game on a different board should give since they
+share the graphics ROMs. Only PRG differs. So rdft's graphics regions are
+verified against MAME-derived constants too, which was not previously true of
+any set but rdfts.
+
+**And rdft's screenshot corroborates T-J.** It comes up in the board's TEST MODE
+menu, not attract, exactly as T-J predicts from the MRA's saved Service Mode DIP.
+Nothing about the core; the DIP is on. (It is also why rdft's frames are ~3 KB
+and broke the timing harness's threshold, below.)
+
+**One number moved and it is the MRA, not the loader.** This file records
+rdft2's `bytes_in` as 35,752,108; it now reads 36,145,324, which is what
+`check_mra` computes for the current MRA. The 393,216 difference is MRA changes
+since that reading -- the sample flash gained a head/tail split with inline
+parts. The codec expansion, +158,344, is unchanged, and that is the invariant
+worth trusting.
+
 **Two cautions about that measurement, one of which is a real hole.** The
 completion test is "the framebuffer changed", polled about once a second, so it
 cannot resolve the ~1 s of extra replay rfjet's larger image must cost; "both
