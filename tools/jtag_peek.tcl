@@ -225,6 +225,30 @@ if {$mode eq "list"} {
     after 50
     set rb [read_source_data -instance_index $cidx]
     puts "layer mask = $rb  (wrote [dec2bin $v 8])"
+} elseif {$mode eq "sdram"} {
+    # spi_sdr_stats packs trans[18:0] = ch1 .. trans[94:76] = ch5, and the probe
+    # string arrives MSB first, so the LEFTMOST field is ch5 and the rightmost
+    # ch1 -- the reverse of the channel numbering, which is worth stating because
+    # reading it the natural way swaps the PCM and 386 figures and both are
+    # plausible numbers.
+    #
+    # Each count is completed transactions in one 2^21 clk_ram window (18.31 ms,
+    # one frame at 53.99 Hz to within a percent), latched at the window end so it
+    # cannot wrap between samples. The controller owns the bus for a fixed 8
+    # clk_ram cycles per transaction, so occupancy is trans * 8 / 2^21.
+    set p [read_probe_data -instance_index [index_of "SDRM"]]
+    proc fld {p a n} { return [expr 0b[string range $p $a [expr {$a+$n-1}]]] }
+    set total 0
+    for {set i 0} {$i < 5} {incr i} {
+        set v  [fld $p [expr {$i*19}] 19]
+        set nm [lindex {ch5 ch4 ch3 ch2 ch1} $i]
+        set ds [lindex {PCM sprites Z80/peek tiles 386-prg} $i]
+        set total [expr {$total + $v}]
+        puts [format "%-4s %-9s %7d trans/frame  %6.2f%%" \
+              $nm $ds $v [expr {$v * 800.0 / (1 << 21)}]]
+    }
+    puts [format "%-14s %7d trans/frame  %6.2f%%  (auto-refresh is on top)" \
+          "ALL" $total [expr {$total * 800.0 / (1 << 21)}]]
 } elseif {$mode eq "trace"} {
     set idx [index_of "VITL"]
     set n [lindex $args 1]

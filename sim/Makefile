@@ -227,7 +227,7 @@ lint-top:
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
 	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
-	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_rom_decode.sv \
+	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_sdr_stats.sv $(RTL)/spi_rom_decode.sv \
 	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise11_decrypt.sv 2>&1 | \
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 

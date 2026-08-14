@@ -92,6 +92,7 @@ set SNDV [idx_of "SNDV"]
 set CTRL [idx_of "CTRL"]
 set PEEK [idx_of "PEEK"]
 set SUMS [idx_of "SUMS"]
+set SDRM [idx_of "SDRM"]
 
 # CTRL bits: [4:0] force a layer off (back, midl, fore, text, sprites),
 #            [5] freeze the CPU, [6] force the vital signs panel on,
@@ -188,6 +189,33 @@ proc show_sound {} {
     }
 }
 
+# SDRM: sdr_trans[94:0], MSB first. Channel i is bits [i*19+18:i*19], so in
+# MSB-first string coordinates it starts at 76-i*19, width 19.
+#
+# The window is a fixed 2^21 clk_ram cycles and the controller spends exactly
+# eight of them on a transaction (IDLE, WAIT, RW1, IDLE_5..IDLE_1), so
+# occupancy is trans*8/2^21. See rtl/spi_sdr_stats.sv, which also says why
+# there is no per-channel latency figure here.
+proc show_sdram {} {
+    global SDRM
+    set p [read_probe_data -instance_index $SDRM]
+    set WINDOW [expr {1 << 21}]
+    set names {ch1-386prg ch2-tiles ch3-z80 ch4-sprites ch5-pcm}
+    say "--- sdram, per 18.31 ms window (one frame) ---"
+    say "  channel        trans   occupancy    MB/s"
+    set tot 0
+    for {set i 0} {$i < 5} {incr i} {
+        set tr [fld $p [expr {76 - $i*19}] 19]
+        set tot [expr {$tot + $tr}]
+        say [format "  %-11s %8d   %6.2f%%   %6.1f" [lindex $names $i] $tr \
+             [expr {100.0 * $tr * 8 / $WINDOW}] \
+             [expr {$tr * 8.0 / 0.018311 / 1048576}]]
+    }
+    say [format "  TOTAL       %8d   %6.2f%%   %6.1f   (refresh is on top, ~2%%)" \
+         $tot [expr {100.0 * $tot * 8 / $WINDOW}] \
+         [expr {$tot * 8.0 / 0.018311 / 1048576}]]
+}
+
 proc show_sums {} {
     global SUMS
     set p [read_probe_data -instance_index $SUMS]
@@ -244,6 +272,7 @@ proc handle {line} {
         vitals { show_vitals }
         sound  { show_sound }
         sums   { show_sums }
+        sdram  { show_sdram }
         clear {
             # Zero the telemetry high-water marks and the latched stall
             # address. Boot is not a stall, and its 0.373 s sprite-DMA gap
@@ -279,7 +308,7 @@ proc handle {line} {
         mark { say ">>> MARK [lindex $line 1]" }
         help {
             say "ENTER = freeze/resume   freeze | thaw | vitals | sound | sums"
-            say "clear (zero the high-water marks) | mask <n>"
+            say "sdram (per-channel bus occupancy) | clear | mask <n>"
             say "dump <addr> <count> | mark <text> | quit"
         }
         quit - exit {

@@ -1079,6 +1079,58 @@ Level: MAME is 1.35x the hardware here (rms 2324 vs 1728), against 2.58x on
 rdft2. Still unexplained, still a level difference and not a shape one; every
 figure above is normalised.
 
+### rdft2 played through, and the bus is 68% idle at its worst (2026-08-14)
+
+A credit played to a death on the second boss, marks cleared first. This is
+T-I, the last set that had never been past attract, and it is the first live
+load `spi_sdr_stats` has ever seen.
+
+**Nothing moved.** `frame gap` 1036 -- exactly one frame, never exceeded -- the
+two-frame stall latch never fired, `fifo peak` 16 of 511 and never full,
+`fetch wait` 60 clk (1.0 us) unchanged from attract, 0 synth overruns.
+`sprite starved` went 42 -> 48 across the whole credit: **six starved lines,
+not six per frame**. rdfts starved 6.24 lines *per frame* at 5,600 y-hits/frame
+(13b). The RISE10 sprite fetch holds under live load, which is the thing T-I
+existed to ask and which had only ever been checked against static captures.
+
+**Per-channel occupancy, 72 samples across attract and play:**
+
+    channel        attract   gameplay peak
+    ch2-tiles       20.49%       20.52%
+    ch4-sprites      1.15%        7.89%
+    ch3-z80          2.61%        2.75%
+    ch1-386prg       0.02%        0.79%
+    ch5-pcm          0.06%        0.33%
+    TOTAL           24.34%       31.52%     (refresh ~2% on top)
+
+ch2 is flat at 20.5% whatever is happening -- the tile fetch is a fixed cost
+per frame -- and sprites are the only channel that responds to load, 7x from
+attract to a boss. **The bus peaks at a third full.** So neither T-D (the
+line-buffer generation tag, ~10% of the sprite line budget) nor reordering the
+arbiter is a bandwidth argument, and if starvation ever returns it is a latency
+and priority question. That is what `SLOP_SPR_PRIO` in `tb_video.cpp` probes.
+
+Two cautions about these numbers. The sampler took one 18.31 ms window every
+3 s, so a worse instantaneous peak could have fallen between samples; the four
+marks are continuous and clean, so nothing *sustained* was missed. And the
+VITL panel's `spr scanned`, `y-hit`, `emitted` and `tiles` are FREE-RUNNING
+16-bit counters -- 39944, 47914, 65322, 6442, 12586 is one series, wrapping --
+so a single sample of `y-hit` is not a per-frame figure and cannot be compared
+against 13b's y-hits/frame table. `sprite starved` and `layer ovrun` are small
+enough that their monotonic steps are real events.
+
+**The 0.244 s frame gap read before the clear was boot, not a hitch.** The
+first reading of this session, taken on marks that had never been cleared,
+showed `frame gap 13648 = 0.244 s` with the stall latch fired at
+`CS 0018 EIP 002A1A9A` -- a few hundred bytes below `0x2A1BBD..0x2A1EFD`, the
+flash updater (see the SXX2C section). The 386 does not push sprite lists while
+it is decompressing the sound image, so the mark catches it. rdft2's analogue
+of the 0.387 s this file already records for rfjet. Re-measuring after a clear
+produced 1036, which is what turns that from a guess into a reading -- and the
+general lesson is the one 10c keeps teaching: an uncleared mark is a claim
+about the whole session including boot, and reading it as a gameplay figure
+invents a bug.
+
 ### The gameplay hitch went away with the bank fix (2026-08-11)
 
 Played through with the fixed core and the marks cleared: **worst frame gap
@@ -3256,10 +3308,15 @@ whether it is RIGHT.
       per-frame spectral median 0.967, and ZERO windows where the hardware is
       silent while MAME is playing. 0 synth overruns with 23-27 voices
       sounding. Section 10d. One real divergence fell out of it -- see T-K.
-- [ ] **T-I** Play rdft2. It has only been seen in attract: no coin, no start,
-      no gameplay. Sprite starvation and the RISE10 fetch path have been
-      checked against captures, never against a live game under load, which is
-      exactly where 13b's starvation showed up on rdfts.
+- [x] **T-I** Play rdft2. **Played to a death on the second boss, and it
+      passes.** Six starved sprite lines across the whole credit (42 -> 48, not
+      per frame), `layer ovrun 0`, 0 synth overruns, `frame gap` 1036 = one
+      frame with the stall latch never firing, `fifo peak` 16 of 511.
+      Per-channel occupancy peaks at 31.52% total with sprites at 7.89% and
+      tiles flat at 20.5%, so the RISE10 fetch path holds under live load and
+      the bus is two thirds idle at its worst. Section "rdft2 played through"
+      (2026-08-14), which also records why the VITL y-hit counters cannot be
+      read as per-frame figures.
 - [x] **T-F** The JTAG instrument. **Confirmed on hardware, and it exposed a
       second instrument bug on the way** (`go` and the address not updating
       atomically -- one read in seven landed on a neighbouring word; fixed in
