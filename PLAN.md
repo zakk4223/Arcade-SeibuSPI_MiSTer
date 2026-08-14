@@ -1196,6 +1196,14 @@ general lesson is the one 10c keeps teaching: an uncleared mark is a claim
 about the whole session including boot, and reading it as a gameplay figure
 invents a bug.
 
+**Reproduced later the same day, which is what makes it a finding rather than
+a story.** Deploying the stereo core reprogrammed the FPGA and rebooted rdft2
+from cold, and the first uncleared reading was `frame gap 13648 = 0.244 s`
+with `stall at CS 0018 EIP 002A1AA6` -- the same quarter second, to the unit,
+at an address twelve bytes from the first one. Two independent boots landing
+on the same gap at the same place in the flash updater is the confirmation the
+single reading could not supply.
+
 ### The gameplay hitch went away with the bank fix (2026-08-11)
 
 Played through with the fixed core and the marks cleared: **worst frame gap
