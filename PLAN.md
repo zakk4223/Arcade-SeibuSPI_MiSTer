@@ -1158,15 +1158,67 @@ to it reads from 0x180000000 -- eight times too high, off the end of memory,
 and perfectly legal RTL. The base has to be shifted with the offset:
 0x30000000 is word 0x06000000.
 
-**Verified in simulation, NOT yet on hardware.** `make -C sim
-run-ddr_rom_reader` covers a fast download at 1, 7, 8, 9 and 4096 bytes -- the
-sizes around the 8-byte word boundary, where the last partial word lives -- with
-irregular back-pressure, plus the strobe width, a slow download passing
-through, a zero-length download starting no replay, and a non-zero index being
-ignored. What it does NOT cover is the real thing: whether Main_MiSTer actually
-honours the attribute on this setup, and whether what lands in DDR3 is what
-`check_mra` thinks the image is. `bytes_in` and the four region checksums are
-the instruments for that, and `bytes_in` is exactly the figure that caught 10c.
+**Verified in simulation.** `make -C sim run-ddr_rom_reader` covers a fast
+download at 1, 7, 8, 9 and 4096 bytes -- the sizes around the 8-byte word
+boundary, where the last partial word lives -- with irregular back-pressure,
+plus the strobe width, a slow download passing through, a zero-length download
+starting no replay, and a non-zero index being ignored.
+
+**CONFIRMED ON HARDWARE, byte-exact, and 2.76x faster (2026-08-14).** rdfts
+first, deliberately: it is the smallest image and the only set whose checksums
+`spi_romcheck` actually knows, so `ok bits 1111` is a verdict there rather than
+the noise it is on rdft2.
+
+    bytes_in 23396352  bytes_out 23396352   ok bits 1111   passes 1 fails 0
+    part_end 13
+    PRG 741393AF  CHARS 79A0EB60  TILES D3E9E887  SPRITES 76809831
+
+Every figure identical to the same core loading the same set the slow way, and
+all four checksums equal to the constants in `spi_romcheck.sv`. The attract
+intro renders correctly.
+
+Timing, with the same polling harness both ways so the overhead is common, two
+runs each and reproducible to the millisecond:
+
+    slow (byte by byte)   27404 ms, 27405 ms
+    fast (DDR3)            9911 ms,  9912 ms
+
+Both include FPGA reconfiguration and unzipping 23 MB, which are fixed costs, so
+the transfer itself improved by much more than the 2.76x end to end. The
+comparison is cheap to repeat because the same bitstream does both: a copy of
+the MRA without the `address` attribute is a slow load, and
+`/media/fat/_Arcade/rdfts_slow.mra` on the MiSTer is exactly that.
+
+### The `sums` panel was misreading the probe, and cost a false failure
+
+The first fast-load reading looked like a broken download: `bytes_in 22626304`
+against a true 23,396,352, `ok bits 0001`, and four checksums that looked like
+nibble-shifted versions of the right answers. It was the INSTRUMENT.
+
+`bytes_out` was added to the SUMS probe when it was wired up, and only
+`tools/jtag_peek.tcl` was updated for it. `jtag_server.tcl`'s `show_sums` still
+sliced the old 195-bit layout, so every field from `bytes_in` onward was read 27
+bits early. A shifted field is still a plausible number, which is the entire
+danger.
+
+**The panel contradicted itself and that is what gave it away.** It printed
+`passes 1 fails 0` with `ok bits 0001` -- the hardware's own comparison saying
+PRG matched -- next to a PRG value that did not match `SUM_PRG`. Hardware and
+printout disagreed about the same region in the same line. When that happens the
+printout is the thing to doubt.
+
+Two other things made it cheap to unmask. The slow path was tried on the same
+bitstream and reported byte-for-byte the SAME wrong numbers, which rules out
+anything the fast path touches. And `spi_jtag_peek.sv`'s own header already
+describes this exact failure from the other direction, when `probe_width` was
+193 while the concatenation was 195.
+
+`show_sums` now derives its offsets from the documented layout, prints
+`bytes_out` and `part_end` as well, and **checks the probe width**, refusing to
+be believed if it is not 221. That guard already existed in `jtag_peek.tcl`; the
+lesson is that two readers of one probe drift, and the one without the guard is
+the one that lies. Third instrument failure of the day, after the stale JTAG
+server's silent zeros and the free-running VITL counters.
 
 ### Stereo, which is two accumulators and a board flag (2026-08-14)
 

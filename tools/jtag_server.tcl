@@ -216,15 +216,40 @@ proc show_sdram {} {
          [expr {$tot * 8.0 / 0.018311 / 1048576}]]
 }
 
+# SUMS is 221 bits, MSB first, matching spi_jtag_peek.sv's concatenation:
+#   0..15    fails       16..31   passes      32..36   part_end[4:0]
+#   37..62   bytes_in[25:0]       63..88   bytes_out[25:0]
+#   89..92   ok          93..124  sum_sprites 125..156 sum_tiles
+#   157..188 sum_chars   189..220 sum_prg
+#
+# THESE WERE STALE AND IT COST A WHOLE DIAGNOSIS. `bytes_out` was added to the
+# probe and only tools/jtag_peek.tcl was updated, so everything here from
+# bytes_in onward was read 27 bits early: bytes_in came back 22,626,304 against
+# a true 23,396,352 and the four checksums looked nibble-shifted. It read as a
+# short download on a brand new fast-load path, and the giveaway was the panel
+# contradicting itself -- the hardware's own `passes 1 fails 0` said PRG matched
+# while the PRG value printed next to it did not.
+#
+# A shifted field is still a plausible number, which is why the width is checked
+# and printed rather than assumed. If it does not say 221, nothing below it
+# means anything. Keep this in step with jtag_peek.tcl's `sums`, which reads the
+# same probe and is the other place this drifts.
 proc show_sums {} {
     global SUMS
     set p [read_probe_data -instance_index $SUMS]
+    set n [string length $p]
     say "--- rom checksums ---"
-    say [format "  bytes_in %d (expect 23396352)   ok bits %s   passes %d fails %d" \
-         [fld $p 36 25] [string range $p 61 64] [fld $p 16 16] [fld $p 0 16]]
+    if {$n != 221} {
+        say "  WIDTH MISMATCH: probe is $n bits, expected 221."
+        say "  Every field below is shifted and meaningless. Fix the offsets."
+    }
+    say [format "  bytes_in %d  bytes_out %d   ok bits %s   passes %d fails %d" \
+         [fld $p 37 26] [fld $p 63 26] [string range $p 89 92] \
+         [fld $p 16 16] [fld $p 0 16]]
+    say [format "  part_end %d   (rdfts expects bytes_in 23396352)" [fld $p 32 5]]
     say [format "  PRG %s  CHARS %s  TILES %s  SPRITES %s" \
-         [bin2hex [string range $p 161 192]] [bin2hex [string range $p 129 160]] \
-         [bin2hex [string range $p 97 128]]  [bin2hex [string range $p 65 96]]]
+         [bin2hex [string range $p 189 220]] [bin2hex [string range $p 157 188]] \
+         [bin2hex [string range $p 125 156]] [bin2hex [string range $p 93 124]]]
 }
 
 proc peek64 {addr} {
