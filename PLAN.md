@@ -1189,6 +1189,41 @@ comparison is cheap to repeat because the same bitstream does both: a copy of
 the MRA without the `address` attribute is a slow load, and
 `/media/fat/_Arcade/rdfts_slow.mra` on the MiSTer is exactly that.
 
+**rfjet next, and it is the interesting one: 39.3 MB, and the only set with a
+DECODED part.**
+
+    bytes_in 39303645  bytes_out 39425226   part_end 16
+
+`bytes_in` is exactly the figure recorded for rfjet, and `bytes_out` is exactly
+`+121,581` -- the BPE codec's expansion, to the byte. That is the result worth
+having, because it is not a straight copy: the replay had to hold off against
+the decoder's back-pressure for hundreds of cycles at a time and resume in the
+right place, and an expansion that lands byte-exact says it did. Logo screen
+renders, 11 voices, 0 overruns. `ok bits 0000 / fails 1` is the expected noise
+-- `spi_romcheck` only carries rdfts' constants.
+
+    slow   44894 ms, 45047 ms
+    fast    9904 ms,  9901 ms, 9970 ms, 9959 ms
+
+**4.53x on rfjet**, 35 seconds saved. Note the slow path scales with image size
+almost exactly (23.4 MB -> 27.4 s and 39.3 MB -> 44.9 s, a ratio of 1.64 against
+the images' 1.68) while the fast path does not move at all between the two sets.
+Most of the fast figure is therefore fixed cost -- reconfiguration and
+unzipping -- not transfer.
+
+**Two cautions about that measurement, one of which is a real hole.** The
+completion test is "the framebuffer changed", polled about once a second, so it
+cannot resolve the ~1 s of extra replay rfjet's larger image must cost; "both
+about 9.9 s" is at the limit of the harness, not a claim that image size is
+free. And the first version of the test was simply wrong: it fired on "the
+framebuffer is not blank", which during a REPLAY is satisfied by the previous
+game's frame, because dropping `screen_rotate`'s writes leaves the old picture
+sitting in DDR3. That is a direct consequence of the arbitration choice above
+and it means the display holds a stale frame rather than going black during a
+fast load. Re-measuring against a pre-load baseline gave the same numbers, so
+the figures stand -- but the naive test would have flattered the fast path on
+any core that loads faster than it reconfigures.
+
 ### The `sums` panel was misreading the probe, and cost a false failure
 
 The first fast-load reading looked like a broken download: `bytes_in 22626304`
