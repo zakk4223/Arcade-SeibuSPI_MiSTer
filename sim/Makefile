@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound capture run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
+.PHONY: all clean lint lint-top lint-sound capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_decode run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271
+all: run-rom_decode run-ddr_rom_reader run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -38,6 +38,16 @@ lint-sound:
 # VHDL and cannot be simulated here, so this stands in for the sound driver.
 run-ymf271: obj_dir/Vymf271
 	@./obj_dir/Vymf271
+
+# The fast-load path: a DDR3 image replayed as the byte stream rom_loader
+# expects. This is the part of the ioctl download that CAN be simulated now,
+# and PLAN.md 10c is what not simulating it cost last time.
+run-ddr_rom_reader: obj_dir/Vddr_rom_reader
+	@./obj_dir/Vddr_rom_reader
+
+obj_dir/Vddr_rom_reader: $(RTL)/ddr_rom_reader.sv tb_ddr_rom_reader.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module ddr_rom_reader $(RTL)/ddr_rom_reader.sv \
+	    tb_ddr_rom_reader.cpp
 
 obj_dir/Vymf271: $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/ymf271_tables.vh \
                  $(RTL)/spi_defs.vh tb_ymf271.cpp lint.vlt
@@ -227,7 +237,7 @@ lint-top:
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
 	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
-	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_sdr_stats.sv $(RTL)/spi_rom_decode.sv \
+	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_sdr_stats.sv $(RTL)/spi_rom_decode.sv $(RTL)/ddr_rom_reader.sv \
 	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise11_decrypt.sv 2>&1 | \
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 

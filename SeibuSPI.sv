@@ -178,7 +178,10 @@ assign AUDIO_MIX = 0;
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
 assign BUTTONS   = 0;
-assign LED_USER  = ioctl_download;
+// dl_download rather than ioctl_download, so the activity light stays on for
+// the DDR3 replay too -- with a fast download that is where nearly all of the
+// wall clock goes.
+assign LED_USER  = dl_download;
 
 //////////////////////////////////////////////////////////////////
 
@@ -225,6 +228,17 @@ wire [25:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_index;
 wire        ioctl_wait;
+
+// The loader's side of ddr_rom_reader. For a slow download these are the ioctl
+// signals unchanged; for a fast one the HPS has already put the image in DDR3
+// and `dl_*` is that image replayed as the same byte stream. `dl_download`
+// stays high until the last byte is handed over, which `ioctl_download` does
+// NOT -- see the header of rtl/ddr_rom_reader.sv.
+wire        dl_download;
+wire        dl_wr;
+wire  [7:0] dl_dout;
+wire  [7:0] dl_index;
+wire        dl_wait;
 
 wire [15:0] joystick_p1, joystick_p2;
 
@@ -276,7 +290,13 @@ pll pll
 
 // Only the ROM download (index 0) holds the board in reset. The DIP transfer
 // (index 254) arrives on the same ioctl bus and must not restart the game.
-wire reset = RESET | status[0] | buttons[1] | (ioctl_download & (ioctl_index == 8'd0)) | ~pll_locked;
+//
+// This follows `dl_download`, NOT `ioctl_download`. With a fast download the
+// HPS drops ioctl_download as soon as its DMA into DDR3 is done, seconds before
+// any of it has reached SDRAM; keying the reset off that releases the 386 into
+// an empty image. dl_download stays high until ddr_rom_reader has handed over
+// the last byte, and is identical to ioctl_download for a slow download.
+wire reset = RESET | status[0] | buttons[1] | (dl_download & (dl_index == 8'd0)) | ~pll_locked;
 
 ///////////////////////////  DIP SWITCHES  ///////////////////////
 
@@ -507,16 +527,46 @@ wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
 wire        ldr_req, ldr_rnw;
 
+// Turns a fast (DDR3) download back into the byte stream rom_loader expects,
+// and is a pass-through for a slow one. On clk_sys: that is the ioctl and
+// DDRAM domain, and its strobe has to be one clk_sys cycle wide because the
+// loader runs on clk_ram at 2x and edge-detects it.
+ddr_rom_reader ddr_rom_reader
+(
+	.clk            (clk_sys),
+	.reset          (RESET | ~pll_locked),
+
+	.ioctl_download (ioctl_download),
+	.ioctl_index    (ioctl_index),
+	.ioctl_addr     (ioctl_addr),
+	.ioctl_wr       (ioctl_wr),
+	.ioctl_dout     (ioctl_dout),
+	.ioctl_wait     (ioctl_wait),
+
+	.dl_download    (dl_download),
+	.dl_wr          (dl_wr),
+	.dl_dout        (dl_dout),
+	.dl_index       (dl_index),
+	.dl_wait        (dl_wait),
+
+	.ddr_active     (ddr_rom_active),
+	.ddr_addr       (ddr_rom_addr),
+	.ddr_rd         (ddr_rom_rd),
+	.ddr_dout       (DDRAM_DOUT),
+	.ddr_dout_ready (DDRAM_DOUT_READY),
+	.ddr_busy       (DDRAM_BUSY)
+);
+
 rom_loader rom_loader
 (
 	.clk            (clk_ram),
 	.reset          (RESET | ~pll_locked),
 
-	.ioctl_download (ioctl_download),
-	.ioctl_wr       (ioctl_wr),
-	.ioctl_index    (ioctl_index),
-	.ioctl_dout     (ioctl_dout),
-	.ioctl_wait     (ioctl_wait),
+	.ioctl_download (dl_download),
+	.ioctl_wr       (dl_wr),
+	.ioctl_index    (dl_index),
+	.ioctl_dout     (dl_dout),
+	.ioctl_wait     (dl_wait),
 	.set_id         (set_id),
 	.part_codec     (part_codec),
 
@@ -890,15 +940,52 @@ screen_rotate screen_rotate
 	.FB_VBL    (FB_VBL),
 	.FB_LL     (FB_LL),
 
-	.DDRAM_CLK      (DDRAM_CLK),
-	.DDRAM_BUSY     (DDRAM_BUSY),
-	.DDRAM_BURSTCNT (DDRAM_BURSTCNT),
-	.DDRAM_ADDR     (DDRAM_ADDR),
-	.DDRAM_DIN      (DDRAM_DIN),
-	.DDRAM_BE       (DDRAM_BE),
-	.DDRAM_WE       (DDRAM_WE),
-	.DDRAM_RD       (DDRAM_RD)
+	// DDRAM is shared with the ROM reader now, so screen_rotate drives wires
+	// and the mux below decides who reaches the pins.
+	.DDRAM_CLK      (),
+	.DDRAM_BUSY     (1'b0),
+	.DDRAM_BURSTCNT (rot_burstcnt),
+	.DDRAM_ADDR     (rot_addr),
+	.DDRAM_DIN      (rot_din),
+	.DDRAM_BE       (rot_be),
+	.DDRAM_WE       (rot_we),
+	.DDRAM_RD       (rot_rd)
 );
+
+// ---------------------------------------------------------------------------
+// DDRAM: the framebuffer writer, and the ROM reader while a fast download is
+// replaying.
+//
+// The ROM reader wins outright for the duration, and screen_rotate's writes are
+// DROPPED rather than queued. That is deliberate and it is the cheap option:
+// screen_rotate ignores DDRAM_BUSY entirely -- it is declared and never read --
+// so it cannot be stalled, and giving it back-pressure means putting a FIFO in
+// front of it. There is nothing worth queueing here: the core is held in reset
+// for the whole replay, so the frames being dropped are blank ones, and the
+// display refills within a frame of the load finishing. A core that used DDRAM
+// for anything load-bearing during the load would need the FIFO.
+//
+// DDRAM_CLK is driven here instead of by screen_rotate, which used to assign it
+// CLK_VIDEO. Same signal -- CLK_VIDEO is clk_sys -- but now it is stated once
+// where both masters can be seen.
+// ---------------------------------------------------------------------------
+wire        ddr_rom_active;
+wire [28:0] ddr_rom_addr;
+wire        ddr_rom_rd;
+
+wire  [7:0] rot_burstcnt;
+wire [28:0] rot_addr;
+wire [63:0] rot_din;
+wire  [7:0] rot_be;
+wire        rot_we, rot_rd;
+
+assign DDRAM_CLK      = clk_sys;
+assign DDRAM_BURSTCNT = ddr_rom_active ? 8'd1        : rot_burstcnt;
+assign DDRAM_ADDR     = ddr_rom_active ? ddr_rom_addr : rot_addr;
+assign DDRAM_DIN      = ddr_rom_active ? 64'd0       : rot_din;
+assign DDRAM_BE       = ddr_rom_active ? 8'hFF       : rot_be;
+assign DDRAM_WE       = ddr_rom_active ? 1'b0        : rot_we;
+assign DDRAM_RD       = ddr_rom_active ? ddr_rom_rd  : rot_rd;
 
 assign FB_FORCE_BLANK = 0;
 

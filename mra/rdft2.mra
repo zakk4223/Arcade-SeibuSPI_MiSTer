@@ -112,7 +112,7 @@
         <part>0F 01</part>
     </rom>
 
-    <rom index="0" zip="rdft2.zip" md5="none">
+    <rom index="0" address="0x30000000" zip="rdft2.zip" md5="none">
         <!-- 386 program: four byte lanes -->
         <part name="prg0.tun" crc="3cb3fdca"/>
         <part name="prg1.bin" crc="cab55d88"/>

@@ -115,7 +115,7 @@
         <part>0F 01</part>
     </rom>
 
-    <rom index="0" zip="rfjet.zip" md5="none">
+    <rom index="0" address="0x30000000" zip="rfjet.zip" md5="none">
         <!-- 386 program: four byte lanes -->
         <part name="prg0.u0211" crc="e5a3b304"/>
         <part name="prg1.u0212" crc="395e6da7"/>

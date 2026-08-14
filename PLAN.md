@@ -1079,6 +1079,95 @@ Level: MAME is 1.35x the hardware here (rms 2324 vs 1728), against 2.58x on
 rdft2. Still unexplained, still a level difference and not a shape one; every
 figure above is normalised.
 
+### Fast ROM loading: the HPS writes DDR3 and we read it back (2026-08-14)
+
+The download was the slowest thing about using this core: every byte of a 23 to
+40 MB image crossed the ioctl bus one at a time. Main_MiSTer can instead DMA the
+whole file into DDR3 itself, which an MRA asks for with one attribute:
+
+    <rom index="0" address="0x30000000" zip="rdft2.zip" md5="none">
+
+`rtl/ddr_rom_reader.sv` then reads it back out and hands `rom_loader` the same
+byte stream it has always been given. Modelled on `Arcade-IGSPGM_MiSTer`, whose
+`ddr_rom_loader_adaptor` does exactly this.
+
+**WHY AN ADAPTOR AND NOT A NEW LOADER.** `rom_loader` does not copy bytes, it
+transforms them: a fourteen-part scatter with ten destination modes, the
+BPE+DPCM decoder for rdft2's and rfjet's sample flash, and `sprite_reorder`
+folded into the destination address. Every one of those is verified byte-exact
+against MAME (section 12) and none of it wants rewriting against a different
+source. Replaying DDR3 as the same stream keeps all of that verification
+pointed at the thing that still runs.
+
+**THE THREE ioctl SEMANTICS THAT CHANGE**, which is the whole trap:
+
+* **`ioctl_wr` never fires.** The data does not cross the FPGA's ioctl bus at
+  all. That is how a fast download is DETECTED: `ioctl_download` rose and fell
+  without a single write. A slow download of the same index still streams and
+  passes straight through, which is what keeps an MRA without the attribute
+  working -- and means that if Main_MiSTer ever ignored the attribute, this
+  degrades to the old path rather than breaking.
+* **`ioctl_addr` holds the LENGTH at the end.** `hps_io.sv` latches
+  `ioctl_addr <= addr` when the HPS closes the transfer, and for a DDR3
+  download `addr` is the size the HPS reports rather than a counter it walked.
+* **`ioctl_download` falls long before the image is in SDRAM.** It now means
+  "the HPS is done", not "the ROM is loaded". Everything keyed off it has to
+  follow `dl_download` instead -- above all `reset` in `SeibuSPI.sv`, which
+  otherwise releases the 386 into an empty SDRAM, and `LED_USER`, which
+  otherwise goes dark for the part that takes the time.
+
+`hps_io.sv` is byte-identical to IGSPGM's, so none of this needed a sys change.
+
+**TWO HAZARDS THAT COST NOTHING TO AVOID AND EVERYTHING TO MISS.**
+
+`dl_download` must not DIP. It is registered and changes only on a decision --
+the download ended and was slow, or the replay finished -- so at the moment
+`ioctl_download` falls on a fast download it simply stays high. Derive it
+combinationally and there is a one-cycle gap, and to `rom_loader` that gap is
+the end of the image: it resets `part` to 0 and pulses `rom_ready`, which is
+wired to `spi_romcheck`'s `start`, so the checker begins sweeping ch3 against an
+image that does not exist yet.
+
+The pass-through is COMBINATIONAL, deliberately. `rom_loader`'s header records
+that `ioctl_wait` already has a cycle of latency and only works because the HPS
+is slower than the SDRAM. Registering the pass-through would spend another cycle
+of exactly that margin, on the fallback path, to save nothing.
+
+**THE STROBE IS ONE clk_sys CYCLE WIDE, and this is 10c again.** `rom_loader`
+runs on clk_ram, exactly 2x clk_sys and phase aligned, and rising-edge detects.
+A two-cycle strobe is two bytes to it -- which is precisely the bug that had a
+MiSTer reporting 46,792,704 bytes for a 23,396,352 byte image. The new bench
+asserts the width directly rather than inferring it from a byte count, and
+`tb_rom_loader` already runs every set with the pulse held for one AND two
+loader clocks. The two tests meet exactly at that interface.
+
+**DDRAM IS SHARED WITH THE FRAMEBUFFER, and the ROM reader simply wins.**
+`screen_rotate` writes the rotated framebuffer to DDR3 at 0x24000000; the image
+goes to 0x30000000, so they do not overlap in space. They can overlap in time,
+and during a replay `screen_rotate`'s writes are DROPPED rather than queued.
+That is the cheap option and it is sound here: `screen_rotate` ignores
+`DDRAM_BUSY` -- it is declared and never read -- so it cannot be stalled, and
+giving it back-pressure means a FIFO in front of it, which is what IGSPGM had
+to build. There is nothing worth queueing: the core is held in reset for the
+whole replay, so the dropped frames are blank ones. A core using DDRAM for
+anything load-bearing during a load would need the FIFO.
+
+**One bug worth recording because the fitter would never have complained.**
+`DDRAM_ADDR` is a 64-BIT WORD address, not a byte address. Adding a byte base
+to it reads from 0x180000000 -- eight times too high, off the end of memory,
+and perfectly legal RTL. The base has to be shifted with the offset:
+0x30000000 is word 0x06000000.
+
+**Verified in simulation, NOT yet on hardware.** `make -C sim
+run-ddr_rom_reader` covers a fast download at 1, 7, 8, 9 and 4096 bytes -- the
+sizes around the 8-byte word boundary, where the last partial word lives -- with
+irregular back-pressure, plus the strobe width, a slow download passing
+through, a zero-length download starting no replay, and a non-zero index being
+ignored. What it does NOT cover is the real thing: whether Main_MiSTer actually
+honours the attribute on this setup, and whether what lands in DDR3 is what
+`check_mra` thinks the image is. `bytes_in` and the four region checksums are
+the instruments for that, and `bytes_in` is exactly the figure that caught 10c.
+
 ### Stereo, which is two accumulators and a board flag (2026-08-14)
 
 T-K. The cartridge board wires chip output 0 to the left speaker and output 1

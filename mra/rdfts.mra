@@ -56,7 +56,7 @@
     -->
     <rom index="1"><part>00</part></rom>
 
-    <rom index="0" zip="rdfts.zip|rdft.zip" md5="none">
+    <rom index="0" address="0x30000000" zip="rdfts.zip|rdft.zip" md5="none">
         <!-- 386 program -->
         <part name="seibu_1.u0259"        crc="e278dddd"/>
         <part name="raiden-f_prg2.u0258"  crc="58ccb10c"/>
