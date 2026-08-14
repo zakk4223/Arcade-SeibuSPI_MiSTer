@@ -1125,12 +1125,59 @@ three times that. Flip `stereo` off with the same registers and the mix is
 something: it would have passed against a mono core too. All twelve
 pre-existing tests pass bit-identical, which is the regression proof.
 
+**A stale JTAG server reads as a wedged core, and cost a needless reboot.**
+Deploying reprograms the FPGA, and 9b already says to restart the server after
+every `load_core`. What is new is the failure MODE. The server left running
+across a load did not throw, which is what was expected -- it went on answering
+and returned all zeros: `bytes_in 0`, `vbl frames 0`, `CS:EIP 0000:00000000`.
+That is indistinguishable from a core that never started, and the MiSTer was
+rebooted on it. A screenshot taken at the very same moment was 32,929 bytes of
+correct rdfts picture. The core had been fine the whole time.
+
+This is the lesson of 10c's "take screenshots" arriving for the third time, and
+the reboot happened in a session that had already quoted it. A silent zero is a
+worse instrument failure than an exception, because nothing marks it as
+broken. Any all-zero panel taken after a deploy means restart the server before
+believing a word of it.
+
+Separately, and genuinely: `echo ... > /dev/MiSTer_cmd` blocks, and a timeout on
+the LOCAL ssh does not kill the remote writer -- two of them had accumulated.
+`ssh ... 'timeout 20 sh -c "echo ... > /dev/MiSTer_cmd"'` returns 0 cleanly.
+A blocked writer does not mean the load failed: rdft2's writer was stuck from
+06:38 while the game booted, ran attract and was captured.
+
 One trap, and it is the bench's rather than the core's: `reset_dut()` clears
 the state machine but NOT the per-slot RAM, so voices an earlier test left
 active go on sounding. Run last, this test read a constant 1408 in the right
 channel that had nothing to do with the routing. It runs FIRST now, on a
 machine nothing has played on. `silence_pcm_bank3()` exists for the same
 reason and is worth remembering before writing any new case here.
+
+**MEASURED ON HARDWARE the same day, and the control is what makes it a
+proof.** Both captured off the Elgato through the same path, minutes apart, on
+one bitstream:
+
+    set     board          mid rms   side/mid    L!=R
+    rdft2   cartridge        843.1   -25.3 dB   77.6%   STEREO
+    rdfts   single board    1742.5   -81.7 dB    6.7%   MONO
+
+rdft2 was -73.7 dB before this change, with L and R differing by at most 1 LSB.
+The only thing separating the two rows is the MRA's mod byte -- `03` against
+`00` -- so this tests the part simulation cannot reach: that the select chain
+from the mod byte through `set_sxx2c` into `stereo` is wired correctly per
+board. rdfts staying at -81.7 dB is the half that rules out "something changed
+globally".
+
+`compare_audio.py` already prints this figure and labels anything below -60 dB
+MONO, so the check costs nothing on any future capture.
+
+**The level prediction below is CONSISTENT but not proven.** rdfts reads mid
+rms 1742.5, essentially the 1728 this file records for rfjet on the old mono
+core, and rdft2 now sits at 843.1 -- a factor of 2.07, or 6.3 dB, which is what
+was predicted. It is not a controlled measurement: rdft2 and rdfts are
+different games with different music, and no capture of rdft2 on the old core
+exists to difference against. Suggestive, and the honest way to settle it is a
+before/after on ONE set.
 
 **A prediction this makes, which the next audio capture can falsify.** Each
 speaker now carries one chip output where it used to carry all four summed, so
@@ -3452,7 +3499,10 @@ whether it is RIGHT.
       already fixed. If it ever returns: `tools/slop clear`, play, then
       `tools/slop sound` prints `stall at CS:EIP`.
 - [x] **T-K** rdft2, rdft and rfjet should output STEREO; the core was mono.
-      **Done in RTL and verified in simulation, not yet heard on hardware.**
+      **Done, and MEASURED ON HARDWARE: rdft2 side/mid -25.3 dB against
+      rdfts' -81.7 dB on the same bitstream**, where rdft2 read -73.7 dB
+      before. The two rows differ only in the MRA's mod byte, so the per-board
+      select is verified end to end, which simulation cannot do.
       `ymf271_synth` carries two accumulators -- left takes chip outputs 0 and
       2, right takes 1 and 3 -- so their sum is the old mono bit-for-bit and
       the halves read separately are the cartridge's stereo. The select is
@@ -3461,9 +3511,10 @@ whether it is RIGHT.
       are stereo. `test_stereo_split` covers both directions and all twelve
       existing cases still pass bit-identical. Section "Stereo, which is two
       accumulators and a board flag" (2026-08-14), including a level prediction
-      the next capture can falsify. What is owed: hearing it, and a stereo
-      capture measuring side/mid against MAME's -- the -73.7 dB against MAME's
-      -14.5 dB below is the figure that should now move.
+      that is consistent but not yet controlled. What is still owed: -25.3 dB
+      is stereo but narrower than MAME's -14.5 dB, and the two figures come
+      from different passages of attract, so comparing them means capturing the
+      SAME passage on both sides. Nobody has listened to it yet either.
       The original finding, kept because it is the measurement that started it:
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.
