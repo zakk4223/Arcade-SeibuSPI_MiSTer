@@ -43,6 +43,13 @@ module ymf271_synth
 	input                clk,
 	input                reset,
 
+	// The cartridge board wires chip output 0 to the left speaker and 1 to the
+	// right (MAME's spi(): add_route(0,"speaker",1.0,0) and (1,...,1)); the
+	// single board sums all four into one (sxx2e(): ALL_OUTPUTS -> "mono").
+	// Outputs 2 and 3 reach no speaker at all on the cartridge, and MAME's own
+	// commented-out routes ask whether the hardware uses them.
+	input                stereo,
+
 	// ---- slot parameter writes (from the register file) -------------------
 	input                par_we,
 	input          [7:0] par_addr,     // {slot[5:0], word[1:0]}
@@ -83,7 +90,8 @@ module ymf271_synth
 	output reg           ext_ack,      // toggle: mirrors ext_req when data is up
 	output reg     [7:0] ext_data,
 
-	output reg    [15:0] audio,
+	output reg    [15:0] audio_l,
+	output reg    [15:0] audio_r,
 	output reg    [15:0] dbg_overrun,
 	output reg    [15:0] dbg_active   // slots processed, PCM voices + FM ops
 );
@@ -190,14 +198,18 @@ module ymf271_synth
 	reg [20:0] line_tv;
 	reg [63:0] line_data;
 
-	reg signed [27:0] acc;
+	// One accumulator per speaker. In mono the left one carries chip outputs
+	// 0 and 2 and the right one 1 and 3, so their SUM is the four-output mix
+	// the single board makes -- bit for bit what a single accumulator produced
+	// before, since (g0+g2)+(g1+g3) is the same addition in a different order.
+	reg signed [27:0] acc_l, acc_r;
 	reg signed [15:0] sample;
 	reg  [7:0] byte_lo;
 
 	reg [31:0] step_r;
 	reg [16:0] env_gain;
 	reg [17:0] slot_gain;
-	reg [19:0] cvsum;
+	reg [19:0] cvsum_l, cvsum_r;
 	reg [17:0] lfo_vol;
 
 	// Pipeline registers. Everything the FM half added was originally one
@@ -391,12 +403,16 @@ module ymf271_synth
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	// An FM operator folds its envelope into its own output and MAME applies no
-	// channel clamp there, so its mix is a plain sum of the four attenuations.
-	wire [19:0] fm_cvsum = {3'd0, YMF_ATTEN[p_ch0]} + {3'd0, YMF_ATTEN[p_ch1]}
-	                     + {3'd0, YMF_ATTEN[p_ch2]} + {3'd0, YMF_ATTEN[p_ch3]};
+	// channel clamp there, so its mix is a plain sum of the attenuations.
+	wire [19:0] fm_cvsum_l = {3'd0, YMF_ATTEN[p_ch0]}
+	                       + (stereo ? 20'd0 : {3'd0, YMF_ATTEN[p_ch2]});
+	wire [19:0] fm_cvsum_r = {3'd0, YMF_ATTEN[p_ch1]}
+	                       + (stereo ? 20'd0 : {3'd0, YMF_ATTEN[p_ch3]});
 
-	wire signed [36:0] mix_pcm = $signed(sample) * $signed({1'b0, cvsum});
-	wire signed [38:0] mix_fm  = op_out * $signed({1'b0, fm_cvsum});
+	wire signed [36:0] mix_pcm_l = $signed(sample) * $signed({1'b0, cvsum_l});
+	wire signed [36:0] mix_pcm_r = $signed(sample) * $signed({1'b0, cvsum_r});
+	wire signed [38:0] mix_fm_l  = op_out * $signed({1'b0, fm_cvsum_l});
+	wire signed [38:0] mix_fm_r  = op_out * $signed({1'b0, fm_cvsum_r});
 
 	// ---- sample addressing ------------------------------------------------
 	wire [23:0] addr8  = {1'b0, p_start} + stepptr[39:16];
@@ -572,13 +588,24 @@ module ymf271_synth
 	reg [5:0] state;
 	reg [5:0] ext_ret;    // where S_EXT resumes: the pass must not lose its place
 
-	// SXX2E wires all four of the chip's outputs to one mono speaker
-	// (add_route(ALL_OUTPUTS, "mono", 1.0)), and MAME normalises each of them
-	// by 32768<<2, so the mono sample is the raw accumulator >> 2.
-	wire signed [27:0] acc_scaled = acc >>> 2;
-	wire signed [15:0] acc_clip = (acc_scaled >  28'sd32767) ?  16'sh7FFF :
-	                              (acc_scaled < -28'sd32768) ? -16'sh8000 :
-	                                                           acc_scaled[15:0];
+	// MAME normalises every one of the chip's four outputs by 32768<<2, so a
+	// speaker's sample is its accumulator >> 2 whatever is routed to it.
+	//
+	// Mono sums the two accumulators BEFORE the shift, not after. Shifting
+	// each and adding would round each half toward -inf separately and lose up
+	// to one LSB against the old single-accumulator mono, which is the one
+	// thing this change must not do -- rdfts' sound is already measured.
+	wire signed [28:0] acc_sum = {acc_l[27], acc_l} + {acc_r[27], acc_r};
+
+	function signed [15:0] outclip(input signed [28:0] a);
+		outclip = (a >>> 2 >  29'sd32767) ?  16'sh7FFF :
+		          (a >>> 2 < -29'sd32768) ? -16'sh8000 :
+		          $signed(a[17:2]);
+	endfunction
+
+	wire signed [15:0] out_mono  = outclip(acc_sum);
+	wire signed [15:0] out_left  = outclip({acc_l[27], acc_l});
+	wire signed [15:0] out_right = outclip({acc_r[27], acc_r});
 
 	// The slot to prefetch: next step in bank order 0, 2, 1, 3.
 	wire [1:0] nstep  = step + 2'd1;
@@ -617,7 +644,8 @@ module ymf271_synth
 			tick_pend  <= 1'b0;
 			group      <= 4'd0;
 			step       <= 2'd0;
-			acc        <= 28'sd0;
+			acc_l      <= 28'sd0;
+			acc_r      <= 28'sd0;
 			active_cnt <= 16'd0;
 			st_ra      <= 6'd0;
 			fb_ra      <= 6'd0;
@@ -836,13 +864,19 @@ module ymf271_synth
 			state <= step_is_pcm ? S_VOL3 : S_FMPH;
 		end
 		S_VOL3: begin
-			cvsum <= {2'd0, chclip(g0)} + {2'd0, chclip(g1)}
-			       + {2'd0, chclip(g2)} + {2'd0, chclip(g3)};
+			// Each channel is clamped at 65536 individually before it is summed
+			// (update_pcm's four `if (chN_vol > 65536)`), so the clamp has to
+			// stay per channel here even when two of them land in one speaker.
+			cvsum_l <= {2'd0, chclip(g0)}
+			         + (stereo ? 20'd0 : {2'd0, chclip(g2)});
+			cvsum_r <= {2'd0, chclip(g1)}
+			         + (stereo ? 20'd0 : {2'd0, chclip(g3)});
 			state <= S_MIX;
 		end
 
 		S_MIX: begin
-			acc     <= acc + {{7{mix_pcm[36]}}, mix_pcm[36:16]};
+			acc_l   <= acc_l + {{7{mix_pcm_l[36]}}, mix_pcm_l[36:16]};
+			acc_r   <= acc_r + {{7{mix_pcm_r[36]}}, mix_pcm_r[36:16]};
 			stepptr <= stepptr + {8'd0, step_r};
 			state   <= S_STORE;
 		end
@@ -874,7 +908,10 @@ module ymf271_synth
 			// 3's, depending on the algorithm.
 			if ((is_op1 && !fb_from_r3) || (!is_op1 && net_last && fb_from_r3))
 				fb1 <= fb_new;
-			if (mix_this_op) acc <= acc + {{5{mix_fm[38]}}, mix_fm[38:16]};
+			if (mix_this_op) begin
+				acc_l <= acc_l + {{5{mix_fm_l[38]}}, mix_fm_l[38:16]};
+				acc_r <= acc_r + {{5{mix_fm_r[38]}}, mix_fm_r[38:16]};
+			end
 			state <= S_STORE;
 		end
 
@@ -933,7 +970,8 @@ module ymf271_synth
 		end
 
 		S_OUT: begin
-			audio      <= acc_clip;
+			audio_l    <= stereo ? out_left  : out_mono;
+			audio_r    <= stereo ? out_right : out_mono;
 			dbg_active <= active_cnt;
 			state      <= S_IDLE;
 		end
@@ -952,8 +990,10 @@ module ymf271_synth
 			ext_ack     <= 1'b0;
 			ext_data    <= 8'd0;
 			tick_pend   <= 1'b0;
-			audio       <= 16'd0;
-			acc         <= 28'sd0;
+			audio_l     <= 16'd0;
+			audio_r     <= 16'd0;
+			acc_l       <= 28'sd0;
+			acc_r       <= 28'sd0;
 			keyon_pend  <= 48'd0;
 			keyoff_pend <= 48'd0;
 			dbg_overrun <= 16'd0;
@@ -972,7 +1012,8 @@ module ymf271_synth
 	// the >>16 scaling deliberately discards.
 	/* verilator lint_off UNUSEDSIGNAL */
 	wire _unused = &{1'b0, w0, w1, w2, step_nsh, d1_mul, gain_tl, gain_lfo,
-	                 mix_pcm, mix_fm, addr8, idx3, step_mul, alfo_scaled,
+	                 mix_pcm_l, mix_pcm_r, mix_fm_l, mix_fm_r,
+	                 acc_sum, addr8, idx3, step_mul, alfo_scaled,
 	                 op_mul, fb_mul, fb_div, fb_sum, phase_sum, mod_in, op_input, fb_avg,
 	                 plfo_q, plfo_base, plfo_addr, alfo, amul_r,
 	                 // ext_addr is the chip's full 23-bit space; SXX2E has a

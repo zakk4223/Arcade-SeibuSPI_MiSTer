@@ -54,7 +54,8 @@ module spi_sound
 	output            pcm_req,
 	input             pcm_ack,
 
-	output     [15:0] audio,
+	output     [15:0] audio_l,
+	output     [15:0] audio_r,
 
 	// ---- telemetry --------------------------------------------------------
 	output reg [15:0] dbg_z80_pc,
@@ -451,6 +452,10 @@ module spi_sound
 	(
 		.clk      (clk),
 		.reset    (reset),
+		// The board, not the set: the single-board PCB sums the chip's four
+		// outputs to one speaker, the cartridge splits 0 and 1 left/right.
+		// That is exactly the mod byte's bit 0, which is already here.
+		.stereo   (set_sxx2c),
 		.addr     (ymf_addr),
 		.din      (bus_data),
 		.dout     (ymf_dout),
@@ -463,7 +468,8 @@ module spi_sound
 		.sdr_req  (pcm_req),
 		.sdr_ack  (pcm_ack),
 
-		.audio       (audio),
+		.audio_l     (audio_l),
+		.audio_r     (audio_r),
 		.dbg_overrun (dbg_ymf_overrun),
 		.dbg_active  (dbg_ymf_active)
 	);

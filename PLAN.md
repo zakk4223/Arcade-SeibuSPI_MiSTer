@@ -1079,6 +1079,71 @@ Level: MAME is 1.35x the hardware here (rms 2324 vs 1728), against 2.58x on
 rdft2. Still unexplained, still a level difference and not a shape one; every
 figure above is normalised.
 
+### Stereo, which is two accumulators and a board flag (2026-08-14)
+
+T-K. The cartridge board wires chip output 0 to the left speaker and output 1
+to the right; the single board sums all four outputs into one. That is
+`spi()`'s `add_route(0,"speaker",1.0,0)` / `add_route(1,...,1)` against
+`sxx2e()`'s `add_route(ALL_OUTPUTS,"mono",1.0)`, and it splits the sets the way
+the driver does, not the way the set list does:
+
+    rdft   -> spi()            stereo
+    rdft2  -> rdft2() -> spi() stereo
+    rfjet  -> rdft2() -> spi() stereo
+    rdfts  -> sxx2e()          mono
+
+**That is exactly the mod byte's bit 0**, which `spi_sound` already receives as
+`set_sxx2c` -- rdfts sends `00`, the other three send `01`, `03`, `05`. So the
+select needed no new plumbing above the sound block, and nothing in any MRA
+changes.
+
+**The decomposition is free.** `ymf271_synth` carried one accumulator summing
+all four channels. It now carries two: the left takes chip outputs 0 and 2, the
+right 1 and 3. Their SUM is the old mono, because `(g0+g2)+(g1+g3)` is the same
+addition in a different order, and in stereo the two halves are read
+separately with outputs 2 and 3 dropped -- which is what the board does with
+them. Cost is one extra multiply on each of the PCM and FM paths and one extra
+28-bit accumulator.
+
+Two details that would each have been a quiet off-by-one:
+
+* **Mono sums before the shift, not after.** Each output is normalised by
+  `32768<<2`, so a speaker is its accumulator `>> 2`. Shifting both halves and
+  then adding rounds each toward -inf separately and loses up to an LSB against
+  the old single accumulator. rdfts' sound is already measured against MAME;
+  this change must not move it, and summing first is what guarantees that.
+* **The per-channel clamp stays per channel.** `update_pcm` clamps each of the
+  four at 65536 individually before summing, so folding ch0 and ch2 into one
+  accumulator still has to clamp them separately on the way in.
+
+**Verification.** `run-ymf271` gained `test_stereo_split`, and the two halves
+prove each other. In stereo with ch0 at 0 dB, ch1 silenced and **ch2/ch3 left
+at 0 dB on purpose**, the left speaker is `sample >> 2` exactly and the right
+is silent -- a wiring that folded the unrouted channels back in would read
+three times that. Flip `stereo` off with the same registers and the mix is
+`3*sample >> 2` on both speakers, which is what makes the first half mean
+something: it would have passed against a mono core too. All twelve
+pre-existing tests pass bit-identical, which is the regression proof.
+
+One trap, and it is the bench's rather than the core's: `reset_dut()` clears
+the state machine but NOT the per-slot RAM, so voices an earlier test left
+active go on sounding. Run last, this test read a constant 1408 in the right
+channel that had nothing to do with the routing. It runs FIRST now, on a
+machine nothing has played on. `silence_pcm_bank3()` exists for the same
+reason and is worth remembering before writing any new case here.
+
+**A prediction this makes, which the next audio capture can falsify.** Each
+speaker now carries one chip output where it used to carry all four summed, so
+if a game drives ch0/ch1 and leaves ch2/ch3 attenuated the per-speaker level
+falls by roughly half -- about 6 dB. 10d already records MAME running 2.58x
+LOUDER than the hardware on rdft2 and 1.35x on rfjet, unexplained; this widens
+that gap rather than closing it. Which is itself informative: our mono was
+summing MORE channels than MAME's stereo and was still the quieter of the two,
+so the level discrepancy was never about channel count and this change should
+not be expected to fix it. If a fresh capture shows the gap grow on rdft2 and
+rfjet while rdfts stays put, the routing landed and whatever is left is common
+to all three boards.
+
 ### rdft2 played through, and the bus is 68% idle at its worst (2026-08-14)
 
 A credit played to a death on the second boss, marks cleared first. This is
@@ -3378,7 +3443,20 @@ whether it is RIGHT.
       Confirming it means putting the old core back to measure a stall that is
       already fixed. If it ever returns: `tools/slop clear`, play, then
       `tools/slop sound` prints `stall at CS:EIP`.
-- [ ] **T-K** rdft2 and rdft should output STEREO; the core is mono. Found by
+- [x] **T-K** rdft2, rdft and rfjet should output STEREO; the core was mono.
+      **Done in RTL and verified in simulation, not yet heard on hardware.**
+      `ymf271_synth` carries two accumulators -- left takes chip outputs 0 and
+      2, right takes 1 and 3 -- so their sum is the old mono bit-for-bit and
+      the halves read separately are the cartridge's stereo. The select is
+      `set_sxx2c`, which `spi_sound` already had, because the split is
+      per-BOARD: rdfts is `sxx2e()` and mono, the other three reach `spi()` and
+      are stereo. `test_stereo_split` covers both directions and all twelve
+      existing cases still pass bit-identical. Section "Stereo, which is two
+      accumulators and a board flag" (2026-08-14), including a level prediction
+      the next capture can falsify. What is owed: hearing it, and a stereo
+      capture measuring side/mid against MAME's -- the -73.7 dB against MAME's
+      -14.5 dB below is the figure that should now move.
+      The original finding, kept because it is the measurement that started it:
       measuring against MAME (10d): hardware side/mid is -73.7 dB (L and R
       differ by at most 1 LSB, which is the capture path), MAME's is -14.5 dB.
       MAME's `spi()` routes YMF output 0 to the left speaker and 1 to the

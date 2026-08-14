@@ -132,8 +132,12 @@ static void timer_write(uint8_t a, uint8_t data) {
 static int16_t next_sample() {
     do { tick(); } while (!tick_now);
     run(1200);                              // a sample period is 1298 cycles
-    return (int16_t)dut->audio;
+    return (int16_t)dut->audio_l;
 }
+
+// The right speaker, for the stereo test only. In mono both sides carry the
+// same sample, so every other test can go on reading one of them.
+static int16_t last_right() { return (int16_t)dut->audio_r; }
 
 // ------------------------------------------------------------ phase model --
 // update_pcm()'s pointer arithmetic. endaddr and loopaddr are offsets from
@@ -912,9 +916,112 @@ static void test_ext_memory_read() {
     printf("ext memory read: 32 bytes from 0x%05X, %d mismatches\n", A, bad);
 }
 
+// ---------------------------------------------------------------- stereo --
+// The cartridge board wires chip output 0 to the left speaker and output 1 to
+// the right; the single board sums all four outputs into one. Every test above
+// runs mono, so this is the only place the split is exercised.
+//
+// The arithmetic stays exact. With total level 0 and the envelope saturated a
+// channel at 0 dB contributes (sample * 65536) >> 16 == sample and one at
+// level 15 contributes (sample * 1) >> 16 == 0, so with ch0 loud and ch1
+// silent the left speaker is sample >> 2 and the right is 0.
+static void test_stereo_split() {
+    dut->stereo = 1;
+    reset_dut();
+    const uint32_t start = 0x3000;
+    setup_slot0(start, 0x7FFFF, 0, false);
+    // ch0 0 dB, ch1 fully attenuated. ch2 and ch3 are left at 0 dB ON PURPOSE:
+    // they reach no speaker on this board, so a wrong wiring that folds them
+    // back in shows up here as three times the level rather than as silence.
+    fm_write(0, 0, 0xD, 0x0F);
+    key_on();
+
+    int idx = -1;
+    for (int i = 0; i < 40; i++) next_sample();
+    int16_t got = next_sample();
+    for (int d = 0; d <= 4; d++) {
+        Phase p; p.endoff = 0x7FFFF; p.loopoff = 0; p.step = 65536;
+        p.stepptr = (uint64_t)(40 - d) * 65536;
+        if ((int16_t)(expect_8bit(start, p) >> 2) == got) { idx = 40 - d; break; }
+    }
+    if (idx < 0) { fail("stereo: no plausible alignment in the first samples"); return; }
+
+    Phase p; p.endoff = 0x7FFFF; p.loopoff = 0; p.step = 65536;
+    p.stepptr = (uint64_t)idx * 65536;
+    p.advance();
+
+    int bad_l = 0, bad_r = 0;
+    for (int i = 0; i < 200; i++) {
+        p.wrap();
+        int16_t want = (int16_t)(expect_8bit(start, p) >> 2);
+        int16_t l = next_sample();
+        int16_t r = last_right();
+        if (l != want) {
+            if (bad_l < 5) printf("FAIL: stereo L sample %d: want=%d got=%d\n", i, want, l);
+            bad_l++;
+        }
+        // "Off" is attenuation level 15, and channel_attenuation_table's last
+        // entry is 1/65536, not 0. A negative sample therefore lands on -1
+        // rather than 0 once the >>16 and the >>2 have both rounded toward
+        // -inf. One LSB is the correct answer here, not a tolerance for slop.
+        if (r < -1 || r > 0) {
+            if (bad_r < 5) printf("FAIL: stereo R sample %d: want 0 or -1, got=%d\n", i, r);
+            bad_r++;
+        }
+        p.advance();
+    }
+    errors += bad_l + bad_r;
+    printf("stereo split: 200 samples, %d left / %d right mismatches\n", bad_l, bad_r);
+
+    // The same registers on the single board. ch0, ch2 and ch3 are all at 0 dB
+    // and ch1 is silent, so mono is three times what the left speaker just
+    // carried -- and both sides must show it. If `stereo` did nothing, the
+    // block above would have passed against a mono core too; this is what
+    // makes that check mean something.
+    dut->stereo = 0;
+    reset_dut();
+    setup_slot0(start, 0x7FFFF, 0, false);
+    fm_write(0, 0, 0xD, 0x0F);
+    key_on();
+
+    idx = -1;
+    for (int i = 0; i < 40; i++) next_sample();
+    got = next_sample();
+    for (int d = 0; d <= 4; d++) {
+        Phase q; q.endoff = 0x7FFFF; q.loopoff = 0; q.step = 65536;
+        q.stepptr = (uint64_t)(40 - d) * 65536;
+        int16_t w = (int16_t)((3 * (int32_t)expect_8bit(start, q)) >> 2);
+        if (got == w || got == (int16_t)(w - 1)) { idx = 40 - d; break; }
+    }
+    if (idx < 0) { fail("stereo: no plausible mono alignment"); return; }
+
+    Phase q; q.endoff = 0x7FFFF; q.loopoff = 0; q.step = 65536;
+    q.stepptr = (uint64_t)idx * 65536;
+    q.advance();
+
+    int bad_m = 0, bad_eq = 0;
+    for (int i = 0; i < 200; i++) {
+        q.wrap();
+        int16_t want = (int16_t)((3 * (int32_t)expect_8bit(start, q)) >> 2);
+        int16_t l = next_sample();
+        int16_t r = last_right();
+        // Same one-LSB residue as above: ch1 is level 15, so it adds -1 to the
+        // sum on a negative sample instead of nothing.
+        if (l != want && l != (int16_t)(want - 1)) {
+            if (bad_m < 5) printf("FAIL: mono sample %d: want=%d got=%d\n", i, want, l);
+            bad_m++;
+        }
+        if (r != l) bad_eq++;
+        q.advance();
+    }
+    errors += bad_m + bad_eq;
+    printf("mono sum:     200 samples, %d mismatches, %d L!=R\n", bad_m, bad_eq);
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vymf271;
+    dut->stereo = 0;                        // every test but the first is mono
 
     // A ramp with a stride coprime with 8, so a line-cache bug cannot hide
     // behind repeating values inside one fetched line.
@@ -922,6 +1029,13 @@ int main(int argc, char **argv) {
     for (uint32_t i = 0; i < PCM_SIZE; i++) rom[i] = (uint8_t)(i * 37 + 11);
     // A block of silence for parking PCM voices the FM tests cannot switch off.
     for (uint32_t i = 0x100000; i < 0x101000; i++) rom[i] = 0;
+
+    // FIRST, on a machine nothing has played on yet. reset_dut() clears the
+    // state machine but NOT the per-slot RAM, so voices an earlier test left
+    // active keep sounding into the mix -- which is what silence_pcm_bank3()
+    // exists to work around further down. Run last, this test saw a constant
+    // 1408 in the right channel that had nothing to do with the routing.
+    test_stereo_split();
 
     test_8bit_playback();
     test_12bit_playback();

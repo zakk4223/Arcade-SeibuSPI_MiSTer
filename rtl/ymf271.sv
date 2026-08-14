@@ -26,6 +26,7 @@ module ymf271
 (
 	input             clk,
 	input             reset,
+	input             stereo,      // cartridge board: out 0 left, out 1 right
 
 	// ---- Z80 bus, 0x6000-0x600F ------------------------------------------
 	input       [3:0] addr,
@@ -41,7 +42,8 @@ module ymf271
 	output            sdr_req,
 	input             sdr_ack,
 
-	output     [15:0] audio,
+	output     [15:0] audio_l,
+	output     [15:0] audio_r,
 	output     [15:0] dbg_overrun,
 	output     [15:0] dbg_active
 );
@@ -420,6 +422,7 @@ module ymf271
 	(
 		.clk         (clk),
 		.reset       (reset),
+		.stereo      (stereo),
 		.grp_sync_flat (grp_sync_flat),
 		.par_we      (par_we),
 		.par_addr    (par_addr),
@@ -439,7 +442,8 @@ module ymf271
 		.ext_req     (ext_req),
 		.ext_ack     (ext_ack),
 		.ext_data    (ext_data),
-		.audio       (audio),
+		.audio_l     (audio_l),
+		.audio_r     (audio_r),
 		.dbg_overrun (dbg_overrun),
 		.dbg_active  (dbg_active)
 	);

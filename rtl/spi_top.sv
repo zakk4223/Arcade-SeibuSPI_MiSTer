@@ -401,7 +401,7 @@ module spi_top
 	// ------------------------------------------------------------------
 	wire [7:0]  coin_latch;
 	wire        sndfifo_full;
-	wire [15:0] snd_audio;
+	wire [15:0] snd_audio_l, snd_audio_r;
 
 	spi_sound sound
 	(
@@ -434,7 +434,8 @@ module spi_top
 		.pcm_req    (sdr_pcm_req),
 		.pcm_ack    (sdr_pcm_ack),
 
-		.audio      (snd_audio),
+		.audio_l    (snd_audio_l),
+		.audio_r    (snd_audio_r),
 
 		.dbg_z80_pc      (snd_pc),
 		.dbg_fifo_rd     (snd_fifo_rd),
@@ -828,8 +829,11 @@ module spi_top
 
 	// SXX2E is a mono board: the YMF271's four outputs are summed onto one
 	// speaker, so both sides carry the same sample.
-	assign audio_l = snd_audio;
-	assign audio_r = snd_audio;
+	// Both sides come from the synth already: it hands back the same mono
+	// sample on each when the board is a single PCB. Duplicating here instead
+	// would have to know the board too, and then two places would.
+	assign audio_l = snd_audio_l;
+	assign audio_r = snd_audio_r;
 
 	// Signals not yet consumed; each disappears as its block lands.
 	wire _unused = &{1'b0, clk_ram, dma_busy, layers_busy, spr_busy,
