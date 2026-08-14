@@ -104,6 +104,10 @@ module spi_jtag_peek
 	input      [31:0] stall_eip,
 	input      [15:0] stall_cs,
 
+	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
+	// because it is a different question from everything on SNDV.
+	input      [94:0] sdr_trans,
+
 	// Live layer masks driven from the host, so a rendering fault can be
 	// isolated to a layer without a rebuild for each experiment.
 	output      [7:0] ctrl
@@ -237,6 +241,24 @@ module spi_jtag_peek
 	gdt_issp
 	(
 		.probe  (gdt),
+		.source ()
+	);
+
+	// SDRAM occupancy: 5 x 19 transaction counts, ch1 in the low bits.
+	// See rtl/spi_sdr_stats.sv.
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (6),
+		.instance_id             ("SDRM"),
+		.probe_width             (95),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	sdram_issp
+	(
+		.probe  (sdr_trans),
 		.source ()
 	);
 

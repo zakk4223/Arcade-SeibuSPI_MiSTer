@@ -415,6 +415,17 @@ sdram #(.USE_CH5(1)) sdram
 	.ch5_req (sdr_pcm_req),  .ch5_ack (sdr_pcm_ack)
 );
 
+// How busy that bus actually is. Taps the handshakes only -- nothing here
+// touches sdram.sv, whose clk_ram paths PLAN.md 15.8 says to leave alone.
+wire [94:0] sdr_trans;
+
+spi_sdr_stats sdr_stats
+(
+	.clk   (clk_ram),
+	.ack   ({sdr_pcm_ack, sdr_spr_ack, sdr_rw_ack, sdr_gfx_ack, sdr_prg_ack}),
+	.trans (sdr_trans)
+);
+
 /////////////////////////  ROM LOADER  ///////////////////////////
 
 wire        rom_ready;
@@ -587,6 +598,7 @@ spi_jtag_peek peek
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
+	.sdr_trans(sdr_trans),
 	.ctrl(dbg_ctrl)
 );
 
