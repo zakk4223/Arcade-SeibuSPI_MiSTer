@@ -152,6 +152,10 @@ module spi_sprite
 	reg        render_bank;
 	reg  [8:0] render_line;
 
+	// The line the next restart will pick up; render_bank is derived from it so
+	// the two cannot drift apart. Same construction as spi_layers.sv.
+	wire [8:0] next_line = (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
+
 	reg  [9:0] lb_wr_addr;
 	reg [14:0] lb_wr_data;
 	reg        lb_we;
@@ -551,8 +555,18 @@ module spi_sprite
 			                                         fstate == F_COL ||
 			                                         fstate == F_DONE)))) begin
 				restart_req <= 1'b0;
-				render_line <= (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
-				render_bank <= ~render_bank;
+				render_line <= next_line;
+				// Derived, not toggled -- the same fix spi_layers.sv carries, and
+				// for the same reason. The mixer reads line L from ~L[0], so the
+				// only correct write bank is ~next_line[0]. `~render_bank` also
+				// alternates correctly, but its PHASE was never tied to vcnt: the
+				// reset value below sets it to 0 and the first line_start after
+				// reset lands on whichever vcnt parity it lands on. That made the
+				// sprite buffer an independent coin flip from the tile layers --
+				// which is how it showed up, as the columns that were the only
+				// correctly aligned ones while the layers were inverted, and that
+				// went one line out the moment the layers were fixed.
+				render_bank <= ~next_line[0];
 				clr         <= 9'd0;
 				budget      <= BUDGET;
 				busy        <= 1'b1;

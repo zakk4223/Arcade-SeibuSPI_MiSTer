@@ -130,6 +130,11 @@ module spi_layers
 	reg [8:0] render_line;
 	reg       render_bank;
 
+	// The line the next restart will pick up. Named here rather than inlined at
+	// the restart because render_bank is derived from it: the two have to agree
+	// by construction, not by both being edited the same way later.
+	wire [8:0] next_line = (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
+
 	// ------------------------------------------------------------------
 	// Per-layer parameters, selected by the phase
 	// ------------------------------------------------------------------
@@ -445,8 +450,23 @@ module spi_layers
 			// A tile boundary is the safe place to abandon the rest of a line.
 			if (restart_req && (state == S_IDLE || state == S_NEXT)) begin
 				restart_req <= 1'b0;
-				render_line <= (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
-				render_bank <= ~render_bank;
+				render_line <= next_line;
+				// Derived from the line being rendered, NOT toggled. The mixer
+				// reads line L from ~L[0] (disp_bank above), so the only correct
+				// write bank is ~next_line[0]. A free-running `~render_bank`
+				// satisfies that too -- but only if its phase happens to line up
+				// with vcnt, and nothing established that phase: render_bank has
+				// no reset value and its parity is whatever the first restart
+				// after reset made it. Half of all resets came up inverted, and
+				// then the renderer wrote line N+1 into the bank being displayed
+				// for line N, so the display showed the stale line N-1 ahead of
+				// the write sweep and N+1 behind it, with the crossover jittering
+				// frame to frame. That is a one-line displacement in whichever
+				// layer is opaque -- invisible on flat background, which is why
+				// it read as "a band of interference" only where the fore layer
+				// had contrasty content, and why a plain reset often "fixed" it.
+				// Deriving the bank makes the invariant structural.
+				render_bank <= ~next_line[0];
 				layer       <= L_BACK;
 				col         <= 6'd0;
 				busy        <= 1'b1;
