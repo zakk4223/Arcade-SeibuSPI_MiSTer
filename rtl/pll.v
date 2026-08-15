@@ -8,24 +8,27 @@
 //    outclk_1 = 1260 / 22 =  57.272727 MHz   clk_sys  (video, I/O, sound)
 //    outclk_2 = 1260 / 44 =  28.636364 MHz   clk_cpu  (the 386)
 //
-//  clk_ram does NOT have to be a multiple of clk_sys or clk_cpu: every crossing
-//  to the SDRAM controller is a toggle handshake. The real constraint is that
-//  all three outputs are integer divisions of the same 1260 MHz VCO, so the
-//  choices are 1260/N: 114.545 (/11), 105.0 (/12), 96.923 (/13), 90.0 (/14).
+//  114.545455 IS the working frequency, on this board, with all four sets
+//  byte-exact. An earlier version of this comment said it was unreachable here
+//  -- that the first 16-bit word of every burst read came back as unstable
+//  garbage. The symptom was real and the diagnosis was wrong: the cause was
+//  sdram.sv's DQ capture register having been split per channel, which let the
+//  fitter drag the copies out of the I/O cell and destroyed the input timing.
+//  Restoring the single dq_reg made 114.545455 byte-perfect. clk_ram was halved
+//  to 57.272727 to work around it at the time; that was reverted. See PLAN.md
+//  section 10, and do NOT re-split dq_reg to chase fabric slack.
 //
-//  114.545 does not work on this board -- the first 16-bit word of every burst
-//  read comes back as unstable garbage, verified over JTAG on a channel that the
-//  ch1 width bug never touched. 57.272727 is reliable but too slow: the tile
-//  engine cannot fetch a whole scanline in time and the text layer, rendered
-//  last, gets truncated.
-//
-//  96.923077 (1260/13) was tried and FAILS TIMING, badly: sys/sys_top.sdc puts
-//  every PLL output in one clock group, so Quartus analyses clk_ram <-> clk_sys
-//  paths, and at a non-integer ratio the closest launch/capture edge pair is a
-//  sliver. clk_sys came out at -4.7 ns with TNS -999. The 2:1 ratio is what made
-//  the old builds close. So clk_ram is effectively pinned to an integer multiple
-//  of clk_sys unless the two domains are declared asynchronous and the sdram.sv
-//  request samplers are widened from one flop to two.
+//  The other three divisions of this VCO, for the record: 105.0 (/12),
+//  96.923 (/13), 90.0 (/14). 96.923077 was tried and FAILS TIMING badly --
+//  sys/sys_top.sdc puts every PLL output in one clock group, so Quartus
+//  analyses clk_ram <-> clk_sys paths, and at a non-integer ratio the closest
+//  launch/capture edge pair is a sliver; clk_sys came out at -4.7 ns with TNS
+//  -999. The 2:1 ratio is what makes these builds close. So clk_ram is
+//  effectively pinned to an integer multiple of clk_sys unless the two domains
+//  are declared asynchronous and the sdram.sv request samplers are widened from
+//  one flop to two. 57.272727 is reliable but too slow: the tile engine cannot
+//  fetch a whole scanline in time and the text layer, rendered last, gets
+//  truncated.
 //
 //  clk_cpu is exactly clk_sys / 2 and phase aligned, so every clk_cpu edge
 //  coincides with a clk_sys edge and the two are in the same clock group -- the

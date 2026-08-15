@@ -275,7 +275,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 wire clk_sys;   //  57.272727 MHz - video, I/O, sound
 wire clk_cpu;   //  28.636364 MHz - the 386
-wire clk_ram;   //  96.923077 MHz - SDRAM controller
+wire clk_ram;   // 114.545455 MHz - SDRAM controller
 wire pll_locked;
 
 pll pll
