@@ -5302,32 +5302,55 @@ be idle 76-83%.** Dropping the clock 12.7% changes nothing a player could see.
 The frequency is cosmetic; only a throttle several times deeper would restore a
 real 386DX-25's behaviour.
 
-### 16.3 What could NOT be established, and why
+### 16.3 The MAME comparison was against the wrong program state (corrected)
 
-The interesting number -- how much faster z386x is than a real 386DX-25 -- is
-still open. MAME is the obvious oracle and it does not give it up:
+**This section originally reported that MAME's 386 waits on the SOUND handshake
+while ours waits on vblank, and treated that as a real difference worth
+remembering for T-O. It is withdrawn. They wait on the same thing.**
 
-* **MAME has no periodic Lua hook.** Only frame notifiers, so a PC sample is
-  always at the same phase of the frame. At that phase (end of frame) MAME's 386
-  is 93% inside the SOUND handshake wait at 26d65a (`bt WORD PTR ds:0x684,1`,
-  waiting on the Z80) and 0 of 480 samples in the vblank wait. That is a biased
-  statistic and cannot be turned into an idle fraction.
+MAME was not in attract. It was running the sample-flash updater -- the
+"NOW UPDATING. PLEASE WAIT A MOMENT." screen with its block counter -- because
+`~/.mame/nvram/rdft/soundflash1`+`2` did not hold a valid pre-flashed image. The
+updater's whole job is to hand blocks to the sound subsystem and wait for the
+Z80 to acknowledge each one, which is exactly the loop it was sitting in:
+
+    26d65a  bt   WORD PTR ds:0x684,1     ; Z80 -> 386 FIFO not empty?
+    26d66c  jae  26d65a                  ; no reply yet -> spin
+    26d66e  mov  ax, ds:0x680            ; take the reply
+
+So that 93% figure measured the reflash ritual, not gameplay. Our hardware never
+shows it because the MRA ships the flash pre-programmed (section 10b), which is
+the same reason `fifo2 push/pop` sits at 42 for a whole session.
+
+Installing the image the way the capture recipe already prescribes --
+`tools/build_soundflash.py rdft.zip out.bin`, split at 1 MB into
+`<nvram>/rdft/soundflash1` and `soundflash2` -- makes MAME boot straight to
+attract, the same title-over-demo screen the hardware shows. Re-run there:
+
+    480 of 480 fixed-phase samples at 00203F0A -- the SAME vblank spin loop
+
+**The lesson is the one already written down for hardware and not applied here:
+screenshot first.** One snapshot of MAME would have shown "NOW UPDATING" in
+seconds and saved the whole detour. `Average speed` does not substitute for it:
+throttled runs report 100% whether or not the updater is running, so the speed
+tell in the capture recipe only works with `-nothrottle`.
+
+### 16.4 What is still not established
+
+How much faster z386x is per clock than a real 386DX-25 is still open. MAME's
+fraction cannot be pinned down with the hooks it exposes:
+
+* **No periodic Lua hook** -- only frame notifiers, so every PC sample is at one
+  fixed phase of the frame. 480/480 in the spin says MAME has substantial
+  headroom too, consistent with our 80-85%, but a single phase cannot be turned
+  into a fraction.
 * **Memory read taps are bypassed for normal RAM reads.** A tap on the frame
-  counter 0x3692c fires exactly 0.998 times per frame, which looks like "MAME
-  never spins" -- but sampling EIP inside the tap shows it is ALWAYS 0x26b188,
-  the ISR's own read-modify-write. The game's loop reads never reach the tap.
-  An early conclusion drawn from that hits/frame figure was wrong and is
-  discarded here; the lesson is to check WHICH access a tap is catching before
-  believing a per-frame count.
-* **A tap on the device port 0x684 crashes MAME** (core dump), so the sound wait
-  cannot be timed that way either.
+  counter 0x3692c fires exactly 0.998 times per frame, which looks like a
+  measurement -- but sampling EIP inside the tap shows it is ALWAYS 0x26b188,
+  the vblank ISR's own read-modify-write. The game's loop reads never reach it.
+  Check WHICH access a tap is catching before believing a per-frame count.
+* **A tap on the device port 0x684 crashes MAME** (core dump).
 
-The honest summary is that hardware is measured and MAME is not. What the two
-DO agree on is that the 386 spends most of its time waiting, not computing --
-ours on vblank, MAME's on the sound handshake. That difference in WHAT they wait
-on is itself worth remembering next time T-O is looked at.
-
-To close 16.3 properly the instrument wants to be on our side, not MAME's: a
-telemetry counter of `clk_cpu` cycles spent with `eip` inside the wait loop
-would give the idle fraction exactly and continuously, instead of by sampling,
-and would measure gameplay rather than attract.
+The instrument wants to be on our side: a telemetry counter of `clk_cpu` cycles
+spent with `eip` inside the wait loop would give the idle fraction exactly and
+continuously, and could measure gameplay rather than attract.
