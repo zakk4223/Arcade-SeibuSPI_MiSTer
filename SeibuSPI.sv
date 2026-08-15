@@ -659,6 +659,8 @@ spi_jtag_peek peek
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
+	.flash_progs(dbg_flash_progs), .flash_erases(dbg_flash_erases),
+	.flash_drops(dbg_flash_drops), .flash_busy(dbg_flash_busy),
 	.sdr_trans(sdr_trans),
 	.ctrl(dbg_ctrl),
 	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
@@ -673,23 +675,37 @@ wire [25:0] z80dl_sdr_addr;
 wire [15:0] z80dl_sdr_din;
 wire  [1:0] z80dl_sdr_be;
 wire        z80dl_sdr_req, z80dl_sdr_ack;
+wire [31:0] dbg_flash_progs;
+wire [15:0] dbg_flash_erases, dbg_flash_drops;
+wire  [1:0] dbg_flash_busy;
+wire [25:0] flash_sdr_addr;
+wire [15:0] flash_sdr_din;
+wire  [1:0] flash_sdr_be;
+wire        flash_sdr_req, flash_sdr_ack;
 wire [63:0] sdr_z80_dout, peek_dout;
 
-// Three masters on ch3 once the ROM check is done: the Z80 fetch, the JTAG
-// peek, and -- on SXX2C -- the 386 writing the Z80's program into RAM. The
-// arbiter serialises whole round trips, so the channel's toggle handshake is
-// never handed to the wrong master. See rtl/spi_sdr_arb3.sv.
+// Four masters on ch3 once the ROM check is done: the Z80 fetch, the JTAG
+// peek, the 386 writing the Z80's program into RAM on SXX2C, and the sample
+// flash programming ITSELF on an authentic-flash MRA. The arbiter serialises
+// whole round trips, so the channel's toggle handshake is never handed to the
+// wrong master. See rtl/spi_sdr_arb4.sv.
+//
+// The flash writes the SAMPLE region, which ch5 reads. It is on this channel
+// because ch3 is the only one sdram.sv gives a write path, not because the
+// address has anything to do with the Z80.
 wire [15:0] arb_din;
 wire  [1:0] arb_be;
 wire        arb_rnw;
 
-spi_sdr_arb3 ch3_arb
+spi_sdr_arb4 ch3_arb
 (
 	.clk    (clk_ram),
 	.a_addr (sdr_z80_addr), .a_req (sdr_z80_req), .a_ack (sdr_z80_ack),
 	.b_addr (peek_addr),    .b_req (peek_req),    .b_ack (peek_ack),
 	.c_addr (z80dl_sdr_addr), .c_din (z80dl_sdr_din), .c_be (z80dl_sdr_be),
 	.c_req  (z80dl_sdr_req),  .c_ack (z80dl_sdr_ack),
+	.d_addr (flash_sdr_addr), .d_din (flash_sdr_din), .d_be (flash_sdr_be),
+	.d_req  (flash_sdr_req),  .d_ack (flash_sdr_ack),
 	.m_addr (arb_addr),     .m_req (arb_req),     .m_ack (arb_ack),
 	.m_din  (arb_din),      .m_be  (arb_be),      .m_rnw (arb_rnw),
 	.m_dout (sdr_rw_dout),
@@ -798,6 +814,16 @@ spi_top spi_top
 	// core never sends, which deadlocks both CPUs in poll loops. Normal it is;
 	// update mode would need the flash write path this core does not have.
 	.jumpers        (8'hFC),
+	.flash_sdr_addr (flash_sdr_addr),
+	.flash_sdr_din  (flash_sdr_din),
+	.flash_sdr_be   (flash_sdr_be),
+	.flash_sdr_req  (flash_sdr_req),
+	.flash_sdr_ack  (flash_sdr_ack),
+	.dbg_flash_progs  (dbg_flash_progs),
+	.dbg_flash_erases (dbg_flash_erases),
+	.dbg_flash_drops  (dbg_flash_drops),
+	.dbg_flash_busy   (dbg_flash_busy),
+
 	.z80dl_sdr_addr (z80dl_sdr_addr),
 	.z80dl_sdr_din  (z80dl_sdr_din),
 	.z80dl_sdr_be   (z80dl_sdr_be),

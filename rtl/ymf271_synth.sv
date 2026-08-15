@@ -92,6 +92,11 @@ module ymf271_synth
 
 	output reg    [15:0] audio_l,
 	output reg    [15:0] audio_r,
+	// Toggles when the sample memory has been written -- the SPI cartridge's
+	// sample flash programming itself. Folded in at a slot boundary, where no
+	// fetch is outstanding; see cch_gen.
+	input                mem_dirty,
+
 	output reg    [15:0] dbg_overrun,
 	output reg    [15:0] dbg_active   // slots processed, PCM voices + FM ops
 );
@@ -160,7 +165,11 @@ module ymf271_synth
 		fb_q <= fb_mem[fb_ra];
 	end
 
-	// {valid, tag[19:0]} plus the eight bytes the line holds
+	// {valid, tag[19:0]} plus the eight bytes the line holds. The tags live in
+	// this RAM; the VALID bits live in a plain register outside it, because a
+	// flash write has to retire all 49 cached copies at once -- this line plus
+	// one per slot, restored when that slot comes round again -- and a RAM
+	// cannot be cleared in a cycle. See cch_vld.
 	reg [20:0] cch_tv   [0:47];
 	reg [63:0] cch_data [0:47];
 	reg  [5:0] cch_ra, cch_wa;
@@ -197,6 +206,15 @@ module ymf271_synth
 
 	reg [20:0] line_tv;
 	reg [63:0] line_data;
+
+	// One valid bit per slot, outside the tag RAM so that a flash write can
+	// clear all 48 in one cycle. A generation NUMBER was tried first and is
+	// wrong: two writes flip a one-bit generation back to where it started and
+	// bring a stale line back to life, which the cache test caught as a single
+	// wrong byte out of five. Any width only makes that rarer, and an erase
+	// sweep writes often enough to reach it.
+	reg [47:0] cch_vld;
+	reg        dirty_ack;
 
 	// One accumulator per speaker. In mono the left one carries chip outputs
 	// 0 and 2 and the right one 1 and 3, so their SUM is the four-output mix
@@ -665,7 +683,11 @@ module ymf271_synth
 			env_state <= st_q[28:27];
 			active    <= st_q[26];
 			lfo_phase <= st_q[25:0];
-			line_tv   <= cch_tv_q;
+			// The tag comes out of the RAM, the valid bit out of the register
+			// beside it: a flash write clears every bit of cch_vld at once, so
+			// a line cached before it can never be trusted again even though
+			// its tag is still sitting in the RAM.
+			line_tv   <= {cch_tv_q[20] & cch_vld[slot], cch_tv_q[19:0]};
 			line_data <= cch_data_q;
 			state     <= S_LD2;
 		end
@@ -920,10 +942,11 @@ module ymf271_synth
 			st_wa       <= slot;
 			st_wd       <= {stepptr, volume, env_state, active, lfo_phase};
 			st_we       <= 1'b1;
-			cch_wa      <= slot;
-			cch_tv_wd   <= line_tv;
-			cch_data_wd <= line_data;
-			cch_we      <= 1'b1;
+			cch_wa       <= slot;
+			cch_tv_wd    <= line_tv;
+			cch_data_wd  <= line_data;
+			cch_we       <= 1'b1;
+			cch_vld[slot] <= line_tv[20];
 			// Feedback goes back one step after it was read, by which point
 			// both set_feedback() opportunities have passed.
 			if (net_last && (sync != 2'd3)) begin
@@ -943,6 +966,15 @@ module ymf271_synth
 		S_NEXT: begin
 			keyon_pend[slot]  <= 1'b0;
 			keyoff_pend[slot] <= 1'b0;
+			// Sample memory changed since the last slot: flip the generation,
+			// which misses every cached line at once, and drop the live one
+			// with it. Safe here and nowhere cheaper -- this is the same point
+			// the host read is served from, chosen for the same reason.
+			if (mem_dirty != dirty_ack) begin
+				dirty_ack <= mem_dirty;
+				cch_vld   <= 48'd0;
+				line_tv   <= 21'd0;
+			end
 			if ((group == 4'd11) && (step == 2'd3)) begin
 				if (ext_req != ext_ack) begin
 					sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
@@ -1005,6 +1037,9 @@ module ymf271_synth
 			st_we       <= 1'b0;
 			fb_we       <= 1'b0;
 			cch_we      <= 1'b0;
+			cch_vld     <= 48'd0;
+			dirty_ack   <= 1'b0;
+			line_tv     <= 21'd0;
 		end
 	end
 
@@ -1016,10 +1051,10 @@ module ymf271_synth
 	                 acc_sum, addr8, idx3, step_mul, alfo_scaled,
 	                 op_mul, fb_mul, fb_div, fb_sum, phase_sum, mod_in, op_input, fb_avg,
 	                 plfo_q, plfo_base, plfo_addr, alfo, amul_r,
-	                 // ext_addr is the chip's full 23-bit space; SXX2E has a
-	                 // 2 MB sample ROM, so the top two bits mirror rather than
-	                 // address anything. On SXX2C they would reach the second
-	                 // flash chip and this must be widened with the region.
+	                 // ext_addr is the chip's full 23-bit space; the sample
+	                 // region is 2 MB, so [20:0] addresses all of it -- both
+	                 // flash chips included, since chip 1 is just bit 20 -- and
+	                 // the top two bits mirror rather than reach anything.
 	                 ext_addr[22:21]};
 	/* verilator lint_on UNUSEDSIGNAL */
 

@@ -5884,8 +5884,92 @@ All three sets pass, ~1.5 M populated dwords each. Controls: a pre-flashed image
 is rejected on size, one flipped byte at PCMSRC is caught as 1 differing dword
 of 2,621,440, and a one-byte shift of the snd01 region as 397,622.
 
-**What is deliberately NOT done here**, and what step 1 still owes: the
-E28F008SA command FSM, the ch3 write port, the cache generation tag, and the
-authentic MRAs. There is now an image to boot one from, so the next thing that
+**What is deliberately NOT done here** (all of it built later the same day,
+17.10 and 17.11): the E28F008SA command FSM, the ch3 write port, the cache
+invalidation, and the authentic MRAs -- the MRAs are the one piece still
+outstanding. There is now an image to boot one from, so the next thing that
 can be measured is whether a core with `set_upd` set reaches the updater at
 all -- which it cannot finish, having nowhere to write.
+
+### 17.10 BUILT 2026-08-15: the flash device and the write port
+
+The rest of step 1. Lint-clean, `make verify` green, timing NOT yet run and
+nothing on hardware.
+
+* **`rtl/spi_soundflash.sv`** -- two E28F008SA behind one address, chip select
+  being `addr[20]`, with per-chip mode and status. FF / 70 / 50 / 90 / 20+D0 /
+  40+datum, written against section 0's command trace.
+* **Erase is a sweep, and that IS the timing model.** A block erase writes
+  0xFFFF over 32,768 halfwords through the SDRAM port and reports BUSY until
+  the last one retires, so the updater throttles itself against the memory
+  system rather than against a delay this core would otherwise have to invent.
+  Programming costs one write and, like MAME's intelfsh, no time.
+* **`spi_sdr_arb3` is now `spi_sdr_arb4`** -- renamed, because a module called
+  arb3 with four ports is a trap. The flash is port `d`, BELOW the JTAG peek:
+  an erase is 32,768 back-to-back writes and would otherwise lock a human out
+  of the instrument for the length of it.
+* **The read override is latched, not muxed.** The flash's status or identifier
+  substitutes for the fetched byte where the read-ahead stores it, so the byte
+  handed out always belongs to the address it was fetched at. Doing it at the
+  read mux instead answers from the address the port has already moved on to --
+  which the identifier test caught immediately (0xA2 for 0x00FFFF where
+  0x010000 was wanted) and which at a chip boundary would answer from the wrong
+  chip. MAME's `ymf271` read() has the same shape for the same reason.
+* **`dbg_drops`** counts commands arriving while the part is busy. It should
+  never move: the updater polls WSMS before every command and a byte program
+  retires in a fraction of the ~88 clk_sys a Z80 `out` takes. If it is non-zero
+  on hardware that assumption is wrong and the flash needs a real handshake --
+  and a dropped byte is a silently wrong image, which is why it is counted
+  rather than merely dropped.
+
+### 17.11 The cache fix was wrong twice, and the test said so both times
+
+A flash write has to retire the sample-line cache: there are 49 copies of it in
+flight, the live line plus one per slot, restored when that slot comes round.
+
+**Attempt 1, a generation TOGGLE, is wrong and the test found it.** Two writes
+flip a one-bit generation back to where it started and bring a stale line back
+to life. It showed up as exactly one wrong byte out of five -- `line+6` stale
+while `line+4` and `line+5` were fresh -- which is the failure a coarser test
+reports as a pass. A wider counter only makes it rarer, and an erase sweep
+writes often enough to reach any width worth spending.
+
+**What is built instead:** the valid bits move OUT of the tag RAM into a plain
+48-bit register, so a write clears all of them in one cycle and the tags stay
+where they were. Exact, and cheaper than the generation it replaces.
+
+**The fold still happens at a slot boundary**, not the moment the write lands.
+No fetch is outstanding there, which is the same reason the host read is served
+from that point. Folding it immediately would race the store in S_FE1 and tag
+stale data as fresh.
+
+**The test.** `sim/tb_ymf271.cpp` now drives `tb_ymf_top` -- the YMF271 and its
+flash, wired as the cartridge wires them -- rather than the chip alone, so every
+flash test goes through the SAME wave-memory port the sound program uses. A
+mistake in the port itself (the pre-increment, the direction bit, which register
+file forwards the byte) therefore fails here instead of being papered over by a
+back door. Every existing test kept its pin names and is untouched.
+
+Two new tests:
+
+* `test_flash_program` -- erase a block and check that BUSY was ever reported
+  (an erase that finishes instantly is one the updater would race), that the
+  block is 0xFF and its NEIGHBOURS are not, that six programmed bytes read back
+  through the array after 0xFF, that the identifier is per chip, and that with
+  `flash_en` low -- every pre-flashed MRA and every SXX2E build -- the identical
+  command sequence does nothing at all.
+* `test_flash_write_invalidates_cache` -- play a PCM voice, walk it to a line
+  boundary so the line is cached with seven bytes still to come, program three
+  bytes near the end of that line, and require the voice to sound the NEW ones.
+  With the fold disabled it fails on all three; that control is what makes the
+  pass mean anything.
+
+One trap worth keeping: the wave-memory registers 0x14-0x17 are TIMER-bank
+registers reached through 0xC/0xD, not bus offsets. Writing `wr(0x17, v)`
+addresses bus offset 7 -- FM bank 3 data -- and the first version of the test
+did exactly that, so every command went to the synthesiser and the flash saw
+nothing. The symptom was a flash that never left ready with zero writes on its
+port.
+
+**What step 1 still owes:** the authentic MRAs, and a Quartus run. Everything
+else in it is built.

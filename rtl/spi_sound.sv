@@ -54,6 +54,20 @@ module spi_sound
 	output            pcm_req,
 	input             pcm_ack,
 
+	// The sample flash: enabled only by an authentic-flash MRA, and its write
+	// port goes to ch3's arbiter, because ch3 is the only channel sdram.sv
+	// gives a write path (PLAN.md 17.4).
+	input             flash_en,
+	output     [25:0] flash_sdr_addr,
+	output     [15:0] flash_sdr_din,
+	output      [1:0] flash_sdr_be,
+	output            flash_sdr_req,
+	input             flash_sdr_ack,
+	output     [31:0] dbg_flash_progs,
+	output     [15:0] dbg_flash_erases,
+	output     [15:0] dbg_flash_drops,
+	output      [1:0] dbg_flash_busy,
+
 	output     [15:0] audio_l,
 	output     [15:0] audio_r,
 
@@ -468,6 +482,13 @@ module spi_sound
 		.sdr_req  (pcm_req),
 		.sdr_ack  (pcm_ack),
 
+		.ext_wr       (ext_wr),
+		.ext_wd       (ext_wd),
+		.ext_a        (ext_a),
+		.ext_ovr      (ext_ovr),
+		.ext_ovr_data (ext_ovr_data),
+		.mem_dirty    (flash_dirty),
+
 		.audio_l     (audio_l),
 		.audio_r     (audio_r),
 		.dbg_overrun (dbg_ymf_overrun),
@@ -478,6 +499,53 @@ module spi_sound
 		if (reset)       dbg_ymf_wr <= 16'd0;
 		else if (ymf_wr) dbg_ymf_wr <= dbg_ymf_wr + 16'd1;
 	end
+
+	// ------------------------------------------------------------------
+	// The sample flash
+	//
+	// Only the authentic-flash MRAs have one; everywhere else the YMF271's
+	// sample memory is a mask ROM or a pre-programmed image, `flash_en` is low,
+	// and this is inert -- commands are ignored and reads always see the array.
+	// ------------------------------------------------------------------
+	wire        ext_wr;
+	wire  [7:0] ext_wd;
+	wire [22:0] ext_a;
+	wire        ext_ovr;
+	wire  [7:0] ext_ovr_data;
+	wire        flash_dirty;
+
+	/* verilator lint_off UNUSEDSIGNAL */
+	wire _unused_ext = &{1'b0, ext_a[22:21]};
+	/* verilator lint_on UNUSEDSIGNAL */
+
+	spi_soundflash flash
+	(
+		.clk        (clk),
+		.reset      (reset),
+		.enable     (flash_en),
+
+		.wr         (ext_wr),
+		// The sample region is 2 MB and the chip's port is 23 bits, so the top
+		// two mirror rather than reach anything -- both flash chips are inside
+		// [20:0], chip 1 being just bit 20.
+		.addr       (ext_a[20:0]),
+		.din        (ext_wd),
+
+		.rd_ovr     (ext_ovr),
+		.rd_data    (ext_ovr_data),
+
+		.sdr_addr   (flash_sdr_addr),
+		.sdr_din    (flash_sdr_din),
+		.sdr_be     (flash_sdr_be),
+		.sdr_req    (flash_sdr_req),
+		.sdr_ack    (flash_sdr_ack),
+
+		.dirty      (flash_dirty),
+		.dbg_progs  (dbg_flash_progs),
+		.dbg_erases (dbg_flash_erases),
+		.dbg_drops  (dbg_flash_drops),
+		.dbg_busy   (dbg_flash_busy)
+	);
 
 	// M1 with a valid opcode address is close enough to a PC sample for the
 	// JTAG panel.

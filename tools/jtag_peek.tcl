@@ -166,7 +166,7 @@ if {$mode eq "list"} {
     puts "EIP        = [bin2hex [string range $p 138 169]]"
 } elseif {$mode eq "sound"} {
     set p [read_probe_data -instance_index [index_of "SNDV"]]
-    # 169 bits, MSB first: 0..15 z80 pc, 16..31 fifo reads, 32..47 ymf writes,
+    # 299 bits, MSB first: 0..15 z80 pc, 16..31 fifo reads, 32..47 ymf writes,
     # 48..63 rom stalls, 64..79 synth overruns, 80..95 slots sounding,
     # 96..111 f2 writes, 112..127 f2 reads, 128..143 longest FIFO-full run,
     # 144..152 peak FIFO fill, 153..168 longest sprite-DMA gap,
@@ -201,6 +201,19 @@ if {$mode eq "list"} {
     set wm [fld $p 169 16]
     puts [format "fetch wait = %d clk = %.1f us  (worst single Z80 ROM fetch; ch3 is bottom priority)" \
           $wm [expr {$wm / 57.272727}]]
+    # The sample flash, on an authentic-flash MRA only; all zeroes everywhere
+    # else. 233..264 bytes programmed, 265..280 blocks erased, 281..296 commands
+    # DROPPED, 297..298 which chips are busy. A full run programs ~2M bytes and
+    # erases 32 blocks. `drops` is the one that matters: it must be 0, and if it
+    # is not then bytes went missing and the image is silently wrong.
+    set fp [fld $p 233 32]
+    set fe [fld $p 265 16]
+    set fd [fld $p 281 16]
+    if {$fp || $fe || $fd} {
+        puts [format "flash prog = %d bytes, %d blocks erased, %d DROPPED (drops must be 0)" \
+              $fp $fe $fd]
+        puts [format "flash busy = %d  (bit0 = chip 0, bit1 = chip 1)" [fld $p 297 2]]
+    }
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits

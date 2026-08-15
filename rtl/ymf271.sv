@@ -42,6 +42,26 @@ module ymf271
 	output            sdr_req,
 	input             sdr_ack,
 
+	// ---- wave memory port, for a board whose sample memory is FLASH -------
+	// `ext_wr` pulses for one cycle after a write to utility register 0x17,
+	// with the byte on ext_wd. `ext_a` is the port's address register, which
+	// is also what steers a read, and it is exported rather than duplicated
+	// because the chip has exactly one: by the time ext_wr is seen the
+	// register has already taken its post-increment, which is the address the
+	// byte belongs at (rtl/spi_soundflash.sv, and PLAN.md section 0 on why the
+	// updater opens a session at 0x7FFFFF).
+	output reg        ext_wr,
+	output reg  [7:0] ext_wd,
+	output     [22:0] ext_a,
+	// The read override: when the flash is answering with its status or
+	// identifier instead of its array, this is the byte, and the sample
+	// memory's own contents are not consulted.
+	input             ext_ovr,
+	input       [7:0] ext_ovr_data,
+	// Toggles when sample memory has been written under us, so the synth can
+	// retire its cached lines.
+	input             mem_dirty,
+
 	output     [15:0] audio_l,
 	output     [15:0] audio_r,
 	output     [15:0] dbg_overrun,
@@ -106,6 +126,8 @@ module ymf271
 	reg        ext_pend;
 	wire       ext_ack;
 	wire [7:0] ext_data;
+
+	assign ext_a = ext_addr;
 
 	assign irq = |irqstate;
 
@@ -232,6 +254,7 @@ module ymf271
 		par_we  <= 1'b0;
 		key_on  <= 1'b0;
 		key_off <= 1'b0;
+		ext_wr  <= 1'b0;
 
 		// ---- sequencer step ------------------------------------------
 		if (seq_active) begin
@@ -279,7 +302,15 @@ module ymf271
 			ext_pend <= 1'b1;
 		end
 		if (ext_pend && (ext_ack == ext_req)) begin
-			ext_latch <= ext_data;
+			// The flash's status or identifier stands in for the fetched byte
+			// HERE rather than at the read mux, so the byte handed out always
+			// belongs to the address it was fetched at. MAME's ymf271 read()
+			// has the same shape -- ext_read() is called once per advance and
+			// its result is what the next read returns -- and doing it at the
+			// mux instead would answer from the address the port has moved on
+			// to, which shows up as the wrong identifier byte and, at a chip
+			// boundary, the wrong chip.
+			ext_latch <= ext_ovr ? ext_ovr_data : ext_data;
 			ext_pend  <= 1'b0;
 		end
 
@@ -350,10 +381,15 @@ module ymf271
 							ext_rw          <= din[7];
 						end
 						8'h17: begin
-							// Writes go nowhere on SXX2E: the YMF271's sample
-							// memory here is a mask ROM. On SXX2C it is two
-							// flash chips and this is the programming path.
+							// On SXX2E this goes nowhere: the sample memory is
+							// a mask ROM. On SXX2C it is two flash chips and
+							// this is the programming path -- the byte leaves
+							// on ext_wr, one cycle later, by which time
+							// ext_addr holds the post-increment value it
+							// belongs at (rtl/spi_soundflash.sv).
 							ext_addr <= ext_addr + 23'd1;
+							ext_wr   <= 1'b1;
+							ext_wd   <= din;
 						end
 						default: ;
 					endcase
@@ -383,6 +419,8 @@ module ymf271
 			ext_latch  <= 8'd0;
 			ext_req    <= 1'b0;
 			ext_pend   <= 1'b0;
+			ext_wr     <= 1'b0;
+			ext_wd     <= 8'd0;
 			for (k = 0; k < 16; k = k + 1) regs_main[k] <= 8'd0;
 			for (k = 0; k < 12; k = k + 1) grp_sync[k]  <= 2'd0;
 		end
@@ -400,6 +438,10 @@ module ymf271
 		case (addr)
 			4'h0:    dout = {1'b0, end_status[3:0], 1'b0, status};
 			4'h1:    dout = end_status[11:4];
+			// The latch already carries the flash's status or identifier when
+			// there is one; see the read-ahead. With the direction bit clear
+			// the port reads 0xFF either way, which is what MAME does and what
+			// the existing test pins down.
 			4'h2:    dout = ext_rw ? ext_latch : 8'hFF;
 			default: dout = 8'hFF;
 		endcase
@@ -442,6 +484,7 @@ module ymf271
 		.ext_req     (ext_req),
 		.ext_ack     (ext_ack),
 		.ext_data    (ext_data),
+		.mem_dirty   (mem_dirty),
 		.audio_l     (audio_l),
 		.audio_r     (audio_r),
 		.dbg_overrun (dbg_overrun),

@@ -103,6 +103,13 @@ module spi_jtag_peek
 	// maximum says a hitch happened; this says what was running when it did.
 	input      [31:0] stall_eip,
 	input      [15:0] stall_cs,
+	// The sample flash programming itself, on an authentic-flash MRA. `drops`
+	// is the one to read first: it must be zero, and if it is not then bytes
+	// went missing and the image is wrong in a way nothing else reports.
+	input      [31:0] flash_progs,
+	input      [15:0] flash_erases,
+	input      [15:0] flash_drops,
+	input       [1:0] flash_busy,
 
 	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
 	// because it is a different question from everything on SNDV.
@@ -220,7 +227,7 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (5),
 		.instance_id             ("SNDV"),
-		.probe_width             (233),
+		.probe_width             (299),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
@@ -231,7 +238,8 @@ module spi_jtag_peek
 		.probe  ({snd_pc, snd_fifo_rd, snd_ymf_wr, snd_stall,
 		          ymf_overrun, ymf_active, snd_f2_wr, snd_f2_rd,
 		          snd_full_max, snd_fifo_peak, spr_gap_max, snd_wait_max,
-		          stall_eip, stall_cs}),
+		          stall_eip, stall_cs,
+		          flash_progs, flash_erases, flash_drops, flash_busy}),
 		.source ()
 	);
 

@@ -23,7 +23,7 @@
 // agree with each other; that mistake is recorded in PLAN.md section 12 under
 // tb_rom_loader.
 
-#include "Vymf271.h"
+#include "Vtb_ymf_top.h"
 #include "verilated.h"
 #include <cmath>
 #include <cstdint>
@@ -39,7 +39,7 @@ static const uint32_t PCM_SIZE     = 0x200000;
 static const uint32_t CLK_HZ = 57272727;
 static const uint32_t RATE   = 44100;
 
-static Vymf271 *dut;
+static Vtb_ymf_top *dut;
 static std::vector<uint8_t> rom;
 static int errors = 0;
 
@@ -73,21 +73,54 @@ static void sdram_tick() {
     }
 }
 
+// The flash's write port -- ch3's `d` in the real core. It writes the SAME
+// array the read path above serves, because that is what the hardware does:
+// the flash IS the YMF271's sample memory, not a copy of it. A round trip is
+// deliberately slower than a read, since ch3 is bottom priority and the erase
+// sweep's rate is the thing most likely to be wrong.
+static bool     fl_busy = false;
+static int      fl_wait = 0;
+static bool     fl_req_prev = false;
+static uint64_t fl_writes = 0;
+
+static void flash_tick() {
+    if (!fl_busy && (dut->fl_req != fl_req_prev)) {
+        fl_req_prev = dut->fl_req;
+        fl_busy = true;
+        fl_wait = 14;
+    } else if (fl_busy && --fl_wait <= 0) {
+        uint32_t a = dut->fl_addr - SDR_PCM_BASE;
+        for (int lane = 0; lane < 2; lane++) {
+            if (!(dut->fl_be & (1 << lane))) continue;
+            uint32_t ba = a + lane;
+            if (ba < PCM_SIZE) rom[ba] = (dut->fl_din >> (8 * lane)) & 0xFF;
+        }
+        fl_writes++;
+        dut->fl_ack = dut->fl_req;
+        fl_busy = false;
+    }
+}
+
 // tick_acc has to advance on EVERY clock, not just the ones the sample loop
 // looks at. Letting it drift made the testbench skip every other 44100 Hz tick
 // and report the voice playing at twice the correct rate -- a convincing
 // false positive, since a wrong phase step would look exactly the same.
 static uint32_t tick_acc = 0;
 static bool     tick_now = false;
+// Sample ticks since the clock started. Driving the bus takes real time, so a
+// test that writes registers between samples has to know how many it missed.
+static uint64_t sample_ticks = 0;
 
 static void tick() {
     dut->clk = 0; dut->eval();
     sdram_tick();
+    flash_tick();
     dut->clk = 1; dut->eval();
 
     uint32_t nxt = tick_acc + RATE;
     tick_now = (nxt >= CLK_HZ);
     tick_acc = tick_now ? (nxt - CLK_HZ) : nxt;
+    if (tick_now) sample_ticks++;
 }
 
 static void run(int n) { while (n--) tick(); }
@@ -280,6 +313,8 @@ static void reset_dut() {
     dut->wr = 0; dut->rd = 0; dut->addr = 0; dut->din = 0;
     dut->sdr_ack = 0; dut->sdr_dout = 0;
     sdr_req_prev = 0; sdr_busy = false;
+    dut->fl_ack = 0;
+    fl_req_prev = 0; fl_busy = false;
     run(20);
     dut->reset = 0;
     run(20);
@@ -916,6 +951,266 @@ static void test_ext_memory_read() {
     printf("ext memory read: 32 bytes from 0x%05X, %d mismatches\n", A, bad);
 }
 
+// ----------------------------------------------------------------- flash --
+// The SPI cartridge's sample flash, driven through the SAME port the sound
+// program uses: utility registers 0x14-0x17 set an address and a direction and
+// push bytes, and offset 2 reads them back. PLAN.md section 0 has the command
+// trace this follows; the point of driving the real port is that a mistake in
+// the port -- the pre-increment, the direction bit, the byte the register file
+// forwards -- fails here rather than being papered over by a back door.
+//
+// The updater's own opening move is `address = 0x7FFFFF` so that the first
+// pre-increment lands on 0, which is what open_session() does.
+static void ext_seek(uint32_t a, bool read) {
+    timer_write(0x14, (uint8_t)(a & 0xff));
+    timer_write(0x15, (uint8_t)((a >> 8) & 0xff));
+    timer_write(0x16, (uint8_t)(((a >> 16) & 0x7f) | (read ? 0x80 : 0x00)));
+}
+
+// One byte to the wave-memory port: the address pre-increments, so this lands
+// at `seek + 1` counting from the last seek or write.
+static void ext_put(uint8_t v) {
+    timer_write(0x17, v);               // 0x17 is a TIMER-bank register, via 0xC/0xD
+    run(40);                            // let the write retire into "SDRAM"
+}
+
+// Status polling as the updater does it: flip the direction bit and read. The
+// address advances on every read, which is real behaviour and why the updater
+// re-seeks before each session.
+static uint8_t flash_status(uint32_t at) {
+    ext_seek(at - 1, true);
+    return rd(0x2);
+}
+
+static void wait_ready(uint32_t at, const char *what) {
+    for (int i = 0; i < 200000; i++) {
+        if (flash_status(at) & 0x80) return;
+        run(20);
+    }
+    printf("FAIL: flash never went ready after %s\n", what);
+    errors++;
+}
+
+static void test_flash_program() {
+    dut->flash_en = 1;
+    reset_dut();
+
+    // A pattern that is not 0xFF anywhere, so "erased" and "written" cannot be
+    // confused, and not the ramp the read tests use either.
+    for (uint32_t i = 0; i < PCM_SIZE; i++) rom[i] = (uint8_t)(i * 91 + 7);
+
+    // ---- 1. block erase, chip 0 block 1 ----------------------------------
+    // 0x20 then 0xD0 at an address inside the block. Both are wave-memory
+    // writes like any other, so the address pre-increments under them -- seek
+    // one below, exactly as the updater does.
+    const uint32_t BLK = 0x010000;
+    ext_seek(BLK - 1, false);
+    ext_put(0x20);
+    ext_seek(BLK - 1, false);
+    ext_put(0xD0);
+
+    // The sweep is 32,768 writes; a status poll must report BUSY while it runs.
+    // If it never does, the erase is finishing instantly and the updater would
+    // be racing it on hardware.
+    bool saw_busy = false;
+    for (int i = 0; i < 40; i++) {
+        if (!(flash_status(BLK) & 0x80)) { saw_busy = true; break; }
+        run(5);
+    }
+    if (!saw_busy) { printf("FAIL: erase never reported busy\n"); errors++; }
+    wait_ready(BLK, "block erase");
+
+    int bad = 0;
+    for (uint32_t i = 0; i < 0x10000; i++) if (rom[BLK + i] != 0xFF) bad++;
+    if (bad) { printf("FAIL: %d bytes of the erased block are not FF\n", bad); errors++; }
+    // ...and nothing outside it moved. The neighbouring blocks are what a
+    // wrong block index or a sweep one bit too long would eat.
+    for (uint32_t i = 0; i < 0x10000; i++) {
+        if (rom[i] != (uint8_t)(i * 91 + 7)) { printf("FAIL: erase ran below its block at %06X\n", i); errors++; break; }
+    }
+    for (uint32_t i = 0x20000; i < 0x20100; i++) {
+        if (rom[i] != (uint8_t)(i * 91 + 7)) { printf("FAIL: erase ran above its block at %06X\n", i); errors++; break; }
+    }
+    if (dut->dbg_erases != 1) {
+        printf("FAIL: dbg_erases = %d, want 1\n", (int)dut->dbg_erases);
+        errors++;
+    }
+
+    // ---- 2. byte programming ---------------------------------------------
+    // 0x40 arms one byte, the next write is the datum, and the address the
+    // datum lands at is the one AFTER the 0x40 -- the register pre-increments
+    // under both. So a run of bytes is: seek, then 40/data pairs, with the
+    // data landing at seek+2, seek+4, ... which is why the updater re-seeks.
+    static const uint8_t payload[] = { 0x00, 0x12, 0x7F, 0x80, 0xF7, 0xA5 };
+    for (int i = 0; i < (int)sizeof(payload); i++) {
+        uint32_t at = BLK + 0x81 + i;
+        ext_seek(at - 1, false);
+        ext_put(0x40);
+        ext_seek(at - 1, false);
+        ext_put(payload[i]);
+        wait_ready(at, "byte program");
+    }
+    for (int i = 0; i < (int)sizeof(payload); i++) {
+        uint8_t got = rom[BLK + 0x81 + i];
+        if (got != payload[i]) {
+            printf("FAIL: programmed %02X at %06X, read back %02X\n",
+                   payload[i], BLK + 0x81 + i, got);
+            errors++;
+        }
+    }
+    if (dut->dbg_progs != sizeof(payload)) {
+        printf("FAIL: dbg_progs = %d, want %d\n",
+               (int)dut->dbg_progs, (int)sizeof(payload));
+        errors++;
+    }
+
+    // ---- 3. read array, through the chip's own port -----------------------
+    // Still in status mode after the last program, so a read here must return
+    // status and NOT sample memory -- that is the whole reason the override
+    // exists. Then 0xFF puts the chip back and the same address reads data.
+    uint8_t st = flash_status(BLK + 0x81);
+    if (!(st & 0x80)) { printf("FAIL: status after programming = %02X\n", st); errors++; }
+
+    ext_seek(BLK + 0x80, false);
+    ext_put(0xFF);
+    ext_seek(BLK + 0x80, true);
+    (void)rd(0x2);                          // the read-ahead's dummy
+    bad = 0;
+    for (int i = 0; i < (int)sizeof(payload); i++) {
+        uint8_t got = rd(0x2);
+        if (got != payload[i]) {
+            if (bad < 3)
+                printf("FAIL: array read %d: want %02X got %02X\n", i, payload[i], got);
+            bad++;
+        }
+    }
+    errors += bad;
+
+    // ---- 4. the identifier ------------------------------------------------
+    // 0x90 at an even address reads the maker byte, odd the device byte. Not
+    // used by the updater, but it is the cheapest proof the mode really is per
+    // chip: chip 1 must still be in array mode while chip 0 is not.
+    ext_seek(0x00FFFF, false);
+    ext_put(0x90);
+    ext_seek(0x00FFFF, true);
+    (void)rd(0x2);                          // the read-ahead's dummy, as ever
+    uint8_t maker = rd(0x2);                // fetched at 0x010000, so even
+    if (maker != 0x89) { printf("FAIL: maker byte %02X, want 89\n", maker); errors++; }
+
+    ext_seek(0x100000 - 1, true);           // chip 1: untouched, still array
+    (void)rd(0x2);
+    uint8_t other = rd(0x2);
+    if (other != rom[0x100000]) {
+        printf("FAIL: chip 1 answered %02X instead of array data %02X\n",
+               other, rom[0x100000]);
+        errors++;
+    }
+
+    // ---- 5. disabled means read-only --------------------------------------
+    // A pre-flashed MRA and every SXX2E build hold flash_en low, and there the
+    // same command sequence must do NOTHING -- sample memory is a mask ROM.
+    dut->flash_en = 0;
+    reset_dut();
+    uint8_t before = rom[0x30000];
+    ext_seek(0x30000 - 1, false);
+    ext_put(0x40);
+    ext_seek(0x30000 - 1, false);
+    ext_put(0x5A);
+    run(200);
+    if (rom[0x30000] != before) {
+        printf("FAIL: a write landed with flash_en low\n");
+        errors++;
+    }
+    if (dut->dbg_progs != 0) { printf("FAIL: disabled flash counted a program\n"); errors++; }
+
+    if (dut->dbg_drops != 0) {
+        printf("FAIL: %d commands were dropped as busy\n", (int)dut->dbg_drops);
+        errors++;
+    }
+    printf("sample flash: 1 block erased (%llu port writes), %d bytes programmed "
+           "and read back through the array\n",
+           (unsigned long long)fl_writes, (int)sizeof(payload));
+}
+
+// A flash write has to retire the sample-line cache, and this is the only test
+// that can tell. Everything above reads the flash through the wave-memory port,
+// which goes straight to memory; a PLAYING voice reads through a cached 64-bit
+// line plus a per-slot copy of it, 49 copies in all, and a byte programmed into
+// the line a voice is currently inside is exactly the case a valid bit cannot
+// catch on its own (rtl/ymf271_synth.sv, cch_gen).
+static void test_flash_write_invalidates_cache() {
+    dut->flash_en = 1;
+    reset_dut();
+    // `rom` is left as main() built it -- rewriting it here would wipe the
+    // block of silence at 0x100000 that every FM test below parks its leftover
+    // PCM voice in, and they would then fail for reasons nothing to do with
+    // this. Running before test_flash_program is what makes that safe.
+
+    const uint32_t start = 0x40000;
+    setup_slot0(start, 0x7FFFF, 0, false);
+    key_on();
+    int idx = find_alignment(start, false, 40);
+    if (idx < 0) { fail("cache: no plausible alignment"); return; }
+
+    Phase p; p.endoff = 0x7FFFF; p.loopoff = 0; p.step = 65536;
+    p.stepptr = (uint64_t)idx * 65536;
+    p.advance();
+
+    // Walk to a line boundary and take that sample, which is what puts the
+    // line in the cache with seven more bytes of it still to come.
+    for (int guard = 0; guard < 16; guard++) {
+        p.wrap();
+        uint32_t i = (uint32_t)(p.stepptr >> 16);
+        int16_t want = expect_8bit(start, p);
+        if (next_sample() != want) { fail("cache: playback wrong before the write"); return; }
+        p.advance();
+        if (((start + i) & 7) == 0) break;
+    }
+    p.wrap();
+    uint32_t at_line = (uint32_t)(p.stepptr >> 16);
+    uint32_t line0 = (start + at_line) & ~7u;
+
+    // Rewrite three bytes near the END of that line, so the voice cannot have
+    // walked past them while the port was being driven -- ~340 clk_sys per
+    // byte against 1299 for a sample.
+    uint64_t t0 = sample_ticks;
+    for (int k = 4; k <= 6; k++) {
+        uint32_t a = line0 + k;
+        ext_seek(a - 1, false);
+        ext_put(0x40);
+        ext_seek(a - 1, false);
+        ext_put((uint8_t)(0xC0 + k));       // nothing the ramp would produce
+        wait_ready(a, "cache-test program");
+    }
+    uint64_t missed = sample_ticks - t0;
+    for (uint64_t i = 0; i < missed; i++) p.advance();
+
+    p.wrap();
+    uint32_t resume = (start + (uint32_t)(p.stepptr >> 16)) - line0;
+    if (resume > 4) { fail("cache: the voice outran the write; test proves nothing"); return; }
+
+    int bad = 0, checked = 0, rewritten = 0;
+    while (((start + (uint32_t)(p.stepptr >> 16)) & ~7u) == line0) {
+        p.wrap();
+        uint32_t off = (start + (uint32_t)(p.stepptr >> 16)) - line0;
+        int16_t want = expect_8bit(start, p);   // rom[] already holds the NEW byte
+        int16_t got  = next_sample();
+        if (got != want) {
+            if (bad < 4)
+                printf("FAIL: cache: line+%u: want=%d got=%d (stale line)\n", off, want, got);
+            bad++;
+        }
+        checked++;
+        if (off >= 4) rewritten++;
+        p.advance();
+    }
+    errors += bad;
+    dut->flash_en = 0;                      // leave the machine as it was found
+    if (!rewritten) { fail("cache: no rewritten byte was reached"); return; }
+    printf("flash write vs sample cache: %d bytes replayed from the live line, "
+           "%d of them rewritten under it, %d stale\n", checked, rewritten, bad);
+}
+
 // ---------------------------------------------------------------- stereo --
 // The cartridge board wires chip output 0 to the left speaker and output 1 to
 // the right; the single board sums all four outputs into one. Every test above
@@ -1020,8 +1315,10 @@ static void test_stereo_split() {
 
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
-    dut = new Vymf271;
+    dut = new Vtb_ymf_top;
     dut->stereo = 0;                        // every test but the first is mono
+    dut->flash_en = 0;                      // ...and every test but the last has
+                                            // a mask ROM where the samples live
 
     // A ramp with a stride coprime with 8, so a line-cache bug cannot hide
     // behind repeating values inside one fetched line.
@@ -1038,6 +1335,10 @@ int main(int argc, char **argv) {
     test_stereo_split();
 
     test_8bit_playback();
+    // Straight after it, and for the same reason test_stereo_split runs first:
+    // this one plays a PCM voice, and every FM test below leaves operators
+    // configured in the banks a later key-on would restart.
+    test_flash_write_invalidates_cache();
     test_12bit_playback();
     test_loop_and_end_status();
     test_timer_a();
@@ -1049,6 +1350,8 @@ int main(int argc, char **argv) {
     test_lfo_amplitude();
     test_lfo_pitch();
     test_ext_memory_read();
+    // Last: it rewrites `rom` and drives flash_en itself.
+    test_flash_program();
 
     delete dut;
     if (errors) {

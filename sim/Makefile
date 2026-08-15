@@ -36,8 +36,8 @@ lint-sound:
 # No RTL involved -- it checks the algebra ymf271_pcm.sv is built on.
 # The PCM engine driven through the chip's own register interface. The Z80 is
 # VHDL and cannot be simulated here, so this stands in for the sound driver.
-run-ymf271: obj_dir/Vymf271
-	@./obj_dir/Vymf271
+run-ymf271: obj_dir/Vtb_ymf_top
+	@./obj_dir/Vtb_ymf_top
 
 # The fast-load path: a DDR3 image replayed as the byte stream rom_loader
 # expects. This is the part of the ioctl download that CAN be simulated now,
@@ -49,9 +49,11 @@ obj_dir/Vddr_rom_reader: $(RTL)/ddr_rom_reader.sv tb_ddr_rom_reader.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module ddr_rom_reader $(RTL)/ddr_rom_reader.sv \
 	    tb_ddr_rom_reader.cpp
 
-obj_dir/Vymf271: $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/ymf271_tables.vh \
-                 $(RTL)/spi_defs.vh tb_ymf271.cpp lint.vlt
-	$(VERILATOR) $(VFLAGS) --top-module ymf271 $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv \
+obj_dir/Vtb_ymf_top: $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/ymf271_tables.vh \
+                 $(RTL)/spi_soundflash.sv $(RTL)/spi_defs.vh tb_ymf_top.sv \
+                 tb_ymf271.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module tb_ymf_top tb_ymf_top.sv \
+	    $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/spi_soundflash.sv \
 	    tb_ymf271.cpp
 
 run-ymf271-math: $(RTL)/ymf271_tables.vh
@@ -237,7 +239,7 @@ lint-top:
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
 	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
-	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb3.sv $(RTL)/spi_sdr_stats.sv $(RTL)/spi_rom_decode.sv $(RTL)/ddr_rom_reader.sv \
+	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb4.sv $(RTL)/spi_soundflash.sv $(RTL)/spi_sdr_stats.sv $(RTL)/spi_rom_decode.sv $(RTL)/ddr_rom_reader.sv \
 	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise11_decrypt.sv 2>&1 | \
 	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
 

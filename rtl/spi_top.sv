@@ -31,6 +31,18 @@ module spi_top
 	output      [1:0] z80dl_sdr_be,
 	output            z80dl_sdr_req,
 	input             z80dl_sdr_ack,
+
+	// Sample-flash programming -> the OTHER ch3 write port. Same channel for
+	// the same reason: ch3 is the only one sdram.sv can write.
+	output     [25:0] flash_sdr_addr,
+	output     [15:0] flash_sdr_din,
+	output      [1:0] flash_sdr_be,
+	output            flash_sdr_req,
+	input             flash_sdr_ack,
+	output     [31:0] dbg_flash_progs,
+	output     [15:0] dbg_flash_erases,
+	output     [15:0] dbg_flash_drops,
+	output      [1:0] dbg_flash_busy,
 	input             dbg_en,
 	input       [3:0] chk_ok,
 	input             chk_done,
@@ -450,6 +462,19 @@ module spi_top
 		.pcm_dout   (sdr_pcm_dout),
 		.pcm_req    (sdr_pcm_req),
 		.pcm_ack    (sdr_pcm_ack),
+
+		// Only an authentic-flash MRA has flash where the samples live; every
+		// other configuration leaves this inert.
+		.flash_en         (set_upd),
+		.flash_sdr_addr   (flash_sdr_addr),
+		.flash_sdr_din    (flash_sdr_din),
+		.flash_sdr_be     (flash_sdr_be),
+		.flash_sdr_req    (flash_sdr_req),
+		.flash_sdr_ack    (flash_sdr_ack),
+		.dbg_flash_progs  (dbg_flash_progs),
+		.dbg_flash_erases (dbg_flash_erases),
+		.dbg_flash_drops  (dbg_flash_drops),
+		.dbg_flash_busy   (dbg_flash_busy),
 
 		.audio_l    (snd_audio_l),
 		.audio_r    (snd_audio_r),
