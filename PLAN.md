@@ -5434,6 +5434,39 @@ Four decisions worth keeping:
   has no such instance and `idx_of` throws; `prof` reports the absence instead
   of killing a server that is working fine for everything else.
 
+**Built, deployed and validated on hardware (2026-08-15).** Timing passed on
+every clock with TNS 0.000: clk_ram +0.383, clk_sys +1.329, clk_cpu +1.965. The
+profiler costs clk_cpu some margin -- two 32-bit compares and two 40-bit counters
+-- but no profiler path appears in the worst 25.
+
+Controls first, because an instrument that always answers is worth nothing:
+
+    window FFFFFFF0..FFFFFFFF  (the CPU is never there)    IN WINDOW   0.0%
+    window 00000000..FFFFFFFF  (the CPU is always there)   IN WINDOW 100.0%
+    window 0020607C..002060B8  (rfjet's wait loop)         IN WINDOW  89.8%
+
+Then twelve consecutive 12-second reads across rfjet attract, against the 1200
+sampled points from 16.4:
+
+                          sampling (12 min)   counter (12 x 12 s)
+      light attract        4 - 12% busy        6.7 - 10.0%
+      demo playing        24 - 36% busy       22.3 - 35.1%
+      peak                     36.0%              35.1%
+
+Two instruments, different physics -- one a JTAG sampler, one a hardware counter
+-- agreeing on the peak to about one point. 16.4's numbers stand.
+
+**One bug, and it is the same family as the switch-comment trap.** `prof` killed
+the server outright with `can't read "PROF": no such variable`. `proc handle`
+declares only `ctrl_val` and `OUTFILE` global, so ANY other global read from a
+switch body throws. The fix is to keep globals out of the dispatch bodies and
+let the called procs declare their own. Worth knowing before adding the next
+command: that dispatch has two separate ways to bite, and both kill the server
+rather than printing an error.
+
+**First read after setting a window is always garbage** -- it spans back to the
+previous window (0..0 at boot), so it reads ~0%. Set, read, discard, read.
+
 What it unblocks: 16.5's missing number needs a MAME-side figure that MAME will
 not give up, but the OUR-side half is now exact rather than sampled, and it can
 run during PLAY -- which is what T-N still owes and where the peak load lives.

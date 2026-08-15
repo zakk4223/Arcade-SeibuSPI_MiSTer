@@ -222,6 +222,7 @@ proc show_sound {} {
 # across a single interval come out right anyway.
 proc set_prof_window {lo hi} {
     global PROF prof_lo prof_hi
+    if {$PROF < 0} { return }
     set prof_lo $lo
     set prof_hi $hi
     write_source_data -instance_index $PROF \
@@ -402,16 +403,14 @@ proc handle {line} {
             # window is inclusive and in linear addresses, the same numbers the
             # vitals CS:EIP field prints. Comments live inside a body here --
             # see the note in `clear`.
+            #
+            # No $PROF here on purpose: `handle` only declares ctrl_val and
+            # OUTFILE global, so reading any other global from this body throws
+            # "no such variable". The two procs below declare their own.
             set a [lindex $line 1]
             set b [lindex $line 2]
-            if {$PROF < 0} {
-                show_prof
-            } elseif {$a ne "" && $b ne ""} {
-                set_prof_window [expr $a] [expr $b]
-                show_prof
-            } else {
-                show_prof
-            }
+            if {$a ne "" && $b ne ""} { set_prof_window [expr $a] [expr $b] }
+            show_prof
         }
         help {
             say "ENTER = freeze/resume   freeze | thaw | vitals | sound | sums"
