@@ -1,0 +1,144 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SlopperPI.                                     -->
+<!--                                                                     -->
+<!-- SlopperPI is free software: you can redistribute it and/or modify   -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters Jet (Germany, SPI cartridge, self-flashing)</name>
+    <setname>rfjet</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1998</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>Germany</region>
+    <category>Shooter</category>
+
+    <!--
+      THE GAME FLASHES ITSELF. This is the authentic variant: the sample flash
+      ships BLANK and the cartridge's own sound ROMs come along as the material
+      the game's updater reads, so on first boot it runs the real "NOW UPDATING"
+      ritual -- the one with the techno music -- and programs its own samples,
+      exactly as a fresh cartridge does on real hardware.
+
+      `rfjet.mra` ships the same game with the flash already
+      programmed and boots straight in. That one is what most people want; this
+      one is what the hardware does.
+
+      TWO THINGS TO KNOW BEFORE RUNNING IT.
+
+      * The update takes tens of seconds, and at the end the game HALTS on
+        "UPDATE COMPLETED. PLEASE TURN THE POWER BACK ON." Reset the core (or
+        reload the MRA) and it plays. Real hardware takes minutes, because it
+        has to actually program 2 MB a byte at a time; the core charges no
+        program time, as MAME does not either.
+      * IT DOES NOT PERSIST YET. The flash lives in SDRAM and there is no save
+        file behind it, so every boot runs the ritual again. PLAN.md 17.6 is the
+        plumbing for that -- an arcade <nvram> element -- and it is deliberately
+        NOT in this file until the core can answer the upload the HPS asks for.
+
+      The trigger is the game's own, not a jumper: the last four bytes of the
+      386 program are stamped into flash[0..3] when it finishes, and a blank or
+      mismatched stamp is what makes the updater run. So an image programmed by
+      one region's cartridge is rejected by another's, which is the region lock.
+    -->
+
+    <!--
+      Part order is significant. rtl/rom_loader.sv walks this list with a fixed
+      table -- selected by the mod byte below -- and performs MAME's
+      ROM_LOAD24_* / ROM_LOAD32_* byte scatter in hardware. `make check-mra`
+      holds this file, that table and MAME's ROM_START against each other.
+
+      The tail is where this differs from the pre-flashed MRA, and it is in
+      MAME's own region order: sound01's two ROMs, then soundflash1's blank.
+
+        part 14  the PCM source ROM      -> 0x2900000, the source window
+        part 15  the second sound ROM    -> 0x0480000, source AND Z80 program
+        part 16  a BLANK 2 MB flash      -> 0x0280000, what the game programs
+
+      Layout produced in SDRAM (see rtl/spi_defs.vh):
+        0x0000000  2 MB   386 program
+        0x0200000  256 KB Z80 program -- RAM, NOT loaded here. The 386 fills it
+                          through port 0x688 and releases the Z80 with 0x68C.
+        0x0240000  192 KB text tiles
+        0x0280000  2 MB   YMF271 sample flash, blank at boot
+        0x0480000  512 KB the second sound ROM, packed one byte per 386 dword
+        0x0500000  9 MB   background tiles
+        0x1100000  24 MB  sprites, three 8 MB plane-pair chunks
+        0x2900000  2 MB   the PCM source ROM, read through the sound01 window
+    -->
+
+    <!--
+      Index 1 is the core's config blob. Byte 0 is the mod byte: bit 0 selects
+      the SXX2C board wiring, bits 3:1 the set, and BIT 4 the authentic-flash
+      tail of that set's part table plus the 386's sound01 source window. Bit 4
+      alone does nothing -- it is ANDed with bit 0 in SeibuSPI.sv, because on
+      SXX2E it would open a window with nothing behind it.
+
+      IT MUST COME BEFORE THE index="0" ROM. Main_MiSTer sends <rom> elements in
+      file order, and an index-1 that follows the image arrives after the loader
+      has already walked its table.
+    -->
+    <rom index="1"><part>15</part></rom>
+
+    <rom index="0" address="0x30000000" zip="rfjet.zip" md5="none">
+        <!-- 386 program: four byte lanes -->
+        <part name="prg0.u0211" crc="e5a3b304"/>
+        <part name="prg1.u0212" crc="395e6da7"/>
+        <part name="prg2.u0221" crc="82f7a57e"/>
+        <part name="prg3.u0220" crc="cbdf100d"/>
+
+        <!-- text layer: three byte lanes, and the lane order is 1, 0, 2 -->
+        <part name="fix0.u0524" crc="8bc080be"/>
+        <part name="fix1.u0518" crc="bded85e7"/>
+        <part name="fixp.u0514" crc="015d0748"/>
+
+        <!-- background tiles: 9 MB, the second group still 6 MB in -->
+        <part name="bg-1d.u0543" crc="edfd96da"/>
+        <part name="bg-1p.u0544" crc="a4cc4631"/>
+        <part name="bg-2d.u0545" crc="731fbb59"/>
+        <part name="bg-2p.u0546" crc="03652c25"/>
+
+        <!-- sprites: 24 MB in three 8 MB chunks, and here MAME's order IS numeric -->
+        <part name="obj-1.u0442" crc="58a59896"/>
+        <part name="obj-2.u0443" crc="a121d1e3"/>
+        <part name="obj-3.u0444" crc="bc2c0c63"/>
+
+        <!--
+          Parts 14 and 15: MAME's sound01 region, whole. As rdft2, sound1.u0222
+          serves twice over -- the updater's compressed source and rfjet's Z80
+          program at 0x44000 -- and carrying it whole means neither that offset
+          nor the program's unmeasured length has to be right here.
+        -->
+        <part name="pcm-d.u0227"  crc="8ee3ff45"/>
+        <part name="sound1.u0222" crc="d4fc3da1"/>
+
+        <!--
+          Part 16: the sample flash, BLANK. flash0_blank_regionXX.u1053 is a
+          real dump and it carries the region ID in byte 0 -- an erased or
+          mismatched one is the "hardware error 81" the MAME driver header
+          describes. MAME has no dump for the second E28F008SA because an
+          erased chip has nothing to dump, so it is a megabyte of FF here.
+        -->
+        <part name="flash0_blank_region80.u1053" crc="e2adaff5"/>
+        <part repeat="0x100000">FF</part>
+    </rom>
+
+    <!--
+      Same control layout as the pre-flashed MRA; the names map to joystick bits
+      4 upwards IN ORDER and SeibuSPI.sv decodes them at exactly those positions.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
+             default="A,B,X,Start,Select,R,L" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>

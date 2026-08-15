@@ -48,6 +48,7 @@ BASES = {
     "snd01":   0x0480000,
     "tiles":   0x0500000,
     "sprites": 0x1100000,
+    "pcmsrc":  0x2900000,
 }
 
 # rtl/spi_defs.vh. The MRA names one of these per part; anything else is a typo
@@ -61,6 +62,13 @@ REGION = {
     "maincpu": "prg", "audiocpu": "z80", "chars": "chars",
     "tiles": "tiles", "sprites": "sprites", "ymf": "pcm",
 }
+
+# sound01 and soundflash1 have no single mapping: the two ROMs of one sound01
+# region go to two different places, and both are stored PACKED -- the loader
+# copies them and spi_cpu.sv rebuilds the 386's scattered view on the fly, so
+# their scatter mode is M_LINEAR and not the ROM_LOAD32_* macro MAME uses. A set
+# that carries them names each one here. See PLAN.md 17.2.
+#   ROM name -> (SDRAM region, scatter mode)
 
 SETS = {
     # table:  which rom_loader.sv part table this set walks
@@ -110,6 +118,35 @@ SETS = {
                   flash=dict(parts=(14, 15), decoded=15, size=0x200000,
                              sha256="fb02c059e7ee1b0a26c97ccb5d6eb60eaaa1c"
                                     "48a7e65c76c2d2628475cb4e621")),
+
+    # The authentic-flash MRAs (PLAN.md section 17). Same table, mod bit 4, and
+    # a different tail: the two sound01 ROMs whole and a BLANK flash, instead of
+    # a derived image. They therefore skip LESS than their pre-flashed
+    # counterparts -- sound01 and soundflash1 are carried now, and checked
+    # against ROM_START like any other part, which is the whole point of
+    # sending them in MAME's own region order.
+    #
+    # No `flash` entry: there is no derived image to rebuild and compare. What
+    # replaces that check is the core running the real updater and the result
+    # being compared against tools/build_soundflash.py's image on hardware.
+    "rdft-upd":  dict(mra="rdft-update.mra",  table="rdft",  mod=0x11,
+                      mame="rdft", skip=("audiocpu",),
+                      special={"gun_dogs_pcm.u0217": ("pcmsrc", "M_LINEAR"),
+                               "seibu_8.u0216":      ("snd01",  "M_LINEAR"),
+                               "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
+                      spr_mode="M_SPR_ILV", spr_chunk=0x400000),
+    "rdft2-upd": dict(mra="rdft2-update.mra", table="rdft2", mod=0x13,
+                      mame="rdft2", skip=("audiocpu", "pals"),
+                      special={"pcm.u0217":    ("pcmsrc", "M_LINEAR"),
+                               "sound1.u0222": ("snd01",  "M_LINEAR"),
+                               "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
+                      spr_mode="M_SPR_ILV_R", spr_chunk=0x600000),
+    "rfjet-upd": dict(mra="rfjet-update.mra", table="rfjet", mod=0x15,
+                      mame="rfjet", skip=("audiocpu", "pals"),
+                      special={"pcm-d.u0227":  ("pcmsrc", "M_LINEAR"),
+                               "sound1.u0222": ("snd01",  "M_LINEAR"),
+                               "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
+                      spr_mode="M_SPR_ILV_R", spr_chunk=0x800000),
 }
 
 
@@ -133,7 +170,7 @@ def fail(msg):
     sys.exit(1)
 
 
-def parse_mame(path, setname, skip):
+def parse_mame(path, setname, skip, special):
     src = open(path, encoding="utf-8", errors="replace").read()
     m = re.search(r"ROM_START\(\s*%s\s*\)(.*?)ROM_END" % setname, src, re.S)
     if not m:
@@ -145,6 +182,20 @@ def parse_mame(path, setname, skip):
         if r:
             region = r.group(1)
             continue
+        # ROM_CONTINUE is the REST OF THE SAME FILE, landing somewhere else in
+        # the region. It carries no name and no CRC, so the ROM_LOAD line above
+        # it understates the file's size by exactly this much -- which is how
+        # the authentic MRAs, the first to carry a whole sound01 ROM, found this
+        # missing: the 2 MB PCM source read as 1 MB and every part after it
+        # shifted. The scatter it implies (a 2 MB bank skipping 2 MB) is
+        # spi_cpu.sv's business, not the loader's; here it is only a size.
+        r = re.search(r'ROM_CONTINUE\(\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*\)', line)
+        if r:
+            if not parts:
+                fail("ROM_CONTINUE with no ROM_LOAD before it")
+            parts[-1]["size"] += int(r.group(2), 16)
+            continue
+
         r = re.search(r'(ROM_LOAD(?:24_WORD|24_BYTE|32_BYTE|32_WORD)?)\('
                       r'\s*"([^"]+)"\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*,'
                       r'\s*CRC\(([0-9a-fA-F]+)\)', line)
@@ -155,6 +206,9 @@ def parse_mame(path, setname, skip):
                  "off": int(off, 16), "region": region, "macro": macro}
         if region in skip:
             entry["skipped"] = True
+        elif name in special:
+            entry["sdram"], entry["mode"] = special[name]
+            entry["packed"] = True
         elif region not in REGION:
             fail("part %s is in unmapped MAME region %r" % (name, region))
         else:
@@ -270,10 +324,10 @@ def parse_loader(path, table, upd=False):
     # Collapse the conditional entries to the arm this variant uses. Done as a
     # rewrite rather than by teaching the entry regex about both arms, so there
     # stays exactly one place that knows what a table entry looks like.
-    cond = re.compile(r"5'd(\d+)\s*:\s*if \(set_upd\)\s*\n"
+    cond = re.compile(r"(5'd\d+|default)\s*:\s*if \(set_upd\)\s*\n"
                       r"\s*(begin.*?end)[ \t]*(//[^\n]*)\n"
                       r"\s*else\s*(begin.*?end)[ \t]*(//[^\n]*)", re.S)
-    body = cond.sub(lambda m: "5'd%s: %s %s"
+    body = cond.sub(lambda m: "%s: %s %s"
                     % (m.group(1), m.group(2 if upd else 4), m.group(3 if upd else 5)),
                     body)
 
@@ -305,6 +359,7 @@ def resolve_base(expr):
     for k, v in (("SDR_PRG_BASE", BASES["prg"]), ("SDR_Z80_BASE", BASES["z80"]),
                  ("SDR_CHARS_BASE", BASES["chars"]), ("SDR_PCM_BASE", BASES["pcm"]),
                  ("SDR_SND01_BASE", BASES["snd01"]),
+                 ("SDR_PCMSRC_BASE", BASES["pcmsrc"]),
                  ("SDR_TILES_BASE", BASES["tiles"]), ("SDR_SPRITES_BASE", BASES["sprites"]),
                  ("SPR_CHUNK_SIZE", 0x400000)):
         e = e.replace(k, hex(v))
@@ -320,6 +375,11 @@ def expected_base(rom):
     group, not a displacement, so only whole groups carry into the base.
     """
     off = rom["off"]
+    # A packed ROM is stored whole at its own base and unpacked on the fly by
+    # spi_cpu.sv, so where MAME puts it inside the sound01 region says nothing
+    # about where the loader puts it -- 0x800000 there is 0 here.
+    if rom.get("packed"):
+        return BASES[rom["sdram"]], 0
     if rom["mode"] in ("M_24_W01", "M_24_B0", "M_24_B1", "M_24_B2"):
         disp = (off // 3) * 3
     elif rom["mode"] in ("M_32_B0", "M_32_B1", "M_32_B2", "M_32_B3",
@@ -402,7 +462,10 @@ def check_set(setname, cfg, args):
     mra_path = os.path.join(here, "mra", cfg["mra"])
 
     print("=== %s (%s table) ===" % (setname, cfg["table"]))
-    mame = parse_mame(drv, setname, cfg["skip"])
+    # The MAME set is the SETS key unless `mame` says otherwise: the
+    # authentic-flash MRAs are a second entry for the SAME ROM_START.
+    mame = parse_mame(drv, cfg.get("mame", setname), cfg["skip"],
+                      cfg.get("special", {}))
     if cfg.get("spr_mode"):
         for r in mame:
             if r.get("sdram") == "sprites":

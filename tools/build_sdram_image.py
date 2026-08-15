@@ -284,12 +284,13 @@ def main():
         # only 1 MB: the second E28F008SA has no dump in MAME because it is
         # erased, and this image starts life as 0xFF, so chip 1 is already
         # right. rdft2 and rfjet already carry `snd01` as a part; it is dropped
-        # and re-added at the tail so the order matches the loader's table for
-        # every set, which is what --concat depends on.
+        # and re-added in place so the order matches the loader's table for
+        # every set, which is what --concat depends on. That order is MAME's own
+        # region order -- sound01's two ROMs, then soundflash1's blank.
         PARTS = [p for p in PARTS if p[0] != "snd01"] + [
-            ("pcm",    BLANK_FLASH, 0x100000, "LINEAR", 0),
             ("pcmsrc", pcm_crc,     0x200000, "LINEAR", 0),
             ("snd01",  snd_crc,     0x080000, "LINEAR", 0),
+            ("pcm",    BLANK_FLASH, 0x100000, "LINEAR", 0),
         ]
 
     image = bytearray(b"\xFF" * (SDRAM_SIZE_UPD if upd else SDRAM_SIZE))
@@ -343,7 +344,10 @@ def main():
 
         blob = bytearray()
         for part in PARTS:
-            if part[0] != "snd01":
+            # Pre-flashed, `snd01` is table part 16 and therefore LAST, even
+            # though PARTS lists it above the derived sample parts. Authentic,
+            # PARTS is already in table order and nothing needs deferring.
+            if upd or part[0] != "snd01":
                 blob += part_bytes(part)
                 # The authentic flash part is 2 MB of which MAME dumps only the
                 # first chip; the MRA supplies the second as <part repeat>, so
@@ -362,9 +366,10 @@ def main():
             # so its MRA pads with <part repeat>. The decoded sets have no fill:
             # their second part expands to the end on its own.
             blob += b"\xFF" * cfg.get("flash_fill", 0)
-        for part in PARTS:
-            if part[0] == "snd01":
-                blob += part_bytes(part)
+        if not upd:
+            for part in PARTS:
+                if part[0] == "snd01":
+                    blob += part_bytes(part)
         with open(outpath, "wb") as f:
             f.write(blob)
         print("wrote %s (concatenated stream, %d bytes)" % (outpath, len(blob)))

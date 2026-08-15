@@ -148,16 +148,17 @@ static const Part parts_rfjet[] = {
 // is the same ROMs in the same order and a copy would drift out of step the
 // first time one of them changed.
 //
-// The tails are also all the same shape -- 2 MB blank, 2 MB PCM source, 512 KB
-// second source -- which is the argument for this path in one line: only the
-// DERIVED images differ per game.
+// The tails are also all the same shape -- 2 MB PCM source, 512 KB second
+// source, 2 MB blank -- which is the argument for this path in one line: only
+// the DERIVED images differ per game. The order is MAME's own region order,
+// sound01 then soundflash1, because that is what an MRA has to send.
 static std::vector<Part> upd_table(const Part *pre, const char *pcm_rom,
                                    const char *snd_rom)
 {
     std::vector<Part> v(pre, pre + 14);
-    v.push_back({ "blank flash",  PCM_BASE,    0x200000, LINEAR });
     v.push_back({ pcm_rom,        PCMSRC_BASE, 0x200000, LINEAR });
     v.push_back({ snd_rom,        SND01_BASE,  0x080000, LINEAR });
+    v.push_back({ "blank flash",  PCM_BASE,    0x200000, LINEAR });
     return v;
 }
 

@@ -58,12 +58,23 @@ The music itself matches; this is fidelity. `PLAN.md` T-K.
 | `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
 | `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.5 MB | runs on hardware |
 | `rfjet.mra` | `rfjet`, SPI cartridge, pre-flashed | `rfjet.zip` | 37.5 MB | runs on hardware |
+| `rdft-update.mra`  | `rdft`, SPI cartridge, self-flashing | `rdft.zip` | 24.7 MB | not yet run on hardware |
+| `rdft2-update.mra` | `rdft2`, SPI cartridge, self-flashing | `rdft2.zip` | 36.7 MB | not yet run on hardware |
+| `rfjet-update.mra` | `rfjet`, SPI cartridge, self-flashing | `rfjet.zip` | 39.7 MB | not yet run on hardware |
 
-The three cartridge MRAs ship the YMF271 sample flash pre-programmed, so the
-several-minute "techno music" reflash the real cartridge does on first boot is
-skipped. rdft's image is assembled by the MRA; rdft2's and rfjet's cannot be,
+The three plain cartridge MRAs ship the YMF271 sample flash pre-programmed, so
+the several-minute "techno music" reflash the real cartridge does on first boot
+is skipped. rdft's image is assembled by the MRA; rdft2's and rfjet's cannot be,
 because a chunk of each is compressed — the core decompresses that during the
 download (`rtl/spi_rom_decode.sv`).
+
+The three `-update` MRAs are the other half of that: the flash ships BLANK and
+the cartridge's own sound ROMs come along as source material, so the game runs
+its own updater and programs its samples exactly as a fresh cartridge does. Two
+things to know before using one — the game HALTS on "PLEASE TURN THE POWER BACK
+ON" when it finishes, so reset the core afterwards, and **it does not persist
+yet**, so every boot runs the ritual again. `PLAN.md` section 17 is the whole
+story, including what the save file still needs.
 
 **rfjet boots to attract with sprites and sound, and it did so on the first
 load** — the only set here that has. Eleven captured scenes render 0 of 76,800

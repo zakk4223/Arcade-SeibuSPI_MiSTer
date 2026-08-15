@@ -5971,5 +5971,52 @@ did exactly that, so every command went to the synthesiser and the flash saw
 nothing. The symptom was a flash that never left ready with zero writes on its
 port.
 
-**What step 1 still owes:** the authentic MRAs, and a Quartus run. Everything
-else in it is built.
+**What step 1 still owes:** a Quartus run. The MRAs landed in 17.12.
+
+### 17.12 BUILT 2026-08-15: the authentic MRAs, and MAME's ROM_CONTINUE
+
+`mra/rdft-update.mra`, `mra/rdft2-update.mra`, `mra/rfjet-update.mra`. 24.7,
+36.7 and 39.7 MB. Step 1 of 17.7 is complete; none of it has run on hardware.
+
+**The tail order changed to MAME's, and that is the whole reason the check is
+worth anything.** 17.9 built the authentic tail as blank-flash, source, source.
+It is now source, source, blank -- `sound01`'s two ROMs and then `soundflash1`'s
+-- because `check_mra.py` holds each single-file part against the next ROM in
+`ROM_START` IN ORDER, and only an MRA that sends them in MAME's own region order
+can be checked that way. The alternative was to add the blank to the skip list,
+which would have left its CRC unchecked: the one file in these MRAs that carries
+the region lock.
+
+So the authentic MRAs skip LESS than the pre-flashed ones. `sound01` and
+`soundflash1` are carried and checked; only `audiocpu` (RAM) and `pals` remain.
+
+**MAME's ROM_CONTINUE was being ignored, and the PCM source is where that first
+mattered.** `ROM_LOAD32_WORD("gun_dogs_pcm.u0217", 0x000000, 0x100000)` followed
+by `ROM_CONTINUE(0x400000, 0x100000)` is a 2 MB file; the checker read only the
+first line and believed 1 MB, so part 14 took half a ROM and every part after it
+shifted. Nothing before this carried a ROM with a continuation, so nothing
+caught it. Sizes now accumulate.
+
+Two more things the checker had to learn, both because these are the first parts
+stored PACKED rather than scattered:
+
+* a per-set map from ROM name to (region, mode), because the two ROMs of ONE
+  `sound01` region go to two different places and neither uses the scatter its
+  `ROM_LOAD32_*` macro implies -- `spi_cpu.sv` rebuilds the 386's view instead;
+* a packed ROM's base is its region base with NO displacement, because where
+  MAME puts it inside `sound01` (0x800000 for the second) says nothing about
+  where the loader puts it.
+
+**What agrees, and how much of it is independent.** MAME's `ROM_START` against
+the MRA and the loader table, for all six MRAs, is the only comparison with an
+outside authority and it passes. Then, ours against ours: the MRA's own byte
+stream, assembled from the zips, is sha256-identical to
+`build_sdram_image.py --upd --concat` for all three sets, and the download
+totals (25,886,720 / 38,469,632 / 41,615,360) match `tb_rom_loader`'s tables
+exactly. And an image built from those bytes passes `check_snd01_window --image`
+over all 10 MB of the window. So MRA, loader table, image builder and the 386's
+decode are one consistent chain, anchored to MAME at the top.
+
+**No `<nvram>` element yet.** 17.6's plumbing does not exist, so an MRA that
+declared one would have the HPS ask the core for 2 MB it cannot supply. The
+files say so in a comment: until then the ritual runs on every boot.

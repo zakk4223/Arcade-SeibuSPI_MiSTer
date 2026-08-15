@@ -140,9 +140,9 @@ module rom_loader
 	localparam [4:0] NPARTS_RDFT2 = 5'd17;
 	localparam [4:0] NPARTS_RFJET = 5'd17;
 	// Authentic flash. rdft gains two parts, because its one assembled image
-	// becomes a blank plus two source ROMs; rdft2 and rfjet keep seventeen,
-	// because their image was already two parts and part 16 (sound1.u0222,
-	// whole) is a source ROM they were carrying anyway.
+	// becomes two source ROMs plus a blank; rdft2 and rfjet keep seventeen,
+	// because their image was already two parts and the second sound ROM they
+	// carry for the Z80 program is one of the sources.
 	localparam [4:0] NPARTS_RDFT_U  = 5'd17;
 	localparam [4:0] NPARTS_RDFT2_U = 5'd17;
 	localparam [4:0] NPARTS_RFJET_U = 5'd17;
@@ -227,13 +227,19 @@ module rom_loader
 			5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-1.u0322
 			5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-2.u0324
 			5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;           part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // gun_dogs_obj-3.u0323
-			// Part 14 is the same either way -- 2 MB linear into the sample
-			// region -- because a blank flash is exactly as long as a
-			// programmed one. 15 and 16 exist only for the authentic MRA and
-			// are unreachable otherwise: nparts stops the walk at 15.
-			5'd14: begin part_base = SDR_PCM_BASE;                       part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash image, or flash0_blank_regionXX + FF
-			5'd15: begin part_base = SDR_PCMSRC_BASE;                    part_size = 26'h020_0000; part_mode = M_LINEAR; end // gun_dogs_pcm.u0217, the updater's source
-			default:begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // seibu_8.u0216, the updater's second source
+			// The authentic tail is in MAME's OWN region order -- sound01's
+			// two ROMs, then soundflash1's blank -- because that is the order
+			// an MRA has to send them in for check_mra.py to hold each one
+			// against the ROM_START entry it claims to be. That check compares
+			// the comment to MAME's ROM name exactly, so these say the name and
+			// nothing else: 14 and 15 are the updater's two sources, 16 is the
+			// blank it programs. 15 and 16 are unreachable pre-flashed --
+			// nparts stops the walk at 15.
+			5'd14: if (set_upd)
+			       begin part_base = SDR_PCMSRC_BASE;                    part_size = 26'h020_0000; part_mode = M_LINEAR; end // gun_dogs_pcm.u0217
+			  else begin part_base = SDR_PCM_BASE;                       part_size = 26'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
+			5'd15: begin part_base = SDR_SND01_BASE;                     part_size = 26'h008_0000; part_mode = M_LINEAR; end // seibu_8.u0216
+			default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region80.u1053 + 1 MB of FF
 		endcase
 
 		// ---- TABLE rdft2: SPI cartridge, decoded sample flash (SXX2C) ----
@@ -273,17 +279,20 @@ module rom_loader
 		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 0: obj3.u0434 + obj3b.u0433
 		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 1: obj2.u0431 + obj2b.u0432
 		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 2: obj1.u0429 + obj1b.u0430
-		// Authentic: one blank 2 MB flash and the PCM source ROM, in place of
-		// the two slices of a derived image. Part 16 is unchanged -- the ROM
-		// the pre-flashed table carries for the Z80 program is the same ROM the
-		// updater reads as its second source.
+		// Authentic: the two sound01 ROMs and then a blank flash, in MAME's own
+		// region order, in place of the two slices of a derived image. Part 15
+		// is the SAME ROM either way and lands in the same place -- pre-flashed
+		// it is there for the Z80 program, authentic it is also the updater's
+		// second source -- so only its position in the list moves.
 		5'd14: if (set_upd)
-		       begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_regionXX.u1053 + 1 MB of FF
+		       begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm.u0217
 		  else begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
 		5'd15: if (set_upd)
-		       begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm.u0217, the updater's source
+		       begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222
 		  else begin part_base = SDR_PCM_BASE + 26'h017_C247;       part_size = 26'h004_C665; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
-		default:begin part_base = SDR_SND01_BASE;                   part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x60000
+		default: if (set_upd)
+		       begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region80.u1053 + 1 MB of FF
+		  else begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x60000
 		endcase
 
 		// ---- TABLE rfjet: SPI cartridge, decoded sample flash (SXX2C) ----
@@ -326,17 +335,19 @@ module rom_loader
 		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-1.u0442
 		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-2.u0443
 		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-3.u0444
-		// Authentic: as rdft2's, and here the two tables really are identical --
-		// a blank flash is 2 MB and a PCM source ROM is 2 MB on every cartridge
-		// set. It is only the DERIVED images that differ per game, which is the
-		// argument for this path in one line.
+		// Authentic: as rdft2's, and here the two tails really are identical --
+		// a PCM source ROM is 2 MB, a second sound ROM 512 KB and a blank flash
+		// 2 MB on every cartridge set. It is only the DERIVED images that
+		// differ per game, which is the argument for this path in one line.
 		5'd14: if (set_upd)
-		       begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_regionXX.u1053 + 1 MB of FF
+		       begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm-d.u0227
 		  else begin part_base = SDR_PCM_BASE;                      part_size = 26'h018_9DD5; part_mode = M_LINEAR; end // flash head: region stamp + pcm-d.u0227
 		5'd15: if (set_upd)
-		       begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm-d.u0227, the updater's source
+		       begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222
 		  else begin part_base = SDR_PCM_BASE + 26'h018_9DD5;       part_size = 26'h004_1C08; part_mode = M_LINEAR; end // flash tail: sound1.u0222 compressed
-		default:begin part_base = SDR_SND01_BASE;                   part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x44000
+		default: if (set_upd)
+		       begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region80.u1053 + 1 MB of FF
+		  else begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x44000
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----
