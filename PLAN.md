@@ -5229,7 +5229,7 @@ the .sta.rpt it writes contains no path listing at all.
 
 ---
 
-## 16. The 386 is idle 80-85% of the time, so 25 MHz would be cosmetic (2026-08-15)
+## 16. The 386 is idle 64-96% of the time, so 25 MHz would be cosmetic (2026-08-15)
 
 The question was whether to run z386 at the frequency the real board runs at.
 The board is a 386DX at **25 MHz** (50 MHz XTAL / 2, section 6's table); the core
@@ -5269,7 +5269,7 @@ detects assuming it spans two `clk_sys` cycles), `spi_top.sv:341` (the whole
 noting the real board IS two crystals -- 50 MHz for the 386, 28.63636 for video
 -- so an asynchronous CPU domain is more faithful, not less.
 
-### 16.2 Measured: the 386 is idle 80-85% of a frame
+### 16.2 Measured on rdft: the 386 is idle 80-85% of a frame
 
 Before doing any of that, measure. `eip` and `cs` are already in the VITL probe,
 so `tools/slop vitals` is a sampling profiler with no RTL change: the JTAG round
@@ -5335,7 +5335,56 @@ seconds and saved the whole detour. `Average speed` does not substitute for it:
 throttled runs report 100% whether or not the updater is running, so the speed
 tell in the capture recipe only works with `-nothrottle`.
 
-### 16.4 What is still not established
+### 16.4 rfjet, the heavy set: 4-36% busy, and the peak is what matters
+
+rdft is a light set. rfjet is the one that has been pushed hardest (T-L: scenes
+at 24.6k and 26.2k y-hits), so the measurement was redone on it. MAME's nvram
+was built the same way -- `tools/build_soundflash.py rfjet.zip`, split at 1 MB
+-- and **screenshotted first this time**: attract, no updater. The codec
+expansion the builder reports, 269,320 in -> 390,901 out, is +121,581, which is
+exactly the figure recorded for rfjet in the fast-load table. Good cross-check.
+
+rfjet's wait loop is the same construct as rdft's, relocated (same library):
+
+    206075  mov  eax, ds:0x36790            ; snapshot the frame counter
+    20607c  test DWORD PTR ds:0x2894c,0x400
+    206086  je   20608d
+    206088  call 2094a9                     ; conditional, inside the wait
+    20608d  cmp  eax, DWORD PTR ds:0x36790
+    206093  je   20607c                     ; spin
+    206095  ret
+
+MAME, fixed phase: 400 of 400 samples at 00206086, the same loop -- so both
+sides are in the same program state, which is the thing 16.3 got wrong.
+
+**Hardware, 1200 uniform samples over about 12 minutes of attract.** The single
+number is 16.6% busy, but reporting only that would hide the real structure:
+
+    50-sample windows, busy fraction
+
+      light attract screens   0.04 .. 0.12
+      the demo playing        0.24 .. 0.36
+
+Two shorter runs landed at 30.3% and 11.3% busy purely because one caught the
+demo and the other the hi-score screens -- a 10-sigma "disagreement" that is
+just scene, and a warning against quoting a mean from a short sample here.
+
+    overall     busy 16.6%   =  87,958 clk_cpu cycles/frame
+    PEAK window busy 36.0%   = 190,944 clk_cpu cycles/frame
+
+**At exactly 25 MHz the peak becomes 41% of a frame** (overall 19%), so even
+rfjet's heaviest attract scene keeps well over half the frame spare. The
+conclusion from 16.2 survives the harder set: the frequency change is cosmetic.
+
+What the peak DOES give is the first real bound on where slowdown would start.
+Saturating the CPU in this scene needs it about **2.8x slower than now, around
+10 MHz** effective -- so a throttle aiming at 386DX-25 behaviour is looking for
+something in that neighbourhood, not the 12.7% a clock change buys. That is a
+bound from OUR side only; it still does not say what a real 386DX-25 does, which
+remains 16.5.
+
+### 16.5 What is still not established
+
 
 How much faster z386x is per clock than a real 386DX-25 is still open. MAME's
 fraction cannot be pinned down with the hooks it exposes:
