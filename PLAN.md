@@ -3570,6 +3570,11 @@ Two mainboard revisions run on hardware, both deployed to the MiSTer at
 * **SXX2C** (`rdft`, pre-flashed) -- the SPI cartridge mainboard. Boots to
   attract with sprites and sound from an MRA that ships the sample flash
   pre-programmed, so no reflash ritual.
+  (**Re-confirmed on the current build, 2026-08-15** -- this is the one claim in
+  this section that has since been re-established rather than left unconfirmed.
+  See T-J: attract screenshots across the cycle, plus 18 voices and 0 overruns.
+  What had been mistaken for it in between was the board's TEST MODE menu, and
+  that was the MRA's saved Service Mode DIP.)
 
 The deployed core is SEED 3, timing met on every clock: clk_ram +0.735,
 clk_sys +1.517, TNS 0.000. `make verify` passes; `make -C sim lint-top` is
@@ -3625,14 +3630,31 @@ rdft2 has never been run on hardware.
 
 ## 11. TASKS
 
-Open, in the order they block things (end of 2026-08-10). All three sets run on
+Open, in the order they block things (updated 2026-08-15). All four sets run on
 hardware, so nothing below blocks a working board -- these are about knowing
 whether it is RIGHT.
 
-- [ ] **T-J** rdft's attract. It boots and renders, but the MiSTer's saved DIP
-      for that MRA has Service Mode on, so what was actually seen is the board
-      TEST MODE menu. Turn it off on the OSD DIP page and screenshot the
-      attract; that closes the last gap left by 10b's unconfirmed claims.
+- [x] **T-J** rdft's attract. **Service Mode off, and it is attract: the title
+      logo over a live demo, twelve screenshots across the cycle (2026-08-15).**
+      The diagnosis was right -- it was the MRA's saved DIP, nothing in the core.
+      Frames are 75-144 KB now against TEST MODE's 3.2 KB, which is the same
+      signal the fast-load timing harness tripped over. The demo progresses
+      (forest terrain, then rock, then back to forest as it loops) with all four
+      layers and sprites: shot patterns, homing missiles, explosions, the text
+      layer's copyright and INSERT COIN(S), and the licensee line.
+      **The sound half of 10b's claim is confirmed too**, which the pictures
+      cannot do. Read over steady attract after a `tools/slop clear`: Z80 PC
+      moving (01EF then 1A35 -- one sample cannot tell a running CPU from a
+      stuck one, two can), 18 voices, 0 synth overruns, `ymf writes` climbing
+      29,544 -> 36,370, `fifo2 push/pop` 42/42 which is the SXX2C-only path this
+      board takes, `fifo peak` 12 of 511 and full for 0.000 s.
+      **A transient that looks exactly like T-O, and is not.** The FIRST read
+      after the DIP change showed `frame gap` 21991 = 0.393 s with the two-frame
+      stall latch fired at CS 0018 EIP 0026D573. Cleared and re-measured over 90
+      s of attract: `frame gap` 1036, which is one frame exactly, and the latch
+      never fires. So the gap was the mode transition, not a live fault -- worth
+      recording because a cumulative counter read straight after a reset or a
+      DIP toggle wears T-O's signature and means nothing.
 - [x] **T-H** Listen to rdft2. **It plays, and it matches MAME.** Heard first,
       then measured over 130 s of attract against MAME's own `-wavwrite` of the
       same sequence: envelope r = 0.951, long-term spectrum r = 0.9927,
