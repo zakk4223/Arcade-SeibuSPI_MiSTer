@@ -5229,7 +5229,7 @@ the .sta.rpt it writes contains no path listing at all.
 
 ---
 
-## 16. The 386 is idle 64-96% of the time, so 25 MHz would be cosmetic (2026-08-15)
+## 16. The 386 is idle 60-97% of the time, so 25 MHz would be cosmetic (2026-08-15)
 
 The question was whether to run z386 at the frequency the real board runs at.
 The board is a 386DX at **25 MHz** (50 MHz XTAL / 2, section 6's table); the core
@@ -5365,6 +5365,8 @@ number is 16.6% busy, but reporting only that would hide the real structure:
       light attract screens   0.04 .. 0.12
       the demo playing        0.24 .. 0.36
 
+(Played gameplay peaks a little higher still, 0.396 -- see 16.5.)
+
 Two shorter runs landed at 30.3% and 11.3% busy purely because one caught the
 demo and the other the hi-score screens -- a 10-sigma "disagreement" that is
 just scene, and a warning against quoting a mean from a short sample here.
@@ -5383,7 +5385,59 @@ something in that neighbourhood, not the 12.7% a clock change buys. That is a
 bound from OUR side only; it still does not say what a real 386DX-25 does, which
 remains 16.5.
 
-### 16.5 What is still not established
+### 16.5 Measured during actual PLAY: peak 39.6%, and the boss is not the peak
+
+16.4's 36% was an attract number. A credit was played through on rfjet
+(2026-08-15) with the profiler logging an 8-second hardware-counted window every
+~18 s. 59 samples across menus, stage 1, its boss, and stage 2:
+
+    mean over everything          16.7%
+    mean excluding <8%             21.0%   (43 samples; <8% is menus, deaths,
+                                            scripted lulls)
+    PEAK                           39.6%   mid-stage 1
+
+**The stage 1 boss is NOT the peak.** Its window runs 16.9 -> 26.4% and tops out
+at 26.4, well under the 39.6 hit mid-stage. That is the right shape rather than a
+surprise: the 386's per-frame work scales with the NUMBER of objects, not their
+size, and a boss is one large sprite with a few patterns while mid-stage is many
+independent enemies plus bullets. Anyone hunting worst-case CPU load should aim
+at a crowded mid-stage moment, not a boss.
+
+Two samples inside the boss window read 2.7%, the CPU almost entirely idle --
+the boss intro or the defeat sequence, where the game runs a scripted animation
+and little else.
+
+So play is heavier than attract, but not by much: 39.6% against 36.0%, and the
+mean play figure of 21.0% against attract's 16.6%.
+
+    PEAK play  39.6% = 210,039 clk_cpu cycles/frame
+               at exactly 25 MHz that is 45.4% of a frame
+
+**Which settles the original question on real gameplay, not just attract: at
+25 MHz the 386 still has more than half of every frame spare, even at the worst
+moment of a played credit.** The clock change is cosmetic.
+
+The saturation bound tightens from attract's estimate: reaching 100% needs the
+CPU about **2.5x slower than now, ~11.3 MHz effective** (attract implied 2.8x /
+10.3 MHz). That is the number a throttle aiming at 386DX-25 behaviour would have
+to hit, and it is nowhere near the 12.7% a clock change buys.
+
+Method note: driving the game from this end did NOT work. A uinput keyboard on
+the MiSTer (python3 + /dev/uinput; MiSTer takes MAME-standard defaults, 5 = coin,
+1 = start, so no OSD mapping is needed) successfully coined up, started, and
+walked the name-entry and plane-select screens -- but the round trip per input is
+several seconds, which is slower than the game's own menu timeouts, so it could
+not actually play. A human played; the logger ran unattended on this side. The
+uinput trick is still worth keeping for anything that only needs a few keypresses
+at a screen that waits.
+
+Also worth recording: the persistent jtag_server died after 19 minutes with an
+internal Tcl error inside `read_probe_data`, taking the logger with it. The
+gameplay log was taken with `jtag_peek.tcl prof` instead -- one self-contained
+quartus_stp per sample, ~8 s of measurement per ~18 s of wall clock. Slower, but
+nothing long-lived to die mid-session. Prefer it for unattended logging.
+
+### 16.6 What is still not established
 
 
 How much faster z386x is per clock than a real 386DX-25 is still open. MAME's
@@ -5400,7 +5454,7 @@ fraction cannot be pinned down with the hooks it exposes:
   Check WHICH access a tap is catching before believing a per-frame count.
 * **A tap on the device port 0x684 crashes MAME** (core dump).
 
-### 16.6 The EIP profiler (built)
+### 16.7 The EIP profiler (built)
 
 The instrument is now on our side. `spi_top` counts, on clk_cpu, the cycles with
 `eip` inside a programmable inclusive window, against a count of every clk_cpu
