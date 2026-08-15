@@ -163,7 +163,11 @@ concatenation:
 
 The pre-flashed variant needs nothing beyond what SXX2C support already
 requires. The authentic one adds a small flash controller, a write path down a
-channel that is read-only today, and save-file plumbing — and without that last
+channel that is read-only today, and save-file plumbing (costed against the
+built core in **section 17**, which is the plan of record for it now -- three of
+the six rows above turned out to be already built, and one MISSING row is not in
+the table at all: the 386's `sound01` source window, without which the ritual
+programs silence) — and without that last
 one it is a multi-minute ritual every single boot.
 
 Two MRAs is not the only mechanism: the loader could build either image from the
@@ -3784,6 +3788,17 @@ whether it is RIGHT.
       16. What had blocked it was not rdft2 at all but `ioctl_wr` being acted
       on twice in `rom_loader`, which was corrupting every set's download.
       Section 10c.
+- [ ] **T-P** The authentic boot-up flash, as a second set of MRAs: let the game
+      run its own sample-flash updater instead of shipping a derived image.
+      Section 17 has the whole plan. Three of section 0's six line items are
+      already built (the SXX2C board, the wave-memory port's read direction, the
+      2 MB region); what is left is the 386's `sound01` source window, an
+      E28F008SA command FSM, a write port onto the PCM region with the sample
+      cache invalidated, and nvram persistence. **Do the source window first:**
+      without it the ritual completes successfully and programs 2 MB of silence,
+      because the undecoded window reads as zero. Verified by dumping SDRAM and
+      matching `tools/build_soundflash.py`'s sha256, which is already exact
+      against MAME's own flash nvram.
 - [ ] **T-D** Optional, ~10% of the sprite line budget: the line-buffer
       generation tag that replaces the 320-cycle clear. Tried and reverted --
       start by proving `bank_tag` actually toggles. Nothing needs it now that
@@ -5568,3 +5583,196 @@ What it unblocks: 16.5's missing number needs a MAME-side figure that MAME will
 not give up, but the OUR-side half is now exact rather than sampled, and it can
 run during PLAY -- which is what T-N still owes and where the peak load lives.
 Attract's 36% peak (16.4) is an attract number.
+
+---
+
+## 17. The authentic boot-up flash: what the core still needs (2026-08-15)
+
+Section 0 sketched this as "the authentic path" and priced it in one table. This
+section is the engineering version of that table, written after re-reading the
+RTL rather than from memory, because three of the six line items turn out to be
+already built and one of the remaining ones fails SILENTLY if it is skipped.
+
+The goal: ship `rdft-update.mra` (and rdft2, rfjet, and eventually senkyu,
+viprp1, ejanhs) alongside the pre-flashed MRAs. The authentic MRA carries a
+BLANK flash and the cartridge's sound ROMs, the game notices the stamp does not
+match, and it runs its own "techno music" updater exactly as the real cartridge
+does on first boot. No derived image, no per-game codec work.
+
+### 17.1 What already exists
+
+More than section 0's table implies, because the SXX2C board work landed in the
+meantime (10b) and the YMF271's wave-memory port was built for SXX2E's ROM:
+
+* **The whole Z80-in-RAM board.** 0x688 / 0x68C download, both FIFOs, 0x4009 d0,
+  0x400a. The updater's Z80 half needs nothing new.
+* **The wave memory port, read direction.** `rtl/ymf271.sv:346` decodes
+  0x14/0x15/0x16 (23-bit address plus the R/W bit) and `:352` pre-increments on
+  0x17; `rtl/ymf271_synth.sv:796` (`S_EXT`) services a read out of SDRAM at every
+  slot boundary. `ext_addr[20:0]` already spans the full 2 MB, so "which of the
+  two E28F008SA chips" is just bit 20 -- the `_unused` comment at
+  `ymf271_synth.sv:1019` claiming the port has to be widened for SXX2C is wrong;
+  2 MB is 21 bits and they are all there.
+* **The flash region itself**, `SDR_PCM_BASE` (`spi_defs.vh:30`), already the
+  memory the voices play from.
+
+So the delta is the write direction, the source window, and persistence.
+
+### 17.2 The 386's `sound01` source window -- do this FIRST
+
+The updater reads the samples out of the 386's address space and passes them to
+the Z80 a byte at a time. `spi_cpu.sv` decodes only `0x1200000-0x13FFFFF` (the
+second sound ROM, packed, which is where rdft2 and rfjet keep their Z80
+program), and `spi_top.sv:266` does not even enable that much for rdft.
+Everything else in the window falls through to `S_NULL` and **reads as zero**.
+
+That is the trap: with no other change, the ritual would run to completion, the
+progress bar would fill, the game would say UPDATE COMPLETED, and the flash
+would hold 2 MB of silence. Nothing errors. A pre-flashed MRA gets away with the
+missing window only because the 386 never touches it once the stamp matches
+(measured: 0 reads across 4800 frames, section 0).
+
+The layout is not guesswork -- `tools/build_soundflash.py`'s `bank()` models it
+and is verified bit-for-bit against MAME's own flash nvram for all seven sets:
+
+| 386 range             | contents                                                  |
+|-----------------------|-----------------------------------------------------------|
+| `0x0A00000-0x0BFFFFF` | pcm ROM `0x000000-0x0FFFFF`, 2 bytes per dword, lanes 0/1 |
+| `0x0C00000-0x0DFFFFF` | nothing -- the `ROM_CONTINUE(base+0x400000)` skip          |
+| `0x0E00000-0x0FFFFFF` | pcm ROM `0x100000-0x1FFFFF`, same packing                  |
+| `0x1200000-0x13FFFFF` | second sound ROM, 1 byte per dword -- ALREADY DECODED      |
+
+Every cartridge set has the same shape: a 2 MB pcm ROM at region base 0 on two
+byte lanes and a 512 KB ROM at region base 0x800000 on one. viprp1 is the only
+oddity and it needs nothing here -- its second source is the program ROM, which
+is already mapped.
+
+Stored packed, a 4-dword 386 cache line is 8 consecutive source bytes, so a line
+fill is exactly one aligned 64-bit SDRAM read. That is the same trick the
+existing `SDR_SND01_BASE` arm uses, so the new arm is a copy of it with the
+byte index doubled.
+
+Work: one decode arm in `spi_cpu.sv`, a 2 MB `SDR_PCMSRC_BASE` at the top of the
+map (`SDR_END` 41 MB -> 43 MB), and `snd01_en` extended to rdft.
+
+### 17.3 The flash device
+
+New `rtl/spi_soundflash.sv`, per-chip state selected by `ext_addr[20]`: Read
+Array (FF), Read Status (70), Clear Status (50), Block Erase (20 / D0), Byte
+Program (40 + datum), and a status register whose bit 7 (WSMS) is the one the
+updater polls. Section 0's trace is the specification; it was taken off the real
+command stream and includes the direction bit being flipped between steps, which
+is why the port has to work both ways.
+
+Erase is a 64 KB sweep of 0xFFFF through the write port, with status reading
+BUSY until the sweep drains. That is what makes a timing model unnecessary: the
+updater self-throttles against the sweep, and there is nothing to calibrate.
+
+Two hooks into `ymf271.sv`:
+
+* `:352` (write to 0x17) hands the flash the byte and the POST-increment
+  address. The address register runs one behind -- the comment at `:340` already
+  records why (the updater sets 0x7FFFFF so the first write lands at 0).
+* `:403` / the `S_EXT` fetch: when the addressed chip is not in read-array mode,
+  answer the status byte locally instead of going to SDRAM. Program-verify
+  depends on the write having retired first, which holding BUSY until the SDRAM
+  write acks gives for free.
+
+### 17.4 A write path into the PCM region, and the cache
+
+`ch5` is read-only in the controller (`sdram.sv:98`); `ch3` is the only writable
+channel (`sdram.sv:44`) and its arbiter already carries a writer for the Z80
+download. A fourth port on `spi_sdr_arb3.sv` is ~20 lines and touches
+`sdram.sv` not at all. Byte granularity is native via `ch3_be`. Bandwidth is a
+non-issue: a full 2 MB erase is about 1M 16-bit writes, ~130 ms.
+
+**The cache is the subtle part.** `ymf271_synth.sv` holds a 64-bit sample line
+(`line_tv` / `line_data`, `:198`) and a per-slot copy of it written back every
+slot (`cch_*`, `:924`), so a flash write can leave up to 49 stale copies. Cheapest
+exact fix: a one-bit generation tag stored beside the valid bit, toggled on any
+flash write or erase -- every stale entry then misses at `:423` with no sweep and
+no extra state. `S_EXT` reads go straight to SDRAM and are already coherent.
+
+### 17.5 The MRA
+
+Same skeleton as the pre-flashed files, different tail. **The blank flash is in
+the zips** -- `flash0_blank_region80.u1053`, plus one per region (`rdftj`,
+`rdftu`, `rdft2it`, `rfjett`, ...) -- so the region byte comes from MAME's own
+dump instead of a literal:
+
+```xml
+<part name="flash0_blank_region80.u1053"/>   <!-- 1 MB, carries the region ID -->
+<part repeat="0x100000">FF</part>            <!-- chip 1, blank -->
+<part name="gun_dogs_pcm.u0217"/>            <!-- new: sound01 source, 2 MB -->
+<part name="seibu_8.u0216"/>                 <!-- new: sound01 source, 512 KB -->
+<nvram index="2" size="2097152"/>
+```
+
+Plus a new mod-byte bit (bit 4 is free; bit 0 is SXX2C and bits 3:1 the variant)
+selecting an authentic part table, and the usual `tools/check_mra.py` and
+`tb_rom_loader` extensions. Download size is roughly the pre-flashed figure plus
+0.5 MB, since the 2 MB of derived flash is replaced by 2 MB of blank and the
+sources are added.
+
+This is also what makes the region variants free for the first time. The
+pre-flashed trick binds an MRA to one program image, because the stamp is a copy
+of that image's last four bytes; the authentic path derives nothing, so a
+different region is a different blank plus different program ROMs and the game's
+own stamp check does the rest.
+
+### 17.6 Persistence, and why it is not optional
+
+`sys/hps_io.sv:146` already carries the whole upload path (`ioctl_upload_req`,
+`ioctl_upload_index`, `ioctl_din`, `ioctl_rd`); `SeibuSPI.sv` wires none of it.
+The HPS side is `arcade_nvm_save()` in Main_MiSTer's
+`support/arcade/mra_loader.cpp:88` -- a plain `spi_read` of `nvram_size` bytes,
+**with no size cap**, triggered when the menu poll `UIO_CHK_UPLOAD` sees the
+core's request. Load is the mirror, an `ioctl_download` at the nvram index.
+
+So 2 MB works as an arcade nvram. What it needs on our side is a prefetch FIFO
+on the read-back (one 64-bit SDRAM read feeds eight `ioctl_rd` beats), a route
+for the nvram DOWNLOAD into the PCM region -- the same ch3 write port -- and a
+dirty flag plus an idle timer to raise `ioctl_upload_req` once the flash stops
+changing.
+
+Why it is not optional: after updating, the game HALTS on "UPDATE COMPLETED.
+PLEASE TURN THE POWER BACK ON." (16.6). Without a save file that is a
+ritual-plus-manual-reset on every single boot.
+
+The cost is smaller than the real hardware's, and deliberately so. The ritual is
+one 386 -> Z80 FIFO round trip per byte (16.6), and like MAME we charge no
+byte-program time, so the bound is the FIFO loop rather than the flash. MAME
+finishes in about 7 emulated seconds. Ours will be slower -- the Z80's fetches
+sit at the bottom of the SDRAM priority list (14.7) -- but tens of seconds, not
+the minutes real hardware takes.
+
+Worth copying from MAME: it re-asserts the region byte at `flash[0]` on every
+`machine_reset` as an anti-brick hack. Doing the same after an nvram load costs
+one write and makes a save file from the wrong region self-correcting.
+
+### 17.7 Phasing, and how it is verified
+
+1. **Source window + flash device + ch3 write port.** The ritual runs. Verify by
+   dumping SDRAM `0x0280000-0x047FFFF` over JTAG and comparing sha256 against
+   `tools/build_soundflash.py`'s image for the set. That image is already
+   verified bit-for-bit against MAME's own flash nvram from two independent
+   directions (section 0 and 16.6), so this is an exact pass/fail with nothing
+   to eyeball -- the same standard the fast-load work was held to.
+2. **Persistence.** The ritual runs once.
+3. **Ship the `-update` MRAs.** The pre-flashed ones stay as the fast-boot
+   option, and stay the only option for anyone who does not want to sit through
+   a reflash at all.
+
+### 17.8 Two open questions, neither blocking
+
+* **JP1 (0x400a).** 10b found 0xFF (Update) deadlocked and 0xFC (Normal) booted
+  -- but that run predates the 0x4009 d0 fix, which is what the deadlock
+  actually was in the end, so the jumper's behaviour is NOT established. The
+  cheap resolution is to stop guessing: expose JP1 as a DIP bit, default Update
+  on the authentic MRA and Normal on the pre-flashed ones. Content-based
+  triggering is already measured in one direction (a valid stamp under MAME's
+  default Update jumper plays rather than reflashing, section 0); the other
+  direction has never been tested.
+* **Whether the updater polls one chip while the other is erasing.** Per-chip
+  FSM state covers it either way. The rule is just: do not share one status
+  register between the two chips.
