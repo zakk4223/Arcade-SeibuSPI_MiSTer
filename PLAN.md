@@ -5437,7 +5437,50 @@ gameplay log was taken with `jtag_peek.tcl prof` instead -- one self-contained
 quartus_stp per sample, ~8 s of measurement per ~18 s of wall clock. Slower, but
 nothing long-lived to die mid-session. Prefer it for unattended logging.
 
-### 16.6 What is still not established
+### 16.6 The sample-flash updater is NOT a CPU benchmark
+
+Asked whether the "NOW UPDATING" ritual could serve as a rough 386 benchmark.
+It cannot, for three separate reasons, and the first one is fatal on its own.
+
+**Our core cannot run it.** The pre-flashed variant is what was built (the table
+in section 0): the flash region in SDRAM is read-only, there is no E28F008SA
+command state machine and no YMF271 ext-memory port in the write direction. Only
+MAME can run the ritual, so it could never be a comparative measurement.
+
+**The 386 is not the bottleneck -- it is blocked on a Z80 round trip.** Traced
+per frame through rfjet's update, 140 of 140 samples land in a three-instruction
+wait, and it is the same library routine as rdft's 0x26D65A, relocated:
+
+    2c5315  bt   WORD PTR ds:0x684,1    ; Z80 -> 386 FIFO not empty?   48%
+    2c531e  mov  WORD PTR ds:0x600,1    ; watchdog kick                31%
+    2c5327  jae  2c5315                 ; no reply yet -> spin         14%
+    2c5329  mov  ax, ds:0x680           ; take the reply
+
+That is 93% of the trace in the spin itself. It fits what section 0 already
+measured from the other end: the Z80 is a pure pass-through, 4,056,707 FIFO bytes
+against 4,056,752 flash writes, so every unit of work is a 386 command and a Z80
+reply with the 386 waiting in between. The pace is set by the Z80's loop and, on
+real hardware, by flash programming time -- neither of which is the 386.
+
+**MAME's flash costs nothing, so its duration is not the hardware's.** MAME's
+`intelfsh` does not charge byte-program time, and the whole ritual finishes in
+about 7 emulated seconds -- it was on "UPDATE COMPLETED. PLEASE TURN THE POWER
+BACK ON." by frame 400. Real hardware has to actually program ~2 MB a byte at a
+time and takes minutes. So the MAME figure measures the 386/FIFO/Z80 pipeline
+with the flash removed, and the hardware figure is dominated by the part MAME
+omits. Neither is a CPU number.
+
+Worth keeping from the exercise: **MAME's own programming run reproduces
+`build_soundflash.py` byte for byte** (sha256 of both 1 MB halves identical), which
+re-confirms the offline builder end to end, from a completely different direction
+than the original derivation.
+
+One trap this cost time on: after the update the game HALTS on "please turn the
+power back on" and never reaches the vblank spin loop, so a completion detector
+that waits for the spin window waits forever. Detect the update by the halt
+screen, or by the flash contents settling.
+
+### 16.7 What is still not established
 
 
 How much faster z386x is per clock than a real 386DX-25 is still open. MAME's
@@ -5454,7 +5497,7 @@ fraction cannot be pinned down with the hooks it exposes:
   Check WHICH access a tap is catching before believing a per-frame count.
 * **A tap on the device port 0x684 crashes MAME** (core dump).
 
-### 16.7 The EIP profiler (built)
+### 16.8 The EIP profiler (built)
 
 The instrument is now on our side. `spi_top` counts, on clk_cpu, the cycles with
 `eip` inside a programmable inclusive window, against a count of every clk_cpu
