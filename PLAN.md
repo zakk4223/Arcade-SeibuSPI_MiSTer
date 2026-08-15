@@ -5217,3 +5217,108 @@ the waveform ROM is 13 of them and the two LFO tables 5.
 Setup Summary leaves out. Worth knowing before the next timing hunt: a compile
 that says "Full Compilation was successful" has NOT necessarily met timing, and
 the .sta.rpt it writes contains no path listing at all.
+
+---
+
+## 16. The 386 is idle 80-85% of the time, so 25 MHz would be cosmetic (2026-08-15)
+
+The question was whether to run z386 at the frequency the real board runs at.
+The board is a 386DX at **25 MHz** (50 MHz XTAL / 2, section 6's table); the core
+runs `clk_cpu` at 28.636364 MHz, which is 14.5% fast. Two things came out of
+looking at it: the frequency cannot be reached from this PLL without making
+`clk_cpu` asynchronous, and it would not matter if it could.
+
+### 16.1 Exact 25 MHz is not available from one PLL
+
+`clk_sys` must stay exactly 57.272727 MHz -- the pixel clock and the Z80 clock
+are both `clk_sys`/8 and both have to be exact. Requiring one VCO to divide to
+both 630/11 MHz and 25 MHz means
+
+    clk_sys/clk_cpu = 126/55, so the smallest usable VCO is 55 x 630/11 = 3150 MHz
+
+against a Cyclone V ceiling near 1600. So it cannot be done with the single PLL.
+
+Nor is there a near miss worth taking. Every output is a division of the same
+1260 MHz VCO, so all edges land on VCO ticks and the closest launch/capture pair
+between `clk_cpu` and `clk_sys` is `gcd(22, N)` VCO periods:
+
+    /44  28.636 MHz  gcd 22  ->  17.460 ns   <- current, fully aligned
+    /50  25.200 MHz  gcd  2  ->   1.587 ns
+    /51  24.706 MHz  gcd  1  ->   0.794 ns
+
+Only multiples of 22 stay aligned, which is 28.636 MHz and then 19.09 MHz --
+nothing near 25. `sys/sys_top.sdc` puts every core PLL output in ONE clock group,
+so these are analysed against each other, and a 1.6 ns sliver is the same trap
+that made 96.923 MHz `clk_ram` build at -4.7 ns (see pll.v).
+
+Exact 25.000 is therefore a SECOND PLL (50 MHz ref, VCO 1000, /40), which makes
+`clk_cpu` genuinely asynchronous and turns several crossings into real CDCs:
+`spi_top.sv:399` (`sndfifo_wr` is a one-`clk_cpu` pulse that `spi_sound` edge
+detects assuming it spans two `clk_sys` cycles), `spi_top.sv:341` (the whole
+`spi_io` register file, already flagged in section 11 as unsynchronised), and
+`spi_top.sv:784` (telemetry, commented "a synchronous sample, not a CDC"). Worth
+noting the real board IS two crystals -- 50 MHz for the 386, 28.63636 for video
+-- so an asynchronous CPU domain is more faithful, not less.
+
+### 16.2 Measured: the 386 is idle 80-85% of a frame
+
+Before doing any of that, measure. `eip` and `cs` are already in the VITL probe,
+so `tools/slop vitals` is a sampling profiler with no RTL change: the JTAG round
+trip is ~54 ms against an 18.52 ms frame, uncorrelated with frame phase, so the
+samples are uniform in time.
+
+rdft in attract, two independent runs:
+
+    run 1   600 samples   79.0% in the spin, 85.2% including the call inside it
+    run 2   300 samples   75.0% in the spin, 80.3% including the call inside it
+
+The hot addresses disassemble (from MAME's own memory, via objdump) as a
+wait-for-vblank spin:
+
+    203ef9  mov  eax, ds:0x3692c            ; snapshot the frame counter
+    203f00  test DWORD PTR ds:0x298d0,0x400
+    203f0a  je   203f11
+    203f0c  call 206339                     ; conditional, inside the wait
+    203f11  cmp  eax, DWORD PTR ds:0x3692c  ; changed yet?
+    203f17  je   203f00                     ; no -> spin
+    203f19  ret
+
+So the game uses 15-20% of the CPU in this scene:
+
+    28.636364 MHz / 53.99 Hz = 530,401 clk_cpu cycles per frame
+    busy 14.8-19.7%          =  78,700-111,400 cycles of actual work
+
+**At exactly 25 MHz that same work is 17-24% of a frame, so the 386 would still
+be idle 76-83%.** Dropping the clock 12.7% changes nothing a player could see.
+The frequency is cosmetic; only a throttle several times deeper would restore a
+real 386DX-25's behaviour.
+
+### 16.3 What could NOT be established, and why
+
+The interesting number -- how much faster z386x is than a real 386DX-25 -- is
+still open. MAME is the obvious oracle and it does not give it up:
+
+* **MAME has no periodic Lua hook.** Only frame notifiers, so a PC sample is
+  always at the same phase of the frame. At that phase (end of frame) MAME's 386
+  is 93% inside the SOUND handshake wait at 26d65a (`bt WORD PTR ds:0x684,1`,
+  waiting on the Z80) and 0 of 480 samples in the vblank wait. That is a biased
+  statistic and cannot be turned into an idle fraction.
+* **Memory read taps are bypassed for normal RAM reads.** A tap on the frame
+  counter 0x3692c fires exactly 0.998 times per frame, which looks like "MAME
+  never spins" -- but sampling EIP inside the tap shows it is ALWAYS 0x26b188,
+  the ISR's own read-modify-write. The game's loop reads never reach the tap.
+  An early conclusion drawn from that hits/frame figure was wrong and is
+  discarded here; the lesson is to check WHICH access a tap is catching before
+  believing a per-frame count.
+* **A tap on the device port 0x684 crashes MAME** (core dump), so the sound wait
+  cannot be timed that way either.
+
+The honest summary is that hardware is measured and MAME is not. What the two
+DO agree on is that the 386 spends most of its time waiting, not computing --
+ours on vblank, MAME's on the sound handshake. That difference in WHAT they wait
+on is itself worth remembering next time T-O is looked at.
+
+To close 16.3 properly the instrument wants to be on our side, not MAME's: a
+telemetry counter of `clk_cpu` cycles spent with `eip` inside the wait loop
+would give the idle fraction exactly and continuously, instead of by sampling,
+and would measure gameplay rather than attract.
