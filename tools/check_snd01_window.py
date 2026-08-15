@@ -26,8 +26,17 @@ window shows up as "we answer 0 and MAME has data".
 The reference is tools/build_soundflash.py's load_sound01(), which is the same
 code whose flash images match MAME's own nvram bit for bit for all seven sets.
 
+With --image it reads the two packed ROMs out of a built SDRAM image instead of
+out of the zip, which extends the check by one link: the loader's PLACEMENT is
+then part of what is being verified, not just the decode arithmetic. An image
+built with the wrong base, or an authentic table that forgot a part, fails here
+rather than on hardware.
+
+    tools/build_sdram_image.py rdft.zip upd.bin --upd --set rdft
+    tools/check_snd01_window.py rdft.zip --set rdft --image upd.bin
+
 Usage:
-    tools/check_snd01_window.py <set>.zip [--set NAME]
+    tools/check_snd01_window.py <set>.zip [--set NAME] [--image sdram.bin]
     tools/check_snd01_window.py --all <romdir>
 """
 
@@ -39,10 +48,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from build_soundflash import GAMES, S01_BASE, S01_SIZE, detect, load_sound01, zread
 
-# Must match rtl/spi_defs.vh. Only the offsets within their own regions matter
-# here, so the bases are subtracted out and the two packed ROMs are passed
-# around as plain byte strings.
+# Must match rtl/spi_defs.vh. The bases matter only for --image; without it the
+# two packed ROMs come straight out of the zip and are indexed from zero.
+PCMSRC_BASE = 0x2900000
 PCMSRC_SIZE = 0x200000
+SND01_BASE = 0x0480000
 SND01_SIZE = 0x080000
 
 
@@ -110,9 +120,21 @@ def packed_roms(zf, setname):
     return pcm, snd
 
 
-def check(zf, setname):
+def packed_from_image(path):
+    """The same two ROMs, read out of a built SDRAM image at their map bases."""
+    img = open(path, "rb").read()
+    need = PCMSRC_BASE + PCMSRC_SIZE
+    if len(img) < need:
+        raise SystemExit("%s is %d bytes; an authentic image is %d. A "
+                         "pre-flashed one has nothing at PCMSRC."
+                         % (path, len(img), need))
+    return (img[PCMSRC_BASE:PCMSRC_BASE + PCMSRC_SIZE],
+            img[SND01_BASE:SND01_BASE + SND01_SIZE])
+
+
+def check(zf, setname, image=None):
     region = load_sound01(zf, setname, GAMES[setname]["sound01"])
-    pcm, snd = packed_roms(zf, setname)
+    pcm, snd = packed_from_image(image) if image else packed_roms(zf, setname)
 
     bad = 0
     first_bad = None
@@ -150,9 +172,14 @@ def check(zf, setname):
 def main():
     argv = sys.argv[1:]
     setname = None
+    image = None
     if "--set" in argv:
         k = argv.index("--set")
         setname = argv[k + 1]
+        del argv[k:k + 2]
+    if "--image" in argv:
+        k = argv.index("--image")
+        image = argv[k + 1]
         del argv[k:k + 2]
 
     if "--all" in argv:
@@ -179,8 +206,8 @@ def main():
     zf = zipfile.ZipFile(args[0])
     if setname is None:
         setname = detect(zf)
-    print("%s:" % setname)
-    return check(zf, setname)
+    print("%s%s:" % (setname, " (from %s)" % image if image else ""))
+    return check(zf, setname, image)
 
 
 if __name__ == "__main__":

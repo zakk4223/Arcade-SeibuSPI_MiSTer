@@ -16,8 +16,15 @@ tile region is 12 MB with the second bg group 6 MB in, and its sample flash is
 DERIVED rather than copied -- built here by the same code as
 tools/build_soundflash.py, which is checked bit-for-bit against MAME.
 
+--upd builds the AUTHENTIC-FLASH image instead (PLAN.md section 17): MAME's own
+blank flash in the sample region and the two ROMs the game's updater reads to
+program it, one of them in a region a pre-flashed image never writes. That is
+the image an `-update` MRA produces, and the only one with anything behind the
+386's sound01 source window. 43 MB rather than 41.
+
 Usage:
     tools/build_sdram_image.py rdft.zip out.bin [--region tiles,chars] [--sums]
+    tools/build_sdram_image.py rdft.zip upd.bin --upd
 
 --sums prints the four region checksums in the exact form rtl/spi_romcheck.sv
 declares them, so the hardware checker's constants can be re-derived rather than
@@ -41,8 +48,13 @@ BASE = {
     "snd01":   0x0480000,
     "tiles":   0x0500000,
     "sprites": 0x1100000,
+    "pcmsrc":  0x2900000,
 }
+# 41 MB normally; 43 with --upd, which is the only mode that writes `pcmsrc`.
+# Kept conditional so a pre-flashed image stays byte-identical to what every
+# earlier run produced.
 SDRAM_SIZE = 0x2900000
+SDRAM_SIZE_UPD = 0x2B00000
 
 # (region, crc32, size, mode, offset-within-region[, source-index bias[, slice]])
 # Mode names match the scatter modes in rtl/rom_loader.sv. `slice` is a byte
@@ -66,6 +78,30 @@ PARTS_RDFTS = [
     ("sprites", 0x1ceb0b6f, 0x400000, "SPR_ILV", 2),
     ("sprites", 0x36e93234, 0x400000, "SPR_ILV", 4),
     ("pcm",     0x3f8d4a48, 0x200000, "LINEAR",  0),
+]
+
+# rdft, the SPI cartridge's first set. Order and modes are rom_loader.sv's rdft
+# table. Four byte lanes for the program and three for the text layer, where
+# rdfts has word+byte pairs, and no audiocpu part at all -- that region is RAM
+# the 386 fills through port 0x688.
+PARTS_RDFT = [
+    ("prg",     0xadcb5dbc,  0x80000, "W32_B0",  0),
+    ("prg",     0x60c5b92e,  0x80000, "W32_B1",  0),
+    ("prg",     0x44b86db5,  0x80000, "W32_B2",  0),
+    ("prg",     0xe70727ce,  0x80000, "W32_B3",  0),
+    ("chars",   0x8f8d4e14,  0x10000, "W24_B0",  0),
+    ("chars",   0x6ac64968,  0x10000, "W24_B1",  0),
+    ("chars",   0x4d87e1ea,  0x10000, "W24_B2",  0),
+    ("tiles",   0x6a68054c, 0x200000, "W24_W01", 0),
+    ("tiles",   0x3400794a, 0x100000, "W24_B2",  0),
+    ("tiles",   0x61cd2991, 0x200000, "W24_W01", 0x300000),
+    ("tiles",   0x502d5799, 0x100000, "W24_B2",  0x300000),
+    ("sprites", 0x59d86c99, 0x400000, "SPR_ILV", 0),
+    ("sprites", 0x1ceb0b6f, 0x400000, "SPR_ILV", 2),
+    ("sprites", 0x36e93234, 0x400000, "SPR_ILV", 4),
+    # pcm is not a part: derived, see FLASH below. rdft has no snd01 part
+    # either -- its Z80 program is inside `maincpu`, not sound1.u0222 -- so the
+    # only thing that ever puts seibu_8.u0216 in SDRAM is --upd.
 ]
 
 # rdft2. Order and modes are rom_loader.sv's rdft2 table, which check_mra.py
@@ -128,14 +164,31 @@ PARTS_RFJET = [
 # the MRA sends for the two derived sample parts, which --concat has to
 # reproduce byte for byte: the verbatim slice, then the COMPRESSED tail. Both
 # lengths come out of tools/build_soundflash.py's job-table walk.
+#
+# `upd` is the authentic-flash variant (--upd): instead of a derived image the
+# sample region gets MAME's own blank flash, and the two ROMs the game's updater
+# reads become parts of their own. All three sets take the SAME blank -- the
+# region byte lives in it, and region80 is what every parent set carries.
+# rom_loader.sv's authentic tail is these three parts in this order.
+BLANK_FLASH = 0xe2adaff5        # flash0_blank_region80.u1053, 1 MB
 SETS = {
     "rdfts": dict(parts=PARTS_RDFTS, probe=0xe278dddd, flash=False),
+    "rdft":  dict(parts=PARTS_RDFT,  probe=0xadcb5dbc, flash=True,
+                  # rdft's image is a plain concatenation rather than a decoded
+                  # one, so its stream carries a trailing FF fill the other two
+                  # do not: 4 + 0x1A13B2 + 0x3828D + 0x269BD = 0x200000.
+                  flash_stream=(("gun_dogs_pcm.u0217", 4, 0x1A13B6),
+                                ("seibu_8.u0216", 0, 0x3828D)),
+                  flash_fill=0x269BD,
+                  upd=(0x31253ad7, 0xf88cb6e4)),
     "rdft2": dict(parts=PARTS_RDFT2, probe=0x3cb3fdca, flash=True,
                   flash_stream=(("pcm.u0217", 4, 0x17C247),
-                                ("sound1.u0222", 0, 0x4C665))),
+                                ("sound1.u0222", 0, 0x4C665)),
+                  upd=(0x2edc30b5, 0xb7bd3703)),
     "rfjet": dict(parts=PARTS_RFJET, probe=0xe5a3b304, flash=True,
                   flash_stream=(("pcm-d.u0227", 4, 0x189DD5),
-                                ("sound1.u0222", 0, 0x41C08))),
+                                ("sound1.u0222", 0, 0x41C08)),
+                  upd=(0x8ee3ff45, 0xd4fc3da1)),
 }
 
 
@@ -184,6 +237,12 @@ def main():
     # ioctl, and sim/tb_sdram.cpp feeds it to the real loader.
     concat = "--concat" in sys.argv
 
+    # --upd builds the authentic-flash image (PLAN.md section 17): a BLANK
+    # sample flash plus the two ROMs the game's own updater reads to program it,
+    # instead of a derived image. This is the image an `-update` MRA produces,
+    # and the only one the 386's sound01 source window has anything behind.
+    upd = "--upd" in sys.argv
+
     want_regions = None
     if "--region" in sys.argv:
         want_regions = set(sys.argv[sys.argv.index("--region") + 1].split(","))
@@ -193,14 +252,47 @@ def main():
     for info in zf.infolist():
         by_crc.setdefault(info.CRC, info.filename)
 
-    setname = next((n for n, c in SETS.items() if c["probe"] in by_crc), None)
-    if setname is None:
+    # A MERGED zip holds its clones' ROMs too, and rdfts is a clone of rdft, so
+    # rdft.zip matches both -- the probe CRCs are all present in the one file.
+    # First match wins, and SETS is ordered so that stays rdfts, which is what
+    # every existing invocation means by rdft.zip. --set picks the other one.
+    matches = [n for n, c in SETS.items() if c["probe"] in by_crc]
+    if "--set" in sys.argv:
+        setname = sys.argv[sys.argv.index("--set") + 1]
+        if setname not in SETS:
+            raise SystemExit("no such set %s (have: %s)"
+                             % (setname, ", ".join(sorted(SETS))))
+        if setname not in matches:
+            raise SystemExit("%s does not contain %s's ROMs" % (zpath, setname))
+    elif matches:
+        setname = matches[0]
+        if len(matches) > 1:
+            print("note: %s also matches %s; --set picks one"
+                  % (os.path.basename(zpath),
+                     ", ".join(m for m in matches[1:])))
+    else:
         raise SystemExit("%s is none of %s" % (zpath, ", ".join(sorted(SETS))))
     cfg = SETS[setname]
     PARTS = cfg["parts"]
-    print("set: %s" % setname)
+    print("set: %s%s" % (setname, ", authentic flash" if upd else ""))
 
-    image = bytearray(b"\xFF" * SDRAM_SIZE)
+    if upd:
+        if "upd" not in cfg:
+            raise SystemExit("%s has no authentic-flash variant" % setname)
+        pcm_crc, snd_crc = cfg["upd"]
+        # The tail rom_loader.sv walks when set_upd is set. The blank flash is
+        # only 1 MB: the second E28F008SA has no dump in MAME because it is
+        # erased, and this image starts life as 0xFF, so chip 1 is already
+        # right. rdft2 and rfjet already carry `snd01` as a part; it is dropped
+        # and re-added at the tail so the order matches the loader's table for
+        # every set, which is what --concat depends on.
+        PARTS = [p for p in PARTS if p[0] != "snd01"] + [
+            ("pcm",    BLANK_FLASH, 0x100000, "LINEAR", 0),
+            ("pcmsrc", pcm_crc,     0x200000, "LINEAR", 0),
+            ("snd01",  snd_crc,     0x080000, "LINEAR", 0),
+        ]
+
+    image = bytearray(b"\xFF" * (SDRAM_SIZE_UPD if upd else SDRAM_SIZE))
     placed = 0
 
     for part in PARTS:
@@ -232,7 +324,7 @@ def main():
     # slice of pcm.u0217, and half a megabyte the game's own 386 decompresses --
     # the same image tools/build_soundflash.py rebuilds and checks by sha256
     # against what MAME's flash devices hold.
-    if cfg["flash"] and (not want_regions or "pcm" in want_regions):
+    if cfg["flash"] and not upd and (not want_regions or "pcm" in want_regions):
         from build_soundflash import build as build_flash
         flash = build_flash(zf, setname)
         image[BASE["pcm"]:BASE["pcm"] + len(flash)] = flash
@@ -253,7 +345,12 @@ def main():
         for part in PARTS:
             if part[0] != "snd01":
                 blob += part_bytes(part)
-        if cfg["flash"]:
+                # The authentic flash part is 2 MB of which MAME dumps only the
+                # first chip; the MRA supplies the second as <part repeat>, so
+                # the stream has to carry it too.
+                if upd and part[0] == "pcm":
+                    blob += b"\xFF" * 0x100000
+        if cfg["flash"] and not upd:
             # Exactly what the MRA sends for the two sample parts: the stamp and
             # a slice of the pcm ROM, then the COMPRESSED tail. The loader
             # decodes the second one on the way in, so the concatenated stream
@@ -261,6 +358,10 @@ def main():
             blob += bytes(image[BASE["pcm"]:BASE["pcm"] + 4])   # region stamp
             for name, start, end in cfg["flash_stream"]:
                 blob += zf.read(name)[start:end]
+            # rdft's payload is a plain concatenation and stops short of 2 MB,
+            # so its MRA pads with <part repeat>. The decoded sets have no fill:
+            # their second part expands to the end on its own.
+            blob += b"\xFF" * cfg.get("flash_fill", 0)
         for part in PARTS:
             if part[0] == "snd01":
                 blob += part_bytes(part)

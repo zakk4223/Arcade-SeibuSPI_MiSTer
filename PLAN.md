@@ -5845,8 +5845,47 @@ reports the wrong thing. `tools/check_mra.py` learned to fold the conditional
 table entries down to one arm before parsing, selected by mod bit 4; without
 that it silently dropped parts 14 and 15 and failed rdft2 with leftover bytes.
 
+**The authentic image builder, same day.** `tools/build_sdram_image.py --upd`
+now writes the 43 MB image: MAME's own `flash0_blank_region80.u1053` in the
+sample region, the PCM source ROM at `SDR_PCMSRC_BASE`, the second sound ROM at
+`SDR_SND01_BASE`, and the second flash chip left as the 0xFF the image is
+already filled with -- MAME has no dump for it because an erased chip has
+nothing to dump. `--concat` produces the matching byte stream, including the
+1 MB of FF an MRA writes as `<part repeat>`.
+
+Three things fell out of it:
+
+* **rdft was missing from the builder entirely**, so its table is new here. It
+  had never been noticed because rdft.zip builds an *rdfts* image: rdfts is a
+  CLONE of rdft, a merged zip carries its clones' ROMs, and the CRC probe
+  matches both. First match still wins and SETS is ordered so that stays rdfts
+  -- every existing invocation means that -- with a printed note and a new
+  `--set` to ask for the other one.
+* **rdft's pre-flashed `--concat` needed a trailing fill** the decoded sets do
+  not: its payload is a plain concatenation that stops short of 2 MB, so its MRA
+  pads with `<part repeat>` where rdft2's second part expands to the end on its
+  own.
+* **`sim/tb_boot.cpp` read 41 MB with a plain `fread`**, which would have
+  truncated the source region away and left the 386 reading zeroes -- 17.2's
+  failure mode, reproduced in the one bench that could have caught it. Now
+  43 MB.
+
+**Controls.** rdft2's and rfjet's pre-flashed images and concat streams are
+sha256-identical before and after the change, and so is rdfts' from rdft.zip.
+
+**`check_snd01_window.py --image` closes the loop.** It reads the two packed
+ROMs out of a BUILT image rather than out of the zip, so the loader's placement
+is inside the check as well as the decode arithmetic:
+
+    tools/build_sdram_image.py rdft.zip upd.bin --upd --set rdft
+    tools/check_snd01_window.py rdft.zip --set rdft --image upd.bin
+
+All three sets pass, ~1.5 M populated dwords each. Controls: a pre-flashed image
+is rejected on size, one flipped byte at PCMSRC is caught as 1 differing dword
+of 2,621,440, and a one-byte shift of the snd01 region as 397,622.
+
 **What is deliberately NOT done here**, and what step 1 still owes: the
 E28F008SA command FSM, the ch3 write port, the cache generation tag, and the
-authentic MRAs. `tools/build_sdram_image.py` also still stops at 41 MB and has
-no authentic mode, so there is no image to boot one from yet -- which is the
-next thing needed, and the reason none of this has run on hardware.
+authentic MRAs. There is now an image to boot one from, so the next thing that
+can be measured is whether a core with `set_upd` set reaches the updater at
+all -- which it cannot finish, having nowhere to write.

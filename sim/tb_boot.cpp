@@ -45,8 +45,12 @@
 #include <string>
 
 // The whole map (rtl/spi_defs.vh), not just as far as rdfts reaches: rdft2's
-// image tops out at 35 MB.
-static const uint32_t SDR_SIZE  = 0x2900000;
+// image tops out at 35 MB, and an authentic-flash image at 43 -- its PCM source
+// region is the last 2 MB. The image is read with a plain fread of this many
+// bytes, so a short constant would TRUNCATE the source window away silently and
+// the 386 would read the zeroes, which is the whole failure mode section 17.2
+// exists to prevent.
+static const uint32_t SDR_SIZE  = 0x2B00000;
 static const uint32_t Z80_BASE  = 0x0200000;
 static const uint32_t Z80_SIZE  = 0x0040000;
 static const uint32_t SND01_BASE = 0x0480000;
