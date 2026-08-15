@@ -2506,7 +2506,11 @@ Crossings that needed care:
   a 25 MHz clock enable will therefore run the game *faster* than real hardware in
   CPU-bound sections. Plan: expose a CPU speed option in the OSD, default to a
   value calibrated against MAME, and record the calibration here once measured.
-  **Open item.**
+  **Open item — but see section 16, which measures it.** The 386 is idle 80-85%
+  of a frame in rdft attract, so 25 MHz is cosmetic: the same work is 17-24% of a
+  frame there too. Exact 25.000 MHz also needs a second PLL and an asynchronous
+  `clk_cpu`. What is still unmeasured is z386x's throughput against a real
+  386DX-25, and section 16.3 records why MAME would not give it up.
 
 ---
 
@@ -2638,15 +2642,20 @@ sim/                      Verilator testbenches for the decrypt units
    `gfx_base` is four adds deep), then drop `clk_ram` to 95.45 MHz
    (28.63636 × 10/3) and re-check bandwidth. **Re-run STA after adding the
    sprite engine; do not assume it still fits.**
-4. **z386 accuracy/speed** vs a real 386DX-25 (see §6). Currently the core runs
-   at the full 57.27 MHz `clk_sys`, which is 2.3x a 386DX-25 before counting
-   z386x's caches and fast paths. Gameplay speed is locked to the 54 Hz vblank
-   interrupt either way, but the per-frame compute budget is not: Raiden
-   Fighters' slowdown under heavy fire is part of how the game plays, and at
-   this speed it will not happen. `spi_cpu` already has a `cpu_en` input for
-   this; what it needs is a calibrated throttle and an OSD control. z386 has no
-   clock-enable port, so the lever is either wait-states on the memory
-   interface or adding a real `cpu_en` to the core. **Unresolved.**
+4. **z386 accuracy/speed** vs a real 386DX-25 (see §6 and **section 16**). The
+   core runs `clk_cpu` at 28.636364 MHz — this item used to say 57.27 MHz, which
+   was true before the 386 got its own domain. That is 14.5% above a 386DX-25
+   before counting z386x's caches and fast paths. Gameplay speed is locked to the
+   54 Hz vblank interrupt either way, but the per-frame compute budget is not:
+   Raiden Fighters' slowdown under heavy fire is part of how the game plays, and
+   at this speed it will not happen — **measured, section 16: the 386 is idle
+   80-85% of a frame in attract**, so the headroom is real and large.
+   `spi_cpu` already has a `cpu_en` input, but note it gates `mem_accept`, i.e.
+   the EXTERNAL bus only; with 256-set I- and D-caches, cache-resident code is
+   not throttled by it at all, so it is not a uniform speed control as it
+   stands. The lever is either wait-states on the memory interface or a real
+   `cpu_en` inside z386. **Unresolved**, and the missing number is how much
+   faster z386x is per clock than a real 386 (16.3).
 5. **Decrypt table transcription** (see §5.4) — script-generated + Verilator-checked.
 6. **Alpha blending.** MAME's table of blended pens is its own approximation of
    the hardware (its TODO says so) and we reproduce that table exactly; the
