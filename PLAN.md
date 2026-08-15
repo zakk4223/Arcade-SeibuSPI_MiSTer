@@ -6020,3 +6020,44 @@ decode are one consistent chain, anchored to MAME at the top.
 **No `<nvram>` element yet.** 17.6's plumbing does not exist, so an MRA that
 declared one would have the HPS ask the core for 2 MB it cannot supply. The
 files say so in a comment: until then the ritual runs on every boot.
+
+### 17.13 Timing: it FAILED first, on a path that is not ours, and a seed fixed it
+
+`make build` on the flash work: 0 errors, an RBF written, and
+
+    Critical Warning (332148): Timing requirements not met
+
+which is the trap this project has a rule about -- a clean compile still writes a
+failing bitstream. The one failing path was in the FRAMEWORK, not the core:
+
+    ascal:ascal|o_h_lum_pix.g[7] -> ascal:ascal|o_poly_lum[7]_OTERM113_OTERM876
+    pll_hdmi ... divclk   -0.215 ns,  TNS -0.215
+
+`sys/ascal.vhd`, on the HDMI pixel clock. Nothing added here is on that clock,
+and all three of the core's own clocks passed with TNS 0.000 (clk_ram +0.422,
+which is BETTER than 16.8's +0.383, clk_sys +1.528, clk_cpu +2.321).
+
+That is not a free pass. `compileEip.log` from 2026-08-02 shows the same HDMI
+path was already the tightest clock in the design at **+0.307**, so this work
+plausibly ate that margin through placement pressure rather than through
+anything structural: 83% of ALMs and 87% of RAM blocks are in use.
+
+**SEED 3 -> SEED 4 fixes it**, which is the same lever 13c reached for when
+clk_ram needed one. Refit and re-analysed (`make fit && make sta`), everything
+positive with TNS 0.000 everywhere:
+
+    pll_hdmi   +0.153      clk_ram  +0.517
+    clk_sys    +1.389      clk_cpu  +1.878
+    hold +0.245, recovery +3.587, removal +1.081, min pulse width +0.396
+
+**A refit does not write the RBF.** `make fit` and `make sta` leave the
+assembler's output alone, so the bitstream on disk was still the seed-3 one that
+failed. `make asm` after them is what ships the placement that passed -- worth
+knowing before flashing something that was "fixed" by a reseed.
+
+**The core's own worst path is now the loader's table mux**, `mod_byte[0] ->
+part_base_r[20]` at +0.517. That is the authentic-flash conditional: the mod
+byte now selects between two entries per part rather than feeding one. The table
+outputs were registered for exactly this reason when `part` widened to 5 bits
+(rom_loader.sv), and there is half a nanosecond in hand, but it is the thing to
+watch if the tables gain another variant.
