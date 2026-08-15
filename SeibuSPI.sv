@@ -368,6 +368,13 @@ always @* begin
 	endcase
 end
 
+// Bit 4: the authentic-flash variant of whichever cartridge set bits 3:1 named
+// -- a blank flash plus the cartridge's own sound ROMs, with the game running
+// its own updater (PLAN.md section 17). ANDed with bit 0 rather than taken
+// alone: on SXX2E it would open a source window with nothing behind it, and an
+// MRA that sets it there has made a mistake worth ignoring rather than obeying.
+wire set_upd = mod_byte[0] & mod_byte[4];
+
 wire flip_screen_dip  = dsw[0][0];
 wire service_mode_dip = dsw[0][1];
 
@@ -571,6 +578,7 @@ rom_loader rom_loader
 	.ioctl_dout     (dl_dout),
 	.ioctl_wait     (dl_wait),
 	.set_id         (set_id),
+	.set_upd        (set_upd),
 	.part_codec     (part_codec),
 
 	.sdr_addr       (ldr_addr),
@@ -782,6 +790,7 @@ spi_top spi_top
 
 	.set_sxx2c      (set_sxx2c),
 	.set_id         (set_id),
+	.set_upd        (set_upd),
 	// JP1, SXX2C only. MAME's sxx2c port: bits [1:0] = 0x3 "Update" (which is
 	// its default), 0x0 "Normal"; bits [7:2] are unused IP_ACTIVE_LOW and read
 	// as 1. All-ones is therefore UPDATE MODE, and that is not inert -- the

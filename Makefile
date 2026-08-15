@@ -3,7 +3,7 @@
 QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
-.PHONY: all build map fit asm sta timing clean lint test check-mra verify
+.PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 verify
 
 all: build
 
@@ -44,6 +44,17 @@ test:
 #   make check-mra ZIP=~/Downloads/rdft.zip
 check-mra:
 	@python3 tools/check_mra.py $(if $(ZIP),--zip $(ZIP))
+
+# The 386's sound01 window, which the authentic-flash MRAs need and which fails
+# SILENTLY when it is wrong -- an undecoded window reads as zero and the game's
+# sample-flash updater programs the zeroes without complaining. Checks
+# spi_cpu.sv's arithmetic over the whole 10 MB region against MAME's own
+# layout, so it needs ROMs and cannot be part of `verify`.
+#   make check-snd01 ZIP=~/Downloads/rdft.zip
+#   make check-snd01 ROMS=~/Downloads/roms
+check-snd01:
+	@python3 tools/check_snd01_window.py \
+	    $(if $(ROMS),--all "$(ROMS)",$(if $(ZIP),"$(ZIP)",--help))
 
 # Everything that can be checked without a Quartus run or a MiSTer.
 verify: lint check-mra test

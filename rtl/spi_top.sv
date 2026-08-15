@@ -20,6 +20,10 @@ module spi_top
 	// Which ROM set, for the things that differ per GAME rather than per board:
 	// the sprite chunk stride and which sprite crypt to use. See spi_defs.vh.
 	input       [1:0] set_id,
+	// The authentic-flash variant of an SXX2C set: a blank flash plus the
+	// cartridge's own sound ROMs, and the game programs it itself. See
+	// PLAN.md section 17; meaningless without set_sxx2c.
+	input             set_upd,
 	input       [7:0] jumpers,
 	// Z80 program download -> SDRAM ch3 write port
 	output     [25:0] z80dl_sdr_addr,
@@ -259,11 +263,16 @@ module spi_top
 	spi_cpu cpu
 	(
 		.z80dl_stall (z80dl_stall),
-		// Only the sets with a second sound ROM read the sound01 window, and
+		// Only the sets with a second sound ROM read sound1.u0222's window, and
 		// only their loader tables put anything behind it -- see spi_cpu.sv's
 		// map. rdft's Z80 program is inside `maincpu` instead and rdfts has a
-		// real Z80 ROM, so neither one ever looks.
-		.snd01_en  ((set_id == SET_RDFT2) || (set_id == SET_RFJET)),
+		// real Z80 ROM, so neither one ever looks -- UNLESS the flash is being
+		// programmed, which reads that ROM as source material on every
+		// cartridge set including rdft's seibu_8.u0216.
+		.snd01_en  ((set_id == SET_RDFT2) || (set_id == SET_RFJET) || set_upd),
+		// The PCM source window exists only while the game is programming its
+		// own flash. A pre-flashed set loads nothing behind it.
+		.pcmsrc_en (set_upd),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),

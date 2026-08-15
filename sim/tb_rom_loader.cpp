@@ -36,7 +36,8 @@ static const uint32_t PCM_BASE     = 0x0280000;
 static const uint32_t SND01_BASE   = 0x0480000;
 static const uint32_t TILES_BASE   = 0x0500000;
 static const uint32_t SPRITES_BASE = 0x1100000;
-static const uint32_t SDR_SIZE     = 0x2900000;
+static const uint32_t PCMSRC_BASE  = 0x2900000;
+static const uint32_t SDR_SIZE     = 0x2B00000;
 
 enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
             W24_B0, W24_B1, W24_B2, W24_W01, SPR_ILV, SPR_ILV_R };
@@ -140,6 +141,25 @@ static const Part parts_rfjet[] = {
     { "flash tail: sound1, packed",  PCM_BASE + 0x189DD5,     0x041C08,  LINEAR  },
     { "sound1.u0222",                SND01_BASE,              0x080000,  LINEAR  },
 };
+
+// The authentic-flash tables (PLAN.md 17.5): the same fourteen head parts, then
+// a BLANK flash and the two sound ROMs the game's own updater reads to program
+// it. Built from the pre-flashed tables rather than restated, because the head
+// is the same ROMs in the same order and a copy would drift out of step the
+// first time one of them changed.
+//
+// The tails are also all the same shape -- 2 MB blank, 2 MB PCM source, 512 KB
+// second source -- which is the argument for this path in one line: only the
+// DERIVED images differ per game.
+static std::vector<Part> upd_table(const Part *pre, const char *pcm_rom,
+                                   const char *snd_rom)
+{
+    std::vector<Part> v(pre, pre + 14);
+    v.push_back({ "blank flash",  PCM_BASE,    0x200000, LINEAR });
+    v.push_back({ pcm_rom,        PCMSRC_BASE, 0x200000, LINEAR });
+    v.push_back({ snd_rom,        SND01_BASE,  0x080000, LINEAR });
+    return v;
+}
 
 static uint32_t dest_of(const Part &p, uint32_t i)
 {
@@ -299,12 +319,13 @@ static void make_bpe_part(uint32_t in_len, std::vector<uint8_t> &stream,
 // Run every set both ways. pulse=2 is the hardware, and it must produce the
 // same SDRAM image as pulse=1 or the core cannot load a ROM correctly.
 static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
-                   int codec_part = -1, int pulse = 1)
+                   int codec_part = -1, int pulse = 1, int upd = 0)
 {
     printf("--- %s (ioctl_wr held %d clock%s) ---\n",
            label, pulse, pulse == 1 ? "" : "s");
     Vrom_loader *dut = new Vrom_loader;
     dut->set_id     = set_id;
+    dut->set_upd    = upd;
     for (int i = 0; i < 4; i++) dut->part_codec[i] = 0;   // all straight copies
 
     std::vector<uint8_t> cstream, cexpect;
@@ -436,7 +457,14 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
 
         clock();
 
-        if (tick > 400ull * 1000 * 1000) { printf("FAIL: timeout\n"); return 1; }
+        // Scaled to the image, not a constant: the download runs at about ten
+        // cycles a byte, and a fixed 400 M ceiling started failing the moment
+        // an image passed 40 MB -- which the authentic-flash rfjet table does,
+        // at 41.6 MB. A timeout that depends on the set is a timeout that
+        // reports the wrong thing.
+        if (tick > 20ull * total + 10ull * 1000 * 1000) {
+            printf("FAIL: timeout\n"); return 1;
+        }
     }
 
     // Drain. A decoded part is still expanding after the last byte arrives, so
@@ -513,6 +541,28 @@ int main(int argc, char **argv)
     // of the 41 MB map.
     rc = run_set(parts_rfjet, (int)(sizeof(parts_rfjet) / sizeof(parts_rfjet[0])),
                  3, "rfjet (SXX2C, RISE11)", 15);
+    if (rc) return rc;
+
+    // The three authentic-flash tables. What is actually new here is small --
+    // a 2 MB part landing at PCMSRC_BASE, which is the top of a 43 MB map and
+    // the highest address the loader has ever been asked to write -- but the
+    // reason to run all three is the reason the pre-flashed ones are all run:
+    // the tables are nearly identical, so a value carried across from the
+    // wrong one still produces a plausible-looking image.
+    std::vector<Part> upd_rdft  = upd_table(parts_sxx2c, "gun_dogs_pcm.u0217",
+                                            "seibu_8.u0216");
+    std::vector<Part> upd_rdft2 = upd_table(parts_rdft2, "pcm.u0217",
+                                            "sound1.u0222");
+    std::vector<Part> upd_rfjet = upd_table(parts_rfjet, "pcm-d.u0227",
+                                            "sound1.u0222");
+    rc = run_set(upd_rdft.data(), (int)upd_rdft.size(),
+                 1, "rdft, authentic flash (SXX2C)", -1, 1, 1);
+    if (rc) return rc;
+    rc = run_set(upd_rdft2.data(), (int)upd_rdft2.size(),
+                 2, "rdft2, authentic flash (SXX2C)", -1, 1, 1);
+    if (rc) return rc;
+    rc = run_set(upd_rfjet.data(), (int)upd_rfjet.size(),
+                 3, "rfjet, authentic flash (SXX2C)", -1, 1, 1);
     if (rc) return rc;
 
     // The same two sets again with ioctl_wr held for TWO loader clocks, which

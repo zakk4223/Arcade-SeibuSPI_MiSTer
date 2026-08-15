@@ -45,7 +45,18 @@ localparam [25:0] SDR_PCM_BASE     = 26'h028_0000;  // 2.5 MB  YMF271 samples
 localparam [25:0] SDR_SND01_BASE   = 26'h048_0000;  // 512 KB  sound1.u0222
 localparam [25:0] SDR_TILES_BASE   = 26'h050_0000;  //  12 MB  background tiles
 localparam [25:0] SDR_SPRITES_BASE = 26'h110_0000;  //  24 MB  sprites (3 chunks)
-localparam [25:0] SDR_END          = 26'h290_0000;  //  41 MB total
+// The cartridge's PCM source ROM, and ONLY for the authentic-flash MRAs
+// (PLAN.md 17.2). This is the material the game's own sample-flash updater
+// reads out of the 386's sound01 window and programs into flash; a pre-flashed
+// MRA ships the finished image instead and never loads this at all, which is
+// why it sits above SDR_END's old value rather than anywhere tighter.
+//
+// Stored PACKED -- the raw 2 MB ROM -- and unpacked by spi_cpu.sv, exactly like
+// SDR_SND01_BASE above. In MAME's region the ROM occupies two byte lanes of
+// every dword and skips 2 MB every 2 MB (ROM_CONTINUE), so materialising it
+// would cost 8 MB to hold 2 MB of data.
+localparam [25:0] SDR_PCMSRC_BASE  = 26'h290_0000;  //   2 MB  pcm.u0217 etc
+localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 
 // Size of ONE sprite plane-pair chunk in the ROM set -- 4 MB for the SEI252
 // games, 6 MB for rdft2, 8 MB for rfjet. It used to be the address stride
@@ -66,6 +77,16 @@ localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
 //   mod 0x01  SXX2C, set 0  -> rdft
 //   mod 0x03  SXX2C, set 1  -> rdft2
 //   mod 0x05  SXX2C, set 2  -> rfjet
+//
+// Bit 4 is the authentic-flash variant of any SXX2C set: the MRA ships a BLANK
+// flash plus the cartridge's own sound ROMs and the game runs its own updater,
+// instead of the MRA shipping a finished image (PLAN.md section 17). It selects
+// the alternate tail of the part table and opens the 386's sound01 source
+// window; it is meaningless without bit 0 and ignored on SXX2E.
+//
+//   mod 0x11  SXX2C, set 0  -> rdft,  authentic flash
+//   mod 0x13  SXX2C, set 1  -> rdft2, authentic flash
+//   mod 0x15  SXX2C, set 2  -> rfjet, authentic flash
 //
 // set_id is 2 bits and rfjet fills it. A fifth set needs it widened here, in
 // rom_loader's `set_id` port and in SeibuSPI.sv's decode -- the mod byte itself

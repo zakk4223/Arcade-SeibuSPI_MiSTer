@@ -251,8 +251,13 @@ def parse_codecs(path, nparts):
     return data[0], codecs
 
 
-def parse_loader(path, table):
-    """One of rom_loader.sv's part tables, plus its part count."""
+def parse_loader(path, table, upd=False):
+    """One of rom_loader.sv's part tables, plus its part count.
+
+    `upd` picks the authentic-flash tail (mod byte bit 4): the cartridge tables
+    carry both, as `5'dN: if (set_upd) begin ... end else begin ... end`, and
+    the arm not chosen is folded away here before the ordinary parse runs.
+    """
     src = open(path, encoding="utf-8").read()
     # Each table is delimited by its own marker comment, which is more robust
     # than matching the if/else shape -- and there are three of them now.
@@ -261,6 +266,16 @@ def parse_loader(path, table):
         fail("cannot find the %s part table in %s (have: %s)"
              % (table, path, ", ".join(sorted(bodies)) or "none"))
     body = bodies[table]
+
+    # Collapse the conditional entries to the arm this variant uses. Done as a
+    # rewrite rather than by teaching the entry regex about both arms, so there
+    # stays exactly one place that knows what a table entry looks like.
+    cond = re.compile(r"5'd(\d+)\s*:\s*if \(set_upd\)\s*\n"
+                      r"\s*(begin.*?end)[ \t]*(//[^\n]*)\n"
+                      r"\s*else\s*(begin.*?end)[ \t]*(//[^\n]*)", re.S)
+    body = cond.sub(lambda m: "5'd%s: %s %s"
+                    % (m.group(1), m.group(2 if upd else 4), m.group(3 if upd else 5)),
+                    body)
 
     out = {}
     for e in re.finditer(r"5'd(\d+)\s*:\s*begin\s+part_base\s*=\s*([^;]+);"
@@ -278,7 +293,7 @@ def parse_loader(path, table):
     out["default"] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
                       "mode": mode, "name": name.strip()}
 
-    sym = "NPARTS_" + table.upper()
+    sym = "NPARTS_" + table.upper() + ("_U" if upd else "")
     n = re.search(r"localparam \[4:0\] %s\s*=\s*5'd(\d+)" % sym, src)
     if not n:
         fail("cannot find %s in %s" % (sym, path))
@@ -396,7 +411,13 @@ def check_set(setname, cfg, args):
                 # writes that chunk at sprites_base + 2k.
                 r["spr_base"] = BASES["sprites"] + 2 * (r["off"] // cfg["spr_chunk"])
     mra = parse_mra(mra_path)
-    rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"), cfg["table"])
+    # bit 4 of the mod byte is the authentic-flash variant, and it selects the
+    # other tail of the same table. Taken from the SETS entry rather than from
+    # the MRA's own mod byte, because the two are checked against each other
+    # immediately below -- reading it from the file would make that check
+    # circular.
+    rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"),
+                               cfg["table"], upd=bool(cfg["mod"] & 0x10))
     mod_byte, codecs = parse_codecs(mra_path, nparts)
 
     if (mod_byte or 0) != cfg["mod"]:

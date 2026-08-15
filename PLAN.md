@@ -2299,7 +2299,12 @@ less leaves the tail unwritten.
     0x0280000   2.5 MB  PCM        YMF271 samples / pre-programmed flash
     0x0500000   12 MB   TILES      background tiles
     0x1100000   24 MB   SPRITES    three plane-pair chunks
-    0x2900000   ---     end (41 MB)
+    0x2900000   2 MB    PCMSRC     the updater's PCM source ROM, authentic only
+    0x2B00000   ---     end (43 MB)
+
+(`PCMSRC` is written only by the authentic-flash MRAs, which is why it is at the
+top rather than anywhere tighter: a pre-flashed set leaves it unwritten and its
+image is the 41 MB it always was. Section 17.2.)
 
 `SPR_CHUNK_STRIDE` is the sprite region divided by three and is therefore PER
 SET -- 4 MB for the SEI252 games, 6 MB for rdft2, 8 MB for rfjet. Only the
@@ -5642,10 +5647,21 @@ and is verified bit-for-bit against MAME's own flash nvram for all seven sets:
 | `0x0E00000-0x0FFFFFF` | pcm ROM `0x100000-0x1FFFFF`, same packing                  |
 | `0x1200000-0x13FFFFF` | second sound ROM, 1 byte per dword -- ALREADY DECODED      |
 
-Every cartridge set has the same shape: a 2 MB pcm ROM at region base 0 on two
-byte lanes and a 512 KB ROM at region base 0x800000 on one. viprp1 is the only
-oddity and it needs nothing here -- its second source is the program ROM, which
-is already mapped.
+The three sets the core has tables for -- rdft, rdft2, rfjet -- all have the
+same shape: a 2 MB pcm ROM at region base 0 on two byte lanes and a 512 KB ROM
+at region base 0x800000 on one.
+
+**The gen-A sets do NOT, and the difference is one lane rather than one
+window.** senkyu, batlball, ejanhs and viprp1 put a 1 MB PCM ROM on ONE lane.
+A 1 MB ROM at one lane spans exactly what a 2 MB ROM at two lanes does, skip
+included, so the two windows are in the same place for all six cartridge sets
+and a gen-A set costs one more bit of mode in the decode, not new addresses.
+Nothing reads them today -- there is no part table for any gen-A set -- but the
+"every cartridge is the same shape" sentence this replaces was wrong, and it was
+`tools/check_snd01_window.py` that said so on its first run.
+
+viprp1 needs nothing extra beyond that: its second source is the program ROM,
+which is already mapped.
 
 Stored packed, a 4-dword 386 cache line is 8 consecutive source bytes, so a line
 fill is exactly one aligned 64-bit SDRAM read. That is the same trick the
@@ -5776,3 +5792,61 @@ one write and makes a save file from the wrong region self-correcting.
 * **Whether the updater polls one chip while the other is erasing.** Per-chip
   FSM state covers it either way. The rule is just: do not share one status
   register between the two chips.
+
+### 17.9 BUILT 2026-08-15: the source window, and a checker that found a wrong claim
+
+Step 1's first half. Lint-clean, `make verify` green, and NOT yet on hardware --
+nothing downstream of it exists to run, since the flash device is still to come.
+
+* **`spi_cpu.sv`** decodes the two PCM source windows. The fetch's one-bit `s01`
+  flag became a two-bit `rd_src` (`R_PRG` / `R_S01` / `R_PCM`); all three share
+  `S_ROM_REQ/ACK/OUT` and differ only in the group address, the cut, and where
+  the group ends -- two dwords for the program, eight for sound1, four for the
+  PCM source.
+* **The window pair is one bit apart.** 0x0A00000 and 0x0E00000 are 101 and 111
+  in 2 MB window units, so they differ in `byte_addr[22]` alone -- which is
+  therefore the ROM's own address bit 20, and the 0x0C00000 hole (110) falls out
+  of the decode for free rather than needing to be excluded.
+* **`SDR_PCMSRC_BASE`** at 0x2900000, 2 MB, map to 43 MB. Written only by the
+  authentic tables.
+* **`rom_loader.sv`** carries both tails. rdft gains two parts (15 -> 17);
+  rdft2 and rfjet keep seventeen, because their derived image was already two
+  parts and part 16 was already a source ROM. The authentic tails are IDENTICAL
+  across all three sets -- 2 MB blank, 2 MB PCM source, 512 KB second source --
+  which is section 17's argument in one table.
+* **mod byte bit 4**, ANDed with bit 0 in `SeibuSPI.sv` so it cannot open a
+  source window on SXX2E.
+
+**`tools/check_snd01_window.py`, and it earned its keep immediately.** It walks
+every dword of the 10 MB region -- holes included -- comparing what `spi_cpu.sv`'s
+arithmetic returns against what `build_soundflash.py`'s `load_sound01()` holds,
+which is the code whose flash images match MAME's nvram bit for bit. 2,621,440
+dwords per set, about 1.5 M of them populated, all three sets exact.
+
+Covering the holes is the point: a decode that reads the windows it thought of
+and misses a third still passes a spot check of the first two. Here a missed
+window reads "we answer 0 and MAME has data".
+
+Its first run refused to check ejanhs and named the reason, which is how 17.2's
+"every cartridge set has the same shape" turned out to be false -- the gen-A
+sets are one lane, not two. A checker that had quietly assumed the layout would
+have agreed with the RTL and with itself.
+
+**Three mutation controls**, because a checker that only ever passes is worth
+nothing: drop the ROM_CONTINUE bit (521,026 dwords differ, first at 00E00000),
+take one lane instead of two (1,013,467, first at 00A00008), shift the sound1
+window by one dword (190,877, first at 01200000). Each is caught in its own
+window, which is the part a single pass/fail cannot tell you.
+
+`sim/tb_rom_loader.cpp` runs all three authentic tables; rfjet's is 41.6 MB, the
+largest image the loader has ever placed, and it tripped the bench's fixed 400 M
+cycle timeout -- now scaled to the image, since a timeout that depends on the set
+reports the wrong thing. `tools/check_mra.py` learned to fold the conditional
+table entries down to one arm before parsing, selected by mod bit 4; without
+that it silently dropped parts 14 and 15 and failed rdft2 with leftover bytes.
+
+**What is deliberately NOT done here**, and what step 1 still owes: the
+E28F008SA command FSM, the ch3 write port, the cache generation tag, and the
+authentic MRAs. `tools/build_sdram_image.py` also still stops at 41 MB and has
+no authentic mode, so there is no image to boot one from yet -- which is the
+next thing needed, and the reason none of this has run on hardware.

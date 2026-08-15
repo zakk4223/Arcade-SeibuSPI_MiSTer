@@ -8,7 +8,9 @@
 //    0000_0000 - 0003_FFFF   main RAM, 256 KB, on chip
 //      0000_0400 - 0000_07FF   memory-mapped I/O, overlaying RAM
 //    0020_0000 - 003F_FFFF   PRG ROM, 2 MB, in SDRAM
-//    0138_0000 - 013F_FFFF   sound01, rdft2 only, 512 KB of the window, in SDRAM
+//    00A0_0000 - 00BF_FFFF   sound01, authentic flash only, pcm ROM low 1 MB
+//    00E0_0000 - 00FF_FFFF   sound01, authentic flash only, pcm ROM high 1 MB
+//    0120_0000 - 013F_FFFF   sound01, cartridge sets, sound1.u0222, in SDRAM
 //    FFE0_0000 - FFFF_FFFF   the same ROM again, for the real-mode reset vector
 //    anything else            reads as 0, writes dropped
 //
@@ -26,9 +28,33 @@
 //  been measured; carrying the region whole makes both facts irrelevant here.
 //  Everything else in the sound01 window keeps falling through to S_NULL,
 //  which is what MAME's ERASE00 region reads as anyway, and so do the three
-//  dead lanes of every dword in this one. rdft and rdfts leave the whole thing
-//  undecoded (snd01_en low): they have no second sound ROM, they never read
-//  the window, and their SDRAM there is not written by any part.
+//  dead lanes of every dword in this one. rdfts leaves the whole thing
+//  undecoded (snd01_en low): it has no second sound ROM, it never reads the
+//  window, and its SDRAM there is not written by any part.
+//
+//  THE PCM SOURCE WINDOW (pcmsrc_en, authentic-flash MRAs only). The rest of
+//  MAME's sound01 region is the cartridge's 2 MB PCM ROM, and the game's own
+//  sample-flash updater reads it from there a byte at a time to program the
+//  flash (PLAN.md 17.2). It is loaded ROM_LOAD32_WORD, so it occupies TWO byte
+//  lanes of every dword -- 1 MB of ROM per 2 MB of window -- and MAME's
+//  ROM_CONTINUE(base + 0x400000) puts the second megabyte 2 MB further up,
+//  which is the skip the 386's own fetcher walks with (`cmp esi,0x400000 /
+//  test esi,0x1fffff / add esi,0x200000`). So the ROM appears as two windows
+//  with a 2 MB hole between them:
+//
+//    00A0_0000 - 00BF_FFFF   ROM bytes 0x000000-0x0FFFFF
+//    00C0_0000 - 00DF_FFFF   nothing: the ROM_CONTINUE skip
+//    00E0_0000 - 00FF_FFFF   ROM bytes 0x100000-0x1FFFFF
+//
+//  Stored PACKED, so the byte index is the dword index doubled and a 4-dword
+//  cache line is eight consecutive bytes -- one aligned 64-bit read, the same
+//  arithmetic as the sound1 window with one more bit of shift.
+//
+//  Without this the window reads as zero and NOTHING SAYS SO: the updater runs
+//  to completion, the game reports UPDATE COMPLETED, and the flash holds 2 MB
+//  of silence. A pre-flashed MRA leaves it disabled because the 386 provably
+//  never touches the window once the stamp matches (0 reads across 4800
+//  frames, PLAN.md section 0).
 //
 //  The I/O registers really do live inside the RAM address space with nothing
 //  to mark them uncacheable, so the z386 data cache is instantiated with its
@@ -57,7 +83,8 @@ module spi_cpu
 	input             reset,
 	input             cpu_en,       // 0 = stall the CPU (pause, throttle)
 	input             z80dl_stall,  // SXX2C: a Z80 download byte is in flight
-	input             snd01_en,     // rdft2: decode the sound01 read window
+	input             snd01_en,     // cartridge: decode sound1.u0222's window
+	input             pcmsrc_en,    // authentic flash: decode the PCM source too
 
 	// SDRAM channel 1 - PRG ROM
 	output reg [25:0] sdr_addr,
@@ -256,6 +283,12 @@ module spi_cpu
 	// window, which is 0x09 * 2 MB. That ROM is loaded ROM_LOAD32_BYTE on lane 0
 	// at region 0x800000, so 512 KB of ROM occupies 2 MB of 386 space.
 	wire sel_s01 = snd01_en && (byte_addr[31:21] == 11'h009);
+	// The PCM source ROM's two windows, 0x05 and 0x07 * 2 MB. They differ in
+	// byte_addr[22] alone -- 0x0A00000 is 101 and 0x0E00000 is 111 in window
+	// units -- so that bit IS the ROM's address bit 20, and the 0x0C00000 hole
+	// (110) falls out for free because byte_addr[21] is what both windows share.
+	wire sel_pcm = pcmsrc_en && (byte_addr[31:24] == 8'd0)
+	                         && byte_addr[23] && byte_addr[21];
 
 	// ------------------------------------------------------------------
 	// Main RAM
@@ -328,10 +361,11 @@ module spi_cpu
 	reg  [7:0] burst_left;
 	reg [29:0] cur_dw;        // running dword address
 	reg [63:0] rom_data;
-	// This fetch is a sound01 read, not a program-ROM read. Latched with the
-	// address in S_IDLE: the two share S_ROM_REQ/ACK/OUT and differ only in
-	// where the group comes from and how the dword is cut out of it.
-	reg        s01;
+	// Which region this fetch is reading. Latched with the address in S_IDLE:
+	// all three share S_ROM_REQ/ACK/OUT and differ only in where the 8-byte
+	// group comes from and how the dword is cut out of it.
+	localparam [1:0] R_PRG = 2'd0, R_S01 = 2'd1, R_PCM = 2'd2;
+	reg  [1:0] rd_src;
 	// Read delivery is two stages deep, not one: `ram_addr` is only visible to
 	// the RAM the cycle AFTER it is assigned, and the RAM registers its output,
 	// so data is valid two cycles after the issuing state.
@@ -379,9 +413,25 @@ module spi_cpu
 	wire [25:0] s01_grp_addr = SDR_SND01_BASE + {7'd0, cur_dw[18:3], 3'b000};
 	wire  [7:0] s01_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
 
+	// PCM source: two byte lanes per dword, so the packed byte index is the
+	// dword index DOUBLED, with cur_dw[20] (386 address bit 22) carrying the
+	// ROM_CONTINUE skip as the ROM's own address bit 20:
+	//
+	//   idx[20:0] = { cur_dw[20], cur_dw[18:0], 1'b0 }
+	//
+	// A group is therefore four dwords, not eight, and the pair sought within
+	// it sits at byte offset idx[2:0] = {cur_dw[1:0], 1'b0} -- always even, so
+	// a dword's two bytes never straddle two groups.
+	wire [25:0] pcm_grp_addr = SDR_PCMSRC_BASE
+	                         + {5'd0, cur_dw[20], cur_dw[18:2], 3'b000};
+	wire [15:0] pcm_pair     = rom_data[{cur_dw[1:0], 4'b0000} +: 16];
+
 	// Where the group ends: a program dword pair spans one group, eight packed
-	// sound01 bytes do, so a burst crossing the end needs a fresh fetch.
-	wire        grp_last     = s01 ? (cur_dw[2:0] == 3'b111) : cur_dw[0];
+	// sound01 bytes do, four PCM-source dwords do, so a burst crossing the end
+	// needs a fresh fetch.
+	wire        grp_last     = (rd_src == R_S01) ? (cur_dw[2:0] == 3'b111)
+	                         : (rd_src == R_PCM) ? (cur_dw[1:0] == 2'b11)
+	                                             :  cur_dw[0];
 
 	// Snoop the GDT the boot code builds at byte 0x800 (dword index 0x200).
 	//
@@ -513,9 +563,9 @@ module spi_cpu
 					io_cyc_rd <= 1'b1;
 					state     <= S_IO_RD;
 				end
-				else if (sel_rom || sel_s01) begin
-					s01   <= sel_s01;
-					state <= S_ROM_REQ;
+				else if (sel_rom || sel_s01 || sel_pcm) begin
+					rd_src <= sel_s01 ? R_S01 : sel_pcm ? R_PCM : R_PRG;
+					state  <= S_ROM_REQ;
 				end
 				else begin
 					state <= S_NULL;
@@ -539,7 +589,11 @@ module spi_cpu
 			end
 
 			S_ROM_REQ: begin
-				sdr_addr <= s01 ? s01_grp_addr : rom_grp_addr;
+				case (rd_src)
+					R_S01:   sdr_addr <= s01_grp_addr;
+					R_PCM:   sdr_addr <= pcm_grp_addr;
+					default: sdr_addr <= rom_grp_addr;
+				endcase
 				sdr_req  <= ~sdr_req;
 				state    <= S_ROM_ACK;
 			end
@@ -551,9 +605,16 @@ module spi_cpu
 
 			S_ROM_OUT: begin
 				// sound01 answers one packed byte in lane 0 and zeroes above,
-				// which is what MAME's ROM_LOAD32_BYTE region holds there.
-				mem_din        <= s01 ? {24'd0, s01_byte}
-				                      : (cur_dw[0] ? rom_data[63:32] : rom_data[31:0]);
+				// which is what MAME's ROM_LOAD32_BYTE region holds there; the
+				// PCM source answers two, ROM_LOAD32_WORD. The dead lanes are
+				// zero in MAME's region too, not don't-care -- the region is
+				// ERASE00 and the updater's fetcher reads whole dwords.
+				case (rd_src)
+					R_S01:   mem_din <= {24'd0, s01_byte};
+					R_PCM:   mem_din <= {16'd0, pcm_pair};
+					default: mem_din <= cur_dw[0] ? rom_data[63:32]
+					                              : rom_data[31:0];
+				endcase
 				mem_resp_valid <= 1'b1;
 				cur_dw         <= cur_dw + 30'd1;
 				burst_left     <= burst_left - 8'd1;
