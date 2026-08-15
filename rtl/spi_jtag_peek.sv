@@ -110,7 +110,14 @@ module spi_jtag_peek
 
 	// Live layer masks driven from the host, so a rendering fault can be
 	// isolated to a layer without a rebuild for each experiment.
-	output      [7:0] ctrl
+	output      [7:0] ctrl,
+
+	// EIP profiler: the window goes down, the two free-running counters come
+	// back up. spi_top does the counting, on clk_cpu.
+	output     [31:0] prof_lo,
+	output     [31:0] prof_hi,
+	input      [39:0] prof_in,
+	input      [39:0] prof_total
 );
 
 	// Width of the SUMS probe, written as the sum of its fields rather than as a
@@ -260,6 +267,32 @@ module spi_jtag_peek
 	(
 		.probe  (sdr_trans),
 		.source ()
+	);
+
+	// EIP profiler. Source is the inclusive window {hi, lo}; probe is the two
+	// free-running 40-bit counters. Its own instance rather than more bits on
+	// VITL because it needs a SOURCE, and VITL has none.
+	//
+	// source_initial_value 0 means the window is 0..0 until the host writes it,
+	// so `prof_in` stays at zero rather than counting something arbitrary --
+	// a reading of exactly 0 means "window never set", which is what you want
+	// it to look like.
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (7),
+		.instance_id             ("PROF"),
+		.probe_width             (80),
+		.source_width            (64),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("YES")
+	)
+	prof_issp
+	(
+		.probe      ({prof_total, prof_in}),
+		.source     ({prof_hi, prof_lo}),
+		.source_clk (clk),
+		.source_ena (1'b1)
 	);
 
 	altsource_probe

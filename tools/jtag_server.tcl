@@ -94,6 +94,17 @@ set PEEK [idx_of "PEEK"]
 set SUMS [idx_of "SUMS"]
 set SDRM [idx_of "SDRM"]
 
+# Soft lookup, unlike the others: a bitstream built before the EIP profiler has
+# no PROF instance, and idx_of throws. The server has to keep working against
+# whatever is currently on the board, so `prof` reports the absence instead.
+set PROF -1
+if {[dict exists $INSTANCES "PROF"]} { set PROF [dict get $INSTANCES "PROF"] }
+
+set prof_lo   0
+set prof_hi   0
+set prof_p_in 0
+set prof_p_to 0
+
 # CTRL bits: [4:0] force a layer off (back, midl, fore, text, sprites),
 #            [5] freeze the CPU, [6] force the vital signs panel on,
 #            [7] clear the telemetry high-water marks (level, so pulse it).
@@ -196,6 +207,61 @@ proc show_sound {} {
 # eight of them on a transaction (IDLE, WAIT, RW1, IDLE_5..IDLE_1), so
 # occupancy is trans*8/2^21. See rtl/spi_sdr_stats.sv, which also says why
 # there is no per-channel latency figure here.
+# EIP profiler. The core counts clk_cpu cycles with `eip` inside a window and
+# clk_cpu cycles in total, both free-running from reset. Point the window at the
+# game's wait-for-vblank spin and the ratio is the 386's idle fraction, measured
+# continuously rather than by sampling `vitals` a few hundred times.
+#
+# Known windows (PLAN.md section 16):
+#   rdft   prof 0x203F00 0x203F3A
+#   rfjet  prof 0x20607C 0x2060B8
+#
+# Reads print the delta since the previous read, which is what makes this a
+# rate: the counters are never cleared, so two reads bracket an interval. The
+# 40-bit counters wrap in about 10.7 hours, and the mask below makes a wrap
+# across a single interval come out right anyway.
+proc set_prof_window {lo hi} {
+    global PROF prof_lo prof_hi
+    set prof_lo $lo
+    set prof_hi $hi
+    write_source_data -instance_index $PROF \
+        -value "[dec2bin $hi 32][dec2bin $lo 32]"
+    after 30
+    say [format ">>> eip window = %08X .. %08X" $lo $hi]
+}
+
+proc show_prof {} {
+    global PROF prof_lo prof_hi prof_p_in prof_p_to
+    if {$PROF < 0} {
+        say "--- eip profiler ---"
+        say "  NOT IN THIS BITSTREAM. The core on the board predates the"
+        say "  profiler; rebuild and reflash to use it."
+        return
+    }
+    set p [read_probe_data -instance_index $PROF]
+    set tot [fld $p 0 40]
+    set inw [fld $p 40 40]
+    set mask 0xFFFFFFFFFF
+    set d_to [expr {($tot - $prof_p_to) & $mask}]
+    set d_in [expr {($inw - $prof_p_in) & $mask}]
+    set prof_p_to $tot
+    set prof_p_in $inw
+    say "--- eip profiler ---"
+    if {$prof_lo == 0 && $prof_hi == 0} {
+        say "  window     NOT SET -- `prof <lo> <hi>` first, e.g. prof 0x20607C 0x2060B8"
+    } else {
+        say [format "  window     %08X .. %08X" $prof_lo $prof_hi]
+    }
+    say [format "  cycles     in %d of %d total (since reset)" $inw $tot]
+    if {$d_to > 0} {
+        say [format "  interval   %d cycles = %.3f s" $d_to [expr {$d_to / 28636364.0}]]
+        say [format "  IN WINDOW  %.1f%%   -> the 386 is busy %.1f%% of the time" \
+             [expr {100.0 * $d_in / $d_to}] [expr {100.0 * (1.0 - double($d_in)/$d_to)}]]
+    } else {
+        say "  interval   first read, nothing to compare against yet -- read again"
+    }
+}
+
 proc show_sdram {} {
     global SDRM
     set p [read_probe_data -instance_index $SDRM]
@@ -331,9 +397,26 @@ proc handle {line} {
             do_dump [expr $a] $n
         }
         mark { say ">>> MARK [lindex $line 1]" }
+        prof {
+            # `prof` alone reads; `prof <lo> <hi>` sets the window first. The
+            # window is inclusive and in linear addresses, the same numbers the
+            # vitals CS:EIP field prints. Comments live inside a body here --
+            # see the note in `clear`.
+            set a [lindex $line 1]
+            set b [lindex $line 2]
+            if {$PROF < 0} {
+                show_prof
+            } elseif {$a ne "" && $b ne ""} {
+                set_prof_window [expr $a] [expr $b]
+                show_prof
+            } else {
+                show_prof
+            }
+        }
         help {
             say "ENTER = freeze/resume   freeze | thaw | vitals | sound | sums"
             say "sdram (per-channel bus occupancy) | clear | mask <n>"
+            say "prof [<lo> <hi>] (eip profiler; read twice for a rate)"
             say "dump <addr> <count> | mark <text> | quit"
         }
         quit - exit {

@@ -80,6 +80,14 @@ module spi_top
 	output            irq,
 	output    [191:0] gdt,
 
+	// EIP profiler. `prof_lo`/`prof_hi` are an inclusive address window set from
+	// the host; the counters below say how many clk_cpu cycles the 386 spent
+	// inside it and how many passed in total. See the block near stall_eip.
+	input      [31:0] prof_lo,
+	input      [31:0] prof_hi,
+	output     [39:0] prof_in,
+	output     [39:0] prof_total,
+
 	// SDRAM ch1: 386 program ROM
 	output     [25:0] sdr_prg_addr,
 	input      [63:0] sdr_prg_dout,
@@ -810,6 +818,58 @@ module spi_top
 	assign spr_gap_max = gap_max;
 	assign stall_eip   = stall_eip_r;
 	assign stall_cs    = stall_cs_r;
+
+	// ------------------------------------------------------------------
+	// EIP profiler
+	//
+	// Counts clk_cpu cycles with `eip` inside an inclusive window, against a
+	// count of every clk_cpu cycle. Point the window at the game's wait-for-
+	// vblank spin and the ratio IS the 386's idle fraction -- exactly and
+	// continuously, instead of by sampling `vitals` over JTAG a few hundred
+	// times (PLAN.md section 16).
+	//
+	// The window is programmable because the loop is at a different address in
+	// every set (rdft 0x203F00..0x203F3A, rfjet 0x20607C..0x2060B8), and because
+	// pointing it somewhere else turns this into a general "how long is the CPU
+	// in THIS routine" instrument.
+	//
+	// NOT cleared by tel_clear, deliberately. Both counters free-run from reset
+	// and the host takes the ratio of two DELTAS, which needs no clear and no
+	// clear-domain crossing. 40 bits wraps in about 10.7 hours at 28.636364 MHz,
+	// so any sane read interval is safe -- 32 bits would have wrapped in 150 s,
+	// which is shorter than the sampling runs this replaces.
+	//
+	// This counts CYCLES, not instructions: a cycle where the CPU is stalled on
+	// SDRAM still has its `eip` on the stalled instruction, which is correct
+	// here -- waiting is waiting.
+	reg [39:0] prof_in_r, prof_total_r;
+	reg [31:0] prof_lo_s, prof_hi_s;
+	reg        prof_hit;
+
+	always @(posedge clk_cpu) begin
+		// clk_ram (where the JTAG source is registered) is exactly 4 x clk_cpu
+		// from the same PLL, so this is a resample, not a CDC. The window is
+		// written once by a human before a measurement; a bit landing a cycle
+		// early only mis-attributes cycles during the write itself.
+		prof_lo_s <= prof_lo;
+		prof_hi_s <= prof_hi;
+
+		// Registered one cycle so the two 32-bit compares are not in series
+		// with the counter's carry chain.
+		prof_hit  <= (eip >= prof_lo_s) && (eip <= prof_hi_s);
+
+		if (cpu_reset) begin
+			prof_in_r    <= 40'd0;
+			prof_total_r <= 40'd0;
+		end
+		else begin
+			prof_total_r <= prof_total_r + 40'd1;
+			if (prof_hit) prof_in_r <= prof_in_r + 40'd1;
+		end
+	end
+
+	assign prof_in    = prof_in_r;
+	assign prof_total = prof_total_r;
 
 	assign lay_en_out = layer_enable;
 	assign c_prg = n_prg; assign c_iowr = n_iowr; assign c_dma_tm = n_tm;

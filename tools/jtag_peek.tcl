@@ -414,6 +414,51 @@ if {$mode eq "list"} {
         after $ms
     }
     puts "\nCPU left frozen. Clear it with:  ... jtag_peek.tcl mask 0"
+} elseif {$mode eq "prof"} {
+    # EIP profiler, standalone: set the window, wait, and read the counters at
+    # both ends of the wait. One invocation gives a rate, so this does not need
+    # the server -- but it does hold the JTAG chain, so the server must be down.
+    #
+    #   quartus_stp -t tools/jtag_peek.tcl prof 0x20607C 0x2060B8 [seconds]
+    #
+    # Known windows (PLAN.md section 16):
+    #   rdft   0x203F00 0x203F3A      rfjet  0x20607C 0x2060B8
+    #
+    # The counters free-run and are never cleared, so the two readings bracket
+    # the interval. 40 bits wraps in ~10.7 h; the mask makes one wrap inside an
+    # interval come out right regardless.
+    set idx [index_of "PROF"]
+    set lo  [expr {[lindex $args 1]}]
+    set hi  [expr {[lindex $args 2]}]
+    set secs [lindex $args 3]
+    if {$secs eq ""} { set secs 10 }
+
+    proc pfld {p a w} { return [expr 0b[string range $p $a [expr {$a+$w-1}]]] }
+
+    write_source_data -instance_index $idx \
+        -value "[dec2bin $hi 32][dec2bin $lo 32]"
+    after 50
+    set p0 [read_probe_data -instance_index $idx]
+    set t0 [pfld $p0 0 40]
+    set i0 [pfld $p0 40 40]
+    puts [format "window %08X .. %08X, sampling %s s..." $lo $hi $secs]
+    after [expr {int($secs * 1000)}]
+    set p1 [read_probe_data -instance_index $idx]
+    set t1 [pfld $p1 0 40]
+    set i1 [pfld $p1 40 40]
+
+    set mask 0xFFFFFFFFFF
+    set dt [expr {($t1 - $t0) & $mask}]
+    set di [expr {($i1 - $i0) & $mask}]
+    if {$dt == 0} {
+        puts "total counter did not move -- is the CPU in reset?"
+    } else {
+        puts [format "interval  %d clk_cpu cycles = %.3f s" $dt [expr {$dt / 28636364.0}]]
+        puts [format "in window %d  = %.2f%%" $di [expr {100.0 * $di / $dt}]]
+        puts [format "BUSY      %.2f%%  (of frames: %.0f cycles per frame at 53.99 Hz)" \
+              [expr {100.0 * (1.0 - double($di)/$dt)}] \
+              [expr {(1.0 - double($di)/$dt) * 28636364.0 / 53.99}]]
+    }
 } elseif {$mode eq "dump"} {
     set idx   [index_of "PEEK"]
     set addr  [expr {[lindex $args 1]}]
@@ -424,7 +469,8 @@ if {$mode eq "list"} {
         puts [format "%07X %s" $a [bin2hex [peek64 $idx $a]]]
     }
 } else {
-    puts "usage: quartus_stp -t tools/jtag_peek.tcl \[list | sums | dump <addr> <count>\]"
+    puts "usage: quartus_stp -t tools/jtag_peek.tcl \[list | sums | vitals | sound | sdram |"
+    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\]\]"
 }
 
 end_insystem_source_probe

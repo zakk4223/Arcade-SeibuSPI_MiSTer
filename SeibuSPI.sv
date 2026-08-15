@@ -522,6 +522,9 @@ wire [15:0] v_gap;
 wire [15:0] v_wmx;
 wire [31:0] v_seip;
 wire [15:0] v_scs;
+// EIP profiler: window down from the host, two free-running counters back up.
+wire [31:0] v_plo, v_phi;
+wire [39:0] v_pin, v_ptot;
 wire  [4:0] ldr_part_end;
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
@@ -649,7 +652,8 @@ spi_jtag_peek peek
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
 	.sdr_trans(sdr_trans),
-	.ctrl(dbg_ctrl)
+	.ctrl(dbg_ctrl),
+	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
 );
 
 // Loader owns channel 3 during the download, the checker until it is done,
@@ -808,6 +812,7 @@ spi_top spi_top
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
+	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot),
 
 	.sdr_prg_addr (sdr_prg_addr),
 	.sdr_prg_dout (sdr_prg_dout),

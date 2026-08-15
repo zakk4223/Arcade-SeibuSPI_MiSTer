@@ -5400,6 +5400,41 @@ fraction cannot be pinned down with the hooks it exposes:
   Check WHICH access a tap is catching before believing a per-frame count.
 * **A tap on the device port 0x684 crashes MAME** (core dump).
 
-The instrument wants to be on our side: a telemetry counter of `clk_cpu` cycles
-spent with `eip` inside the wait loop would give the idle fraction exactly and
-continuously, and could measure gameplay rather than attract.
+### 16.6 The EIP profiler (built)
+
+The instrument is now on our side. `spi_top` counts, on clk_cpu, the cycles with
+`eip` inside a programmable inclusive window, against a count of every clk_cpu
+cycle; both come back on a new `PROF` sources-and-probes instance. Point the
+window at the wait loop and the ratio IS the idle fraction -- exactly and
+continuously, instead of a few hundred JTAG samples over twelve minutes.
+
+    tools/slop prof 0x20607C 0x2060B8     set the window (rfjet)
+    tools/slop prof                       read; each read prints the delta
+                                          since the last, so it is a rate
+
+    quartus_stp -t tools/jtag_peek.tcl prof 0x20607C 0x2060B8 30
+                                          standalone, server down, one shot
+
+Known windows: rdft `0x203F00..0x203F3A`, rfjet `0x20607C..0x2060B8`.
+
+Four decisions worth keeping:
+
+* **Programmable window, not per-set constants.** The loop is at a different
+  address in every set, and a window that can point anywhere makes this a
+  general "how long is the CPU in THIS routine" instrument rather than a
+  single-purpose idle meter.
+* **Free-running, never cleared.** The host takes the ratio of two DELTAS, which
+  needs no clear and therefore no clear-domain crossing. 40 bits wraps in about
+  10.7 hours at 28.636364 MHz; 32 would have wrapped in 150 s, which is shorter
+  than the sampling runs this replaces, and the tools mask deltas so a single
+  wrap inside an interval still reads correctly.
+* **Cycles, not instructions.** A cycle stalled on SDRAM keeps `eip` on the
+  stalled instruction, which is what we want -- waiting is waiting.
+* **`PROF` is looked up softly in the server.** A bitstream built before this
+  has no such instance and `idx_of` throws; `prof` reports the absence instead
+  of killing a server that is working fine for everything else.
+
+What it unblocks: 16.5's missing number needs a MAME-side figure that MAME will
+not give up, but the OUR-side half is now exact rather than sampled, and it can
+run during PLAY -- which is what T-N still owes and where the peak load lives.
+Attract's 36% peak (16.4) is an attract number.
