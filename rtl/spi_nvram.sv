@@ -155,7 +155,6 @@ module spi_nvram
 		ioctl_rd_d     <= ioctl_rd;
 		ioctl_upload_d <= ioctl_upload;
 		dirty_d        <= flash_dirty;
-		ioctl_upload_req <= 1'b0;
 
 		// ---- load ----------------------------------------------------
 		if (wr_req == wr_ack) ioctl_wait <= 1'b0;
@@ -239,6 +238,14 @@ module spi_nvram
 		end
 
 		// ---- ask for a save ------------------------------------------
+		// A LEVEL, held until Main starts the transfer -- not a pulse. This
+		// module runs on clk_ram and hps_io samples on clk_sys at half the
+		// rate, so a one-cycle pulse can fall between its edges: rdft's save
+		// was seen, rfjet's was not, and nothing else differed. It also means
+		// a request raised while the OSD is shut simply waits, which is what
+		// should happen anyway.
+		if (upload_start) ioctl_upload_req <= 1'b0;
+
 		if (enable) begin
 			if (flash_dirty != dirty_d) begin
 				dirty_seen <= 1'b1;

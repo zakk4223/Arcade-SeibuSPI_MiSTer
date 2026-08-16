@@ -167,15 +167,30 @@ int main(int argc, char **argv) {
 
     // ---- the save request -------------------------------------------------
     // One pulse per settled burst of flash writes, not one per write.
-    int reqs = 0;
-    // QUIET_BITS is 8 in this build, so "settled" is 256 cycles rather than
-    // the 16.7 million the hardware uses.
+    // The real cycle, three times over: the flash is written, it settles, the
+    // core asks, Main eventually takes it, and the ask clears. QUIET_BITS is 8
+    // in this build, so "settled" is 256 cycles rather than 16.7 million.
+    //
+    // The request is a LEVEL and is checked as one. hps_io samples it on
+    // clk_sys, half this module's rate, so a one-cycle pulse can fall between
+    // its edges -- which is exactly how rfjet's save silently never happened
+    // while rdft's did, with nothing else different between them.
+    int reqs = 0, short_req = 0;
     for (int burst = 0; burst < 3; burst++) {
         for (int i = 0; i < 5; i++) { dut->flash_dirty = !dut->flash_dirty; run(20); }
-        for (int i = 0; i < 2000; i++) { tick(); if (dut->ioctl_upload_req) reqs++; }
+        int waited = 0;
+        while (!dut->ioctl_upload_req && waited < 4000) { tick(); waited++; }
+        if (!dut->ioctl_upload_req) { printf("FAIL: burst %d raised no request\n", burst); errors++; break; }
+        reqs++;
+        // Still up 500 cycles later? A pulse would be long gone.
+        for (int i = 0; i < 500; i++) { tick(); if (!dut->ioctl_upload_req) short_req++; }
+        (void)save(64, 40);                    // Main takes it
+        if (dut->ioctl_upload_req) { printf("FAIL: request still up after the upload started\n"); errors++; }
     }
-    if (reqs != 3) { printf("FAIL: %d upload requests for 3 bursts\n", reqs); errors++; }
-    else           printf("request: one per settled burst, %d bursts\n", reqs);
+    if (reqs != 3)   { printf("FAIL: %d requests for 3 bursts\n", reqs); errors++; }
+    if (short_req)   { printf("FAIL: request dropped early on %d cycles\n", short_req); errors++; }
+    if (reqs == 3 && !short_req)
+        printf("request: one per settled burst, held as a level until taken\n");
 
     delete dut;
     if (errors) { printf("\n%d FAILURES\n", errors); return 1; }

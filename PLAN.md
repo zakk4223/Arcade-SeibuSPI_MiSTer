@@ -6429,3 +6429,49 @@ in the wiring between `hps_io`, `ddr_rom_reader`, the ch3 mux and reset, which
 `tb_nvram` does not contain. `tb_boot_top` does. If persistence needs touching
 again, the next instrument is a load/save cycle driven through THAT, not through
 the module in isolation.
+
+## 19. rdft2 and rfjet: both rituals exact, and a CDC bug that only showed on one
+
+**2026-08-16.** Same core, same tables, no RTL change needed for either set.
+
+**Both payload sizes were PREDICTED before the run** -- from
+`build_soundflash.py`'s job-table walk, counting the decoded part's OUTPUT
+length -- and both came back to the byte:
+
+| set   | predicted | measured  | blocks | drops |
+|-------|-----------|-----------|--------|-------|
+| rdft  | 1,939,011 | 1,939,011 | 32     | 0     |
+| rdft2 | 2,028,340 | 2,028,340 | 32     | 0     |
+| rfjet | 2,004,170 | 2,004,170 | 32     | 0     |
+
+rdft2's and rfjet's payloads are the interesting ones: a verbatim head plus a
+BPE+DPCM compressed tail that the game's own 386 decompresses. The count
+matching means the decoder in the ROM and our understanding of it agree on every
+byte it emits.
+
+Both images verified against their references at eight windows each -- the
+stamp, head, middle, both sides of the seam (0x17C247 for rdft2, 0x189DD5 for
+rfjet), the last payload byte and the erased tail. **All sixteen match.** rfjet
+ends on its own variant of the halt screen, the one that mentions restoring JP1
+on an SXX2C board.
+
+### 19.1 The save request was a pulse across a clock domain
+
+rfjet's ritual finished, the OSD was opened, and **no `.nvm` appeared** -- where
+rdft's had. Nothing differed between the two but timing, which is the signature
+of a clock-domain bug, and it was one: `ioctl_upload_req` was a ONE-CYCLE PULSE
+at clk_ram, and `hps_io` samples it on clk_sys at half that rate. A pulse 8.7 ns
+wide can fall between two 17.5 ns edges. rdft's landed; rfjet's did not.
+
+It is a LEVEL now, raised when the flash settles and cleared when Main starts
+the transfer -- which also means a request raised while the OSD is shut simply
+waits, instead of being lost.
+
+`tb_nvram` asks for the whole cycle now (write, settle, ask, take, clear) three
+times over and requires the request to still be up 500 cycles after it appears.
+Reverting to a pulse fails it on 1,500 cycles.
+
+**Worth noticing about the shape of this bug:** it passed on the first set, on
+hardware, twice. The evidence that something was wrong was a file that did not
+exist -- an absence, on the one set that happened to be tested second. A test
+that only ever ran rdft would have called this feature finished.
