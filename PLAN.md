@@ -6061,3 +6061,80 @@ byte now selects between two entries per part rather than feeding one. The table
 outputs were registered for exactly this reason when `part` widened to 5 bits
 (rom_loader.sv), and there is half a nanosecond in hand, but it is the thing to
 watch if the tables gain another variant.
+
+## 18. First hardware run of the ritual: it starts, then stalls after one block
+
+**2026-08-15.** `rdft-update.mra` on the MiSTer. The core boots, the game
+notices the blank stamp, and the screen reads **NOW UPDATING. PLEASE WAIT A
+MOMENT.** with the music playing. Then nothing: it never finishes.
+
+The panel named the fault on the first read:
+
+    flash prog = 0 bytes, 1 blocks erased, 2 DROPPED (drops must be 0)
+    flash busy = 0
+    Z80 PC     = 18FC   (moving)      voices = 24      ymf writes climbing
+    EIP        = 0026D65A
+
+`drops` is the counter added in 17.10 with the comment "should never move". It
+moved on the first run. 0x26D65A is 16.6's three-instruction spin: the 386
+waiting on a Z80 reply that never comes.
+
+**What the ROM side got right**, checked before chasing the fault: `0x0480000`
+holds `seibu_8.u0216` byte for byte against the local image, and `0x2900000`
+holds `gun_dogs_pcm.u0217` byte for byte -- so the authentic part table, the
+43 MB map and the new PCMSRC region all work on hardware. The updater got as far
+as it did BECAUSE the source window feeds it.
+
+### 18.1 The updater does two things this core said it would not
+
+`tools/mame_flash_port.lua` -- a new probe that logs the wave-memory port in
+BOTH directions, where the existing one logs only writes -- run against MAME
+with a blank nvram:
+
+    W 17 = 20  addr=000000     erase setup, chip 0
+    W 17 = D0  addr=000001     confirm, chip 0 starts
+    W 17 = 20  addr=100000     erase setup, chip 1, immediately
+    W 17 = D0  addr=100001     confirm, chip 1 starts too
+    R 02 -> 00 addr=000000     poll chip 0: busy
+    R 02 -> 00 addr=100000     poll chip 1: busy
+    ...
+    W 17 = 40  addr=000004     program setup
+    W 14 = 03                  rewind so the datum lands at 4
+    W 17 = 03  addr=000004     the datum
+    W 17 = 40  addr=000005     the NEXT setup, with no poll in between
+
+1. **Both chips erase concurrently.** 17.10's module had ONE erase engine and a
+   comment claiming "the updater walks them in lockstep anyway -- it erases a
+   block, polls it, and only then moves on". That was an assumption, written as
+   if it were a finding, and it is false.
+2. **Programming never polls.** 40, datum, 40, datum, as fast as the Z80 can
+   drive the port. The same comment claimed "it polls WSMS before every
+   command", which is what the datasheet says a host should do and not what
+   this one does.
+
+The two dropped commands were chip 1's erase pair, refused because chip 0's
+sweep had the single engine. Chip 1 then sat in read-array mode answering polls
+with 0xFF out of the blank flash -- which is not a status byte at all -- and the
+updater waited for a chip that had never been told to do anything.
+
+### 18.2 What was built instead
+
+* **One sweep per chip**, sharing the write port by alternating (`er_turn`), so
+  two concurrent erases finish together rather than one starving the other.
+* **A command is never refused.** A byte program parks in a one-deep slot per
+  chip and jumps the queue ahead of the sweeps; `dbg_drops` now counts only the
+  case where a second byte lands on a full slot, which needs a Z80 `out` faster
+  than an SDRAM write.
+* A test that reproduces the hardware sequence exactly -- both chips erased back
+  to back, both polled, then eight bytes programmed with nothing waiting in
+  between. **Against the old single-engine module it fails with `dbg_erases =
+  1` and a busy mask of 1**, which is the MiSTer's reading reproduced in
+  Verilator.
+
+**And a second bug found by fixing the first.** The new scheduler was written as
+`else if` off the write-retire branch -- which tests "did a write just finish",
+not "is the port free" -- so it issued a second request on top of an outstanding
+one and the toggle handshake lost writes. The testbench caught it immediately:
+58,960 bytes of a 65,536-byte block left unerased. On hardware it would have
+been a quietly incomplete flash image, which is the failure mode this whole
+section exists to avoid.

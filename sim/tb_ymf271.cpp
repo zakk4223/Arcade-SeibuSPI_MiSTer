@@ -1132,6 +1132,89 @@ static void test_flash_program() {
            (unsigned long long)fl_writes, (int)sizeof(payload));
 }
 
+// What the updater ACTUALLY does, logged out of MAME by
+// tools/mame_flash_port.lua after the core stalled on hardware (PLAN.md 17.14):
+// it erases both chips back to back without polling in between, waits for both,
+// and then programs byte after byte with no status read at all. The first
+// version of the flash had one erase engine and refused commands while busy, so
+// on hardware it erased one block, dropped two commands and stopped -- with the
+// music still playing, which is what made it look like a hang rather than a
+// protocol bug.
+static void test_flash_both_chips() {
+    dut->flash_en = 1;
+    reset_dut();
+    for (uint32_t i = 0; i < PCM_SIZE; i++) rom[i] = (uint8_t)(i * 91 + 7);
+
+    // ---- both chips erase at once ----------------------------------------
+    // Exactly the trace's shape: 20 then D0 to chip 0, then 20 then D0 to
+    // chip 1, with nothing in between.
+    ext_seek(0x000000 - 1, false);      // wraps to 0x1FFFFF, as the updater's does
+    ext_put(0x20);
+    ext_put(0xD0);
+    ext_seek(0x100000 - 1, false);
+    ext_put(0x20);
+    ext_put(0xD0);
+
+    // Both must report busy. If the second chip is idle here it never got its
+    // command -- the exact hardware failure this test exists for.
+    int busy_seen = 0;
+    for (int i = 0; i < 200; i++) {
+        busy_seen |= dut->dbg_busy;
+        if ((busy_seen & 3) == 3) break;
+        run(50);
+    }
+    if ((busy_seen & 3) != 3) {
+        printf("FAIL: chips busy mask reached only %d, want 3 (both erasing)\n", busy_seen);
+        errors++;
+    }
+
+    wait_ready(0x000000, "chip 0 erase");
+    wait_ready(0x100000, "chip 1 erase");
+
+    int bad = 0;
+    for (uint32_t i = 0; i < 0x10000; i++) {
+        if (rom[i] != 0xFF)            bad++;
+        if (rom[0x100000 + i] != 0xFF) bad++;
+    }
+    if (bad) { printf("FAIL: %d bytes across the two erased blocks are not FF\n", bad); errors++; }
+    if (dut->dbg_erases != 2) {
+        printf("FAIL: dbg_erases = %d, want 2\n", (int)dut->dbg_erases); errors++;
+    }
+
+    // ---- programming with no poll between bytes --------------------------
+    // The trace goes 40, datum, 40, datum as fast as the Z80 can drive the
+    // port. Nothing here waits, which is the point.
+    static const uint8_t payload[] = { 0x03, 0xFC, 0xFB, 0xFB, 0x11, 0x22, 0x33, 0x44 };
+    for (int i = 0; i < (int)sizeof(payload); i++) {
+        uint32_t at = 0x000004 + i;
+        ext_seek(at - 1, false);
+        ext_put(0x40);
+        ext_seek(at - 1, false);
+        ext_put(payload[i]);
+    }
+    run(400);
+    for (int i = 0; i < (int)sizeof(payload); i++) {
+        if (rom[0x000004 + i] != payload[i]) {
+            printf("FAIL: unpolled program %d: want %02X got %02X\n",
+                   i, payload[i], rom[0x000004 + i]);
+            errors++;
+        }
+    }
+    if (dut->dbg_progs != sizeof(payload)) {
+        printf("FAIL: dbg_progs = %d, want %d\n",
+               (int)dut->dbg_progs, (int)sizeof(payload));
+        errors++;
+    }
+    if (dut->dbg_drops != 0) {
+        printf("FAIL: %d commands dropped -- a command must never be refused\n",
+               (int)dut->dbg_drops);
+        errors++;
+    }
+    dut->flash_en = 0;
+    printf("both chips: 2 blocks erased concurrently, %d bytes programmed "
+           "unpolled, %d drops\n", (int)sizeof(payload), (int)dut->dbg_drops);
+}
+
 // A flash write has to retire the sample-line cache, and this is the only test
 // that can tell. Everything above reads the flash through the wave-memory port,
 // which goes straight to memory; a PLAYING voice reads through a cached 64-bit
@@ -1350,8 +1433,9 @@ int main(int argc, char **argv) {
     test_lfo_amplitude();
     test_lfo_pitch();
     test_ext_memory_read();
-    // Last: it rewrites `rom` and drives flash_en itself.
+    // Last: these rewrite `rom` and drive flash_en themselves.
     test_flash_program();
+    test_flash_both_chips();
 
     delete dut;
     if (errors) {
