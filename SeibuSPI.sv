@@ -227,7 +227,7 @@ wire        ioctl_wr;
 wire [25:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_index;
-wire        ioctl_wait;
+wire        ioctl_wait;   // driven below, from two sources
 wire        ioctl_upload;
 wire        ioctl_upload_req;
 wire  [7:0] ioctl_upload_index;
@@ -243,12 +243,14 @@ wire        dl_download;
 wire        dl_wr;
 wire  [7:0] dl_dout;
 wire  [7:0] dl_index;
-// Two consumers of the same ioctl stream, each with its own backpressure: the
-// ROM loader takes index 0 and spi_nvram index 2, and whichever is not
-// interested holds its wait low.
+// Two consumers of the ioctl stream, on opposite sides of the DDR3 replay: the
+// ROM loader takes index 0 out of `dl_*` (replayed or not), spi_nvram takes
+// index 2 straight from hps_io. Their backpressure meets again here, because
+// hps_io has only one ioctl_wait.
 wire        dl_wait;
-wire        ldr_wait, nv_dl_wait;
-assign      dl_wait = ldr_wait | nv_dl_wait;
+wire        ldr_wait, nv_dl_wait, rdr_wait;
+assign      dl_wait = ldr_wait;
+assign      ioctl_wait = rdr_wait | nv_dl_wait;
 
 wire [15:0] joystick_p1, joystick_p2;
 
@@ -573,7 +575,7 @@ ddr_rom_reader ddr_rom_reader
 	.ioctl_addr     (ioctl_addr),
 	.ioctl_wr       (ioctl_wr),
 	.ioctl_dout     (ioctl_dout),
-	.ioctl_wait     (ioctl_wait),
+	.ioctl_wait     (rdr_wait),
 
 	.dl_download    (dl_download),
 	.dl_wr          (dl_wr),
@@ -683,6 +685,7 @@ spi_jtag_peek peek
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
 	.flash_progs(dbg_flash_progs), .flash_erases(dbg_flash_erases),
 	.flash_drops(dbg_flash_drops), .flash_busy(dbg_flash_busy),
+	.nv_bytes(dbg_nv_bytes),
 	.sdr_trans(sdr_trans),
 	.ctrl(dbg_ctrl),
 	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
@@ -778,6 +781,7 @@ wire  [1:0] nv_wr_be;
 wire        nv_wr_req, nv_wr_active, nv_rd_req, nv_rd_ack;
 wire [63:0] nv_rd_dout;
 wire [15:0] dbg_nv_saves;
+wire [25:0] dbg_nv_bytes;
 
 spi_nvram nvram
 (
@@ -785,11 +789,13 @@ spi_nvram nvram
 	.reset      (RESET | ~pll_locked),
 	.enable     (set_upd),
 
-	.ioctl_download (dl_download),
-	.ioctl_wr       (dl_wr),
-	.ioctl_index    (dl_index),
-	.ioctl_dout     (dl_dout),
+	// Raw ioctl, not the replayed copy -- see the header of spi_nvram.sv.
+	.ioctl_download (ioctl_download),
+	.ioctl_wr       (ioctl_wr),
+	.ioctl_index    (ioctl_index),
+	.ioctl_dout     (ioctl_dout),
 	.ioctl_wait     (nv_dl_wait),
+	.rom_busy       (dl_download),
 	.ioctl_upload       (ioctl_upload),
 	.ioctl_rd           (ioctl_rd),
 	.ioctl_din          (ioctl_din),
@@ -810,7 +816,8 @@ spi_nvram nvram
 	.rd_ack     (nv_rd_ack),
 	.rd_dout    (nv_rd_dout),
 
-	.dbg_saves  (dbg_nv_saves)
+	.dbg_saves  (dbg_nv_saves),
+	.dbg_bytes  (dbg_nv_bytes)
 );
 
 // Refresh aggressively while the board is idle; the controller also has its own

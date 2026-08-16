@@ -39,7 +39,14 @@ module spi_nvram
 	// the sample region is a ROM image and this stays inert.
 	input             enable,
 
-	// ---- ioctl, from hps_io (clk_sys; edge-detected here) -----------------
+	// ---- ioctl, straight from hps_io (clk_sys; edge-detected here) --------
+	//
+	// NOT the ddr_rom_reader's `dl_*` copies. That module masks the index to 0
+	// and drives the write strobe from its own DDR3 replay, so an ioctl that
+	// arrives while the ROM image is still being replayed is DISCARDED -- and
+	// the nvram arrives in exactly that window, because Main sends it the
+	// moment its DMA of the image returns. The first attempt lost the whole
+	// file that way, silently: `bytes_in` showed the image and nothing else.
 	input             ioctl_download,
 	input             ioctl_wr,
 	input       [7:0] ioctl_index,
@@ -50,6 +57,11 @@ module spi_nvram
 	output      [7:0] ioctl_din,
 	output reg        ioctl_upload_req,
 	output      [7:0] ioctl_upload_index,
+
+	// High while the ROM image is still landing (including the DDR3 replay,
+	// which outlives the HPS's own download). The nvram must not touch ch3
+	// then, so its bytes are held off with ioctl_wait until the image is done.
+	input             rom_busy,
 
 	// Toggles once per store into the sample flash.
 	input             flash_dirty,
@@ -68,7 +80,10 @@ module spi_nvram
 	input             rd_ack,
 	input      [63:0] rd_dout,
 
-	output reg [15:0] dbg_saves
+	output reg [15:0] dbg_saves,
+	// Bytes of the save file received. Zero after a load means the file never
+	// reached the core, which is a different fault from loading a wrong one.
+	output     [25:0] dbg_bytes
 );
 
 `include "spi_defs.vh"
@@ -98,6 +113,7 @@ module spi_nvram
 	reg [25:0] dl_off;
 	reg        dl_run;
 	assign wr_active = dl_run;
+	assign dbg_bytes = dl_off;
 
 	// ------------------------------------------------------------------
 	// SAVE: a byte counter and two lines of prefetch.
@@ -140,8 +156,12 @@ module spi_nvram
 		if (wr_req == wr_ack) ioctl_wait <= 1'b0;
 
 		if (sel && ioctl_download) begin
-			dl_run <= 1'b1;
-			if (ioctl_wr_rise && (dl_off < NV_SIZE)) begin
+			// Hold the HPS off until the ROM image has finished landing. It
+			// waits mid-transfer, which is what ioctl_wait is for, and the
+			// replay it is waiting on is bounded by the image size.
+			if (rom_busy) ioctl_wait <= 1'b1;
+			dl_run <= !rom_busy;
+			if (!rom_busy && ioctl_wr_rise && (dl_off < NV_SIZE)) begin
 				wr_addr    <= SDR_PCM_BASE + {dl_off[25:1], 1'b0};
 				wr_din     <= {ioctl_dout, ioctl_dout};
 				wr_be      <= dl_off[0] ? 2'b10 : 2'b01;

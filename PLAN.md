@@ -6347,3 +6347,41 @@ The one thing the bench deliberately does NOT assert is that the first line is
 ready before the first byte is asked for. It cannot be: the 0xAA and the first
 data word are separate SPI transactions on the HPS side, microseconds apart, so
 the bench gives that gap and stresses only the steady state.
+
+### 18.9 The save is byte-exact; the LOAD was thrown away by the fast path
+
+With 18.8's fixes, the second attempt:
+
+    sha256  659df8c6a964c109465cc6d927f1565c57beae5d9d86b88b09e5976b57befee1
+    2,097,152 bytes, /media/fat/config/nvram/rdft-update.nvm
+
+**identical to `build_soundflash.py`'s image**, which is itself bit-exact
+against MAME's own flash nvram. The save path is done: the game programmed the
+flash, the core read all two megabytes back out through ch5 and the ioctl
+handshake, and what landed on the SD card is the right image.
+
+**Then reloading the MRA ran the ritual all over again.** The load did not take,
+and `bytes_in` said where it went: 25,886,720, exactly the ROM image with no
+extra two megabytes. The nvram had not reached the loader OR the nvram module --
+it had been discarded outright, by our own fast-load path:
+
+    assign dl_index = replay ? ROM_INDEX : ioctl_index;
+    assign dl_wr    = replay ? ddr_wr    : ioctl_wr;
+
+While `ddr_rom_reader` replays the image out of DDR3, everything arriving from
+hps_io is masked to index 0 and its write strobe is ignored. A 24.7 MB fast load
+replays for about two seconds, and Main sends the nvram the moment its own DMA
+returns -- straight into that window. The file never had a chance.
+
+**The fix is to take the raw ioctl, not the replayed copy.** The nvram is never
+fast-loaded; it has no business downstream of that module. It now reads hps_io
+directly and holds `ioctl_wait` high while the ROM image is still landing, so
+its bytes wait for ch3 instead of racing the replay for it. The two consumers
+now sit on opposite sides of `ddr_rom_reader` and their backpressure meets again
+at hps_io's single `ioctl_wait`.
+
+**And the counter that would have said so in one reading**: `nvram in` on the
+sound panel, the bytes the core actually received. Zero after a load, with an
+`.nvm` present, is a different fault from loading the wrong thing -- and this
+whole diagnosis was inferred from `bytes_in` NOT moving, which is a much weaker
+signal than the one that should have been there.

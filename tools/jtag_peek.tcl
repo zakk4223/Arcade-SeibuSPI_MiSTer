@@ -219,6 +219,10 @@ if {$mode eq "list"} {
               $fp $fe $fd]
         puts [format "flash busy = %d  (bit0 = chip 0, bit1 = chip 1)" [fld $p 297 2]]
     }
+    # 299..324: bytes of the save file received at load. Zero on an -update MRA
+    # that has an .nvm means the file never reached the core.
+    set nv [fld $p 299 26]
+    if {$nv} { puts [format "nvram in   = %d bytes  (the save file, at load)" $nv] }
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits
