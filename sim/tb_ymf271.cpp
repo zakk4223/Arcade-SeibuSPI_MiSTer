@@ -24,6 +24,7 @@
 // tb_rom_loader.
 
 #include "Vtb_ymf_top.h"
+#include "flash_replay.h"
 #include "verilated.h"
 #include <cmath>
 #include <cstdint>
@@ -82,12 +83,24 @@ static bool     fl_busy = false;
 static int      fl_wait = 0;
 static bool     fl_req_prev = false;
 static uint64_t fl_writes = 0;
+// How long a flash write takes to retire. On hardware this is not a constant:
+// the write is the LOWEST priority master on ch3, behind the Z80's instruction
+// fetches, so it can be stalled far longer than the 14 cycles below -- which is
+// the one thing this testbench did not model when the replay passed here and
+// failed on hardware (PLAN.md 19.11).
+static int      fl_latency = 14;
+static int      fl_jitter  = 0;
+static uint32_t fl_lcg     = 12345;
 
 static void flash_tick() {
     if (!fl_busy && (dut->fl_req != fl_req_prev)) {
         fl_req_prev = dut->fl_req;
         fl_busy = true;
-        fl_wait = 14;
+        fl_wait = fl_latency;
+        if (fl_jitter) {
+            fl_lcg = fl_lcg * 1103515245u + 12345u;
+            fl_wait += (fl_lcg >> 16) % fl_jitter;
+        }
     } else if (fl_busy && --fl_wait <= 0) {
         uint32_t a = dut->fl_addr - SDR_PCM_BASE;
         for (int lane = 0; lane < 2; lane++) {
@@ -1421,6 +1434,112 @@ static void test_stereo_split() {
     printf("mono sum:     200 samples, %d mismatches, %d L!=R\n", bad_m, bad_eq);
 }
 
+// ---------------------------------------------------------------------------
+// One real page of the updater, replayed off MAME's Z80.
+//
+// Everything above drives the flash the way the DATASHEET says to. This drives
+// it the way rdft2 actually does, which is not the same thing: the updater
+// leaves the address register one behind, writes the 0x40 command THROUGH the
+// same auto-incrementing port as the data, and then fixes only the LOW address
+// byte before each datum. Three writes per byte, and the address arithmetic
+// only works because of where the increments land.
+//
+// Hardware got one byte of this page wrong -- 0x29FE came back erased, twice,
+// on two different builds, with the accepted-program count matching MAME's
+// issued-command count exactly (PLAN.md 19.11). If that is a fault in the
+// address arithmetic rather than in the SDRAM path underneath it, replaying the
+// captured writes reproduces it here with everything visible.
+static void test_flash_replay() {
+    dut->flash_en = 1;
+    reset_dut();
+
+    // Erased, as the updater leaves it: a lost write and a written 0xFF are
+    // then the same byte, which is exactly the ambiguity hardware presented.
+    for (uint32_t i = REPLAY_BASE; i < REPLAY_BASE + 0x200; i++) rom[i] = 0xFF;
+
+    // The capture starts mid-byte: the 0x40 for the page's first byte has
+    // already gone in, at REPLAY_BASE, and the address register sits there.
+    ext_seek(REPLAY_BASE - 1, false);
+    ext_put(0x40);
+
+    for (size_t i = 0; i < sizeof(REPLAY) / sizeof(REPLAY[0]); i++) {
+        timer_write(REPLAY[i].reg, REPLAY[i].val);
+        // A Z80 `out` is ~11 of its cycles and clk_sys is eight times its
+        // clock, so consecutive port writes are ~88 apart. Close enough that a
+        // write which needs the previous one to have retired still gets it.
+        run(88);
+    }
+    run(400);
+
+    int bad = 0;
+    uint32_t first = 0;
+    for (uint32_t i = 0; i < 256; i++) {
+        if (rom[REPLAY_BASE + i] == REPLAY_EXPECT[i]) continue;
+        if (!bad) first = i;
+        bad++;
+    }
+    if (bad) {
+        printf("FAIL: %d of 256 replayed bytes differ; first at %04X: "
+               "want %02X got %02X\n", bad, REPLAY_BASE + first,
+               REPLAY_EXPECT[first], rom[REPLAY_BASE + first]);
+        errors++;
+    } else {
+        printf("replay: 256 bytes of rdft2's page 0x2900 match MAME byte for byte\n");
+    }
+
+    // Nothing may land ABOVE the page either. A datum that misses its address
+    // by a carry goes 256 bytes up, where the updater's next page would later
+    // overwrite it -- which is precisely why hardware showed only ONE wrong
+    // byte instead of two.
+    int stray = 0;
+    for (uint32_t i = REPLAY_BASE + 256; i < REPLAY_BASE + 0x200; i++)
+        if (rom[i] != 0xFF) stray++;
+    if (stray) {
+        printf("FAIL: %d bytes written above the page\n", stray);
+        errors++;
+    }
+
+    // The same page again with the SDRAM write port behaving as it does on
+    // hardware: slow and irregular, because ch3 serves the Z80 first and the
+    // flash last. A byte program arriving on a slot still waiting for the
+    // previous write is counted in dbg_drops -- but a byte lost some OTHER way
+    // is not, and that is the case worth catching.
+    // Back to a known mode first. The capture ends mid-byte, with the chip
+    // still expecting a datum, so the 0x40 that opens the next pass would be
+    // PROGRAMMED rather than obeyed.
+    reset_dut();
+    uint32_t drops0 = dut->dbg_drops;
+    fl_latency = 150;
+    fl_jitter  = 120;
+    for (uint32_t i = REPLAY_BASE; i < REPLAY_BASE + 0x200; i++) rom[i] = 0xFF;
+    ext_seek(REPLAY_BASE - 1, false);
+    ext_put(0x40);
+    for (size_t i = 0; i < sizeof(REPLAY) / sizeof(REPLAY[0]); i++) {
+        timer_write(REPLAY[i].reg, REPLAY[i].val);
+        run(88);
+    }
+    run(4000);
+    fl_latency = 14;
+    fl_jitter  = 0;
+
+    bad = 0; first = 0;
+    for (uint32_t i = 0; i < 256; i++) {
+        if (rom[REPLAY_BASE + i] == REPLAY_EXPECT[i]) continue;
+        if (!bad) first = i;
+        bad++;
+    }
+    uint32_t drops = dut->dbg_drops - drops0;
+    if (bad) {
+        printf("FAIL: contended replay: %d of 256 bytes differ; first at %04X: "
+               "want %02X got %02X (%u drops)\n", bad, REPLAY_BASE + first,
+               REPLAY_EXPECT[first], rom[REPLAY_BASE + first], drops);
+        errors++;
+    } else {
+        printf("replay: byte for byte again with the write port stalled "
+               "150-270 cycles (%u drops)\n", drops);
+    }
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vtb_ymf_top;
@@ -1461,6 +1580,7 @@ int main(int argc, char **argv) {
     // Last: these rewrite `rom` and drive flash_en themselves.
     test_flash_program();
     test_flash_both_chips();
+    test_flash_replay();
 
     delete dut;
     if (errors) {

@@ -189,7 +189,17 @@ int main(int argc, char **argv)
     // clock this testbench runs at, so that is ~6 cycles here. SLOP_BUS_FREE=1
     // restores the old unlimited behaviour for comparison.
     const bool bus_free = getenv("SLOP_BUS_FREE") != nullptr;
-    const int  BUS_OCC  = 6;
+    // SLOP_SPR_PRIO: serve ch4 (sprites) ahead of ch2 (tiles), which is the
+    // arbiter reorder being evaluated. The default is sdram.sv's real order,
+    // tiles first. Sprites starve with the bus only ~37% occupied on hardware,
+    // so this asks how much of that is the priority chain rather than the bus.
+    const bool spr_prio  = getenv("SLOP_SPR_PRIO") != nullptr;
+    // A transaction is 8 clk_ram in sdram.sv (IDLE, WAIT, RW1, IDLE_5..IDLE_1)
+    // and clk_ram is twice this testbench's clock, so the faithful figure is 4.
+    // The default here has been 6, i.e. 50% pessimistic, which matters a lot
+    // for a per-line deadline: SLOP_BUS_OCC exists to say how much of the
+    // starvation this model reports is the model's own margin.
+    const int  BUS_OCC  = getenv("SLOP_BUS_OCC") ? atoi(getenv("SLOP_BUS_OCC")) : 6;
 
     uint64_t sdr_data  = 0, spr_data64 = 0;
     uint8_t  sdr_req_d = 0, spr_req_d = 0;
@@ -240,6 +250,10 @@ int main(int argc, char **argv)
                     else                { spr_data64 = fetch64(dut->spr_sdr_addr); dut->spr_sdr_ack = spr_req_d; spr_pend = false; }
                     bus_owner = 0;
                 }
+            }
+            else if (spr_prio) {
+                if      (spr_pend) { bus_owner = 2; bus_busy = BUS_OCC; }
+                else if (sdr_pend) { bus_owner = 1; bus_busy = BUS_OCC; }
             }
             else if (sdr_pend) { bus_owner = 1; bus_busy = BUS_OCC; }
             else if (spr_pend) { bus_owner = 2; bus_busy = BUS_OCC; }

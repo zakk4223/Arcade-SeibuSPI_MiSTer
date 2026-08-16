@@ -6761,3 +6761,76 @@ reported one stray beat now reports none at all -- the panel's nvram-save line
 is printed only when either counter is non-zero, and it is silent -- while the
 save file still loads (`nvram in = 2097152`), the ritual still skips, and 36
 voices sound.
+
+### 19.11  rdft2's save file is one byte wrong, and it is not the save
+
+The last unchecked item in 19.9 was rdft2's `.nvm`, the one save never compared
+against the reference. It does not match:
+
+```
+f24a165980f1150f8d947b99cf921a134a84110dfaae25bc8073bb42d4f6a09a  rdft2-update.nvm
+c0da4614a8d07a7bce24b7712b756435f2c5fd1ef74dc44333657afdecc6c67c  rdft2_flash.bin
+```
+
+**One byte in 2,097,152.** At 0x29FE the file holds 0xFF where MAME holds 0xFE
+-- and 0xFF is the erased value, so that byte was never programmed. Every other
+set's save is still byte-identical, so this is not a path fault that would have
+shown up everywhere; it is one write, in one place.
+
+It is not the save file. Re-running the ritual from blank and reading the flash
+straight out of SDRAM over JTAG, before any save could touch it, gives the same
+byte:
+
+```
+02829F8  FFFF0000FEFDFE00        hardware, after a fresh ritual
+         FFFE0000FEFDFE00        MAME
+```
+
+Reproducibly, at the same address, on two different builds.
+
+**What it is not.** Each of these was measured, not argued:
+
+* **Not the source.** The byte is inside job 1, which is a verbatim copy out of
+  the sound01 window -- no decoder involved. `pcm.u0217` holds 0xFE there, and
+  peeking the core's own packed copy at SDR_PCMSRC_BASE+0x29FE returns the ROM's
+  eight bytes exactly. The game read the right value.
+* **Not a missed command.** `tools/mame_flash_count.lua` counts what the updater
+  issues: **2,028,340 byte programs**, which is exactly what the core reports
+  accepting, with 0 dropped. Nothing was lost on the way in.
+* **Not a late erase.** The same script stamps every erase with the program
+  count at the moment it is issued: all 32 arrive at program 0, before a single
+  byte is programmed. No sweep can come back over programmed data, and a sweep
+  that did would take 65,536 bytes with it, not one.
+* **Not the SDRAM location.** Loading the reference image through the nvram path
+  -- ch3 writes, like the flash's own -- puts 0xFE there and it reads back.
+* **Not the controller.** `tools/mame_flash_raw.lua` captures the updater's real
+  register writes, which are nothing like the datasheet sequence: the address
+  register runs one behind, the 0x40 command goes through the same
+  auto-incrementing port as the data, and only the LOW address byte is rewritten
+  before each datum. Replaying all 770 captured writes for that whole page into
+  `ymf271` + `spi_soundflash` reproduces MAME byte for byte -- including 0x29FE,
+  and including a second pass with the write port stalled 150-270 cycles to
+  model ch3 contention, which the flash sits at the bottom of.
+
+**What is left.** The write is issued -- `dbg_progs` counts at issue, and it
+matches MAME's command total exactly -- and does not arrive. That is the handoff
+from `spi_soundflash` (clk_sys) into `spi_sdr_arb4` (clk_ram) and `sdram.sv`
+underneath it. Both clocks come off the same PLL, so the path is timed rather
+than asynchronous and closes at +0.167; that argues against a plain CDC hazard
+and leaves no explanation yet.
+
+The shape of the damage says the write was not dropped but MISPLACED: a datum
+that lands one byte high, or a byte-enable that selects the wrong lane of the
+right halfword, puts 0xFE at 0x29FF, where the very next program overwrites it
+with its own correct 0xFF. That is the only failure mode producing exactly one
+wrong byte and a correct program count, and it is why nothing else in the image
+moved.
+
+**Next instrument, when this is picked up again:** count writes issued to that
+one halfword, with the byte-enable, inside `spi_soundflash`. One build settles
+whether the controller emitted the right request and the fault is downstream, or
+emitted the wrong one.
+
+Meanwhile the machine has a correct rdft2 save: the reference image was copied
+over `rdft2-update.nvm` and loads clean. The bad one is kept beside it as
+`rdft2-update.nvm.bad`.
