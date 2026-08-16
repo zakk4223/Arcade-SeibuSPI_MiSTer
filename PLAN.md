@@ -6546,3 +6546,46 @@ counter -- landing on zero, the one value that means "the host never came". It
 is 26 bits now. 13b's rule about counters that wrap between readings, earned a
 second time and in its most misleading form: not a wrong number, but the
 number that reads as the fault being diagnosed.
+
+### 19.4 rdft's audio against MAME, and why the envelope figure is the weak one
+
+The self-flashed image is bit-identical to MAME's, so this measures the
+remaining question: does the core PLAY it the same. 140 s of hardware attract
+against a 400 s MAME reference (`-wavwrite`, the same image split into
+`soundflash1`/`2`), through `tools/compare_audio.py`:
+
+    envelope r          0.8030
+    spectrum r          0.9967      long-term synthesis
+    per-second r        median 0.9751, 99% above 0.8    (per-window SPECTRA)
+    silence agreement   99.4%       45 windows hw-silent, 0 MAME-silent
+    level               hw/MAME = 0.385-0.41, constant across all 14 blocks
+
+**The spectral figures are the load-bearing ones and they pass.** The level
+ratio is flat to within 3% over the whole capture, which is the same ~2.5x
+offset 10d saw on rdft2 and never explained; it is a scale, not a shape.
+
+**The envelope figure is weak for a reason, and it was worth finding out which.**
+Three things were tested rather than assumed:
+
+* **Drift.** The two streams slip 40 ms over 70 s (573 ppm). Resampling the
+  capture to correct it made the envelope figure slightly WORSE (0.803 ->
+  0.783), so drift is not the cause.
+* **The measure's ceiling.** A 140 s slice cut out of the reference and fed back
+  in scores 1.0000 on everything, so the pipeline is exact and 0.803 is a real
+  difference rather than an artefact of the tooling.
+* **The material.** Shifting the capture against ITSELF by ONE 20 ms window
+  drops its correlation from 1.000 to 0.187. This music's envelope is
+  noise-like at that timescale, so ANY sub-window timing difference -- and the
+  capture chain resamples the core's 44.1 kHz to 48 kHz on the way to HDMI --
+  costs most of the metric while leaving spectra untouched.
+
+So 0.803 is consistent with the same notes at the same times through a
+resampling capture chain, and it is NOT comparable to 10d's 0.951 for rdft2:
+different music, and nobody has calibrated what this chain costs. **The way to
+tighten it is a hardware-against-hardware capture**, which would measure the
+chain rather than the core; that has not been done.
+
+**One thing left unexplained:** 45 windows (0.64%) where the tool calls the
+hardware silent while MAME plays. A stricter threshold (hw RMS < 20 against
+MAME > 200) finds a single 60 ms run, at t = 46.6 s. Too small to hear and too
+small to chase, but it is not zero and it is written down.
