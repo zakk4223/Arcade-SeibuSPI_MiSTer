@@ -116,7 +116,7 @@ module spi_jtag_peek
 	// Did the core ASK for a save, and did the host ever answer? Zero beats
 	// against non-zero asks is Main not coming; zero asks is the core's fault.
 	input      [15:0] nv_saves,
-	input      [15:0] nv_beats,
+	input      [25:0] nv_beats,
 
 	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
 	// because it is a different question from everything on SNDV.
@@ -234,7 +234,7 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (5),
 		.instance_id             ("SNDV"),
-		.probe_width             (357),
+		.probe_width             (367),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")

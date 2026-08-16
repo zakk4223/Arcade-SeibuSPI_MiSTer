@@ -6516,3 +6516,33 @@ its own.
 **The rule this earns:** when one instance works and another does not, check
 what is actually deployed to each before theorising about why they differ. And
 match a config element by its syntax, not by a word that also appears in prose.
+
+### 19.3 All three sets, end to end, and one more counter that lied
+
+With the right MRA on the machine, rfjet on the first OSD press:
+
+    rfjet-update.nvm   fb02c059e7ee1b0a26c97ccb5d6eb60eaaa1c48a7e65c76c2d2628475cb4e621
+
+**identical to `build_soundflash.py`'s image.** Reloading the MRA -- which
+re-downloads the blank flash -- then reads `nvram in = 2097152 bytes`, runs no
+ritual at all (0 erases, 0 programs) and comes up in rfjet's HI-SCORE RANK
+attract screen with voices sounding.
+
+So the whole feature is proven on two sets independently, and the flash image on
+all three:
+
+| set   | ritual    | image (8 windows) | save file | load |
+|-------|-----------|-------------------|-----------|------|
+| rdft  | 1,939,011 | match             | sha256 match | skips the ritual |
+| rdft2 | 2,028,340 | match             | not run   | not run |
+| rfjet | 2,004,170 | match             | sha256 match | skips the ritual |
+
+rdft2's save/load was not run: it shares every line of code with the other two,
+and its ritual and image are verified.
+
+**`beats` read 0 for a transfer that had just written a byte-perfect file.** A
+full save is 2,097,152 beats, which is thirty-two exact wraps of a 16-bit
+counter -- landing on zero, the one value that means "the host never came". It
+is 26 bits now. 13b's rule about counters that wrap between readings, earned a
+second time and in its most misleading form: not a wrong number, but the
+number that reads as the fault being diagnosed.

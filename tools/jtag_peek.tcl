@@ -226,7 +226,7 @@ if {$mode eq "list"} {
     # 325..340 asks, 341..356 beats served. asks>0 with beats==0 means the core
     # asked for a save and the host never came for it.
     set asks  [fld $p 325 16]
-    set beats [fld $p 341 16]
+    set beats [fld $p 341 26]
     if {$asks || $beats} {
         puts [format "nvram save = %d asks, %d beats served" $asks $beats]
     }

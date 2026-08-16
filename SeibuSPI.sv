@@ -780,7 +780,8 @@ wire [15:0] nv_wr_din;
 wire  [1:0] nv_wr_be;
 wire        nv_wr_req, nv_wr_active, nv_rd_req, nv_rd_ack;
 wire [63:0] nv_rd_dout;
-wire [15:0] dbg_nv_saves, dbg_nv_beats;
+wire [15:0] dbg_nv_saves;
+wire [25:0] dbg_nv_beats;
 wire [25:0] dbg_nv_bytes;
 
 spi_nvram nvram

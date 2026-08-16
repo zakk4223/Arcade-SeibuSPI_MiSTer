@@ -81,10 +81,13 @@ module spi_nvram
 	input      [63:0] rd_dout,
 
 	output reg [15:0] dbg_saves,
-	// Beats of an upload actually served. Zero while dbg_saves is non-zero
-	// means the core asked and Main never came -- a different fault from the
-	// core never asking, and the two were indistinguishable for two runs.
-	output reg [15:0] dbg_beats,
+	// Beats of an upload actually served. 26 bits, not 16: a full save is
+	// 2,097,152 of them, which is thirty-two exact wraps of a 16-bit counter
+	// and reads back as ZERO -- identical to "the host never came", which is
+	// the very thing this exists to distinguish. It said 0 beats about a
+	// transfer that had just written a byte-perfect file. PLAN.md 13b's rule
+	// about wrapping counters, earned again.
+	output reg [25:0] dbg_beats,
 	// Bytes of the save file received. Zero after a load means the file never
 	// reached the core, which is a different fault from loading a wrong one.
 	output     [25:0] dbg_bytes
@@ -265,7 +268,7 @@ module spi_nvram
 		if (upload_start) want_save <= 1'b0;
 		ioctl_upload_req <= want_save && !upload_start;
 
-		if (up_run && ioctl_rd_rise) dbg_beats <= dbg_beats + 16'd1;
+		if (up_run && ioctl_rd_rise) dbg_beats <= dbg_beats + 26'd1;
 
 		if (enable) begin
 			if (flash_dirty != dirty_d) begin
@@ -304,7 +307,7 @@ module spi_nvram
 			quiet      <= '0;
 			want_save  <= 1'b0;
 			dbg_saves  <= 16'd0;
-			dbg_beats  <= 16'd0;
+			dbg_beats  <= 26'd0;
 		end
 	end
 
