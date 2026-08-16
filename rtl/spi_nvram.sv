@@ -81,6 +81,10 @@ module spi_nvram
 	input      [63:0] rd_dout,
 
 	output reg [15:0] dbg_saves,
+	// Beats of an upload actually served. Zero while dbg_saves is non-zero
+	// means the core asked and Main never came -- a different fault from the
+	// core never asking, and the two were indistinguishable for two runs.
+	output reg [15:0] dbg_beats,
 	// Bytes of the save file received. Zero after a load means the file never
 	// reached the core, which is a different fault from loading a wrong one.
 	output     [25:0] dbg_bytes
@@ -149,6 +153,14 @@ module spi_nvram
 	// ------------------------------------------------------------------
 	reg        dirty_d, dirty_seen;
 	reg [QUIET_BITS-1:0] quiet;
+	// `want_save` is the state; the request line is that state with a short gap
+	// punched in it periodically, so hps_io gets a fresh RISING EDGE every so
+	// often rather than one single edge that has to be caught. It latches on
+	// the edge and clears the latch when Main polls, so an edge lost to
+	// anything at all -- clock domains, a poll landing at the wrong moment --
+	// would otherwise strand the save forever.
+	reg        want_save;
+	reg [QUIET_BITS-1:0] reask;
 
 	always @(posedge clk) begin
 		ioctl_wr_d     <= ioctl_wr;
@@ -238,13 +250,26 @@ module spi_nvram
 		end
 
 		// ---- ask for a save ------------------------------------------
-		// A LEVEL, held until Main starts the transfer -- not a pulse. This
-		// module runs on clk_ram and hps_io samples on clk_sys at half the
-		// rate, so a one-cycle pulse can fall between its edges: rdft's save
-		// was seen, rfjet's was not, and nothing else differed. It also means
-		// a request raised while the OSD is shut simply waits, which is what
-		// should happen anyway.
-		if (upload_start) ioctl_upload_req <= 1'b0;
+		// NOT a one-cycle pulse: this runs on clk_ram and hps_io samples on
+		// clk_sys at half the rate, so 8.7 ns can fall between two 17.5 ns
+		// edges. And not a single level either -- hps_io latches the RISING
+		// edge and clears its latch when Main polls, so one edge that is missed
+		// or consumed at the wrong moment strands the save with no way back.
+		// The state is held and re-presented periodically instead.
+		if (upload_start) want_save <= 1'b0;
+
+		if (want_save) begin
+			reask <= reask + 1'd1;
+			// A short gap in the line every 2^QUIET_BITS cycles is a fresh
+			// rising edge for hps_io, about seven a second on hardware.
+			ioctl_upload_req <= |reask[QUIET_BITS-1:4];
+		end
+		else begin
+			reask            <= '0;
+			ioctl_upload_req <= 1'b0;
+		end
+
+		if (up_run && ioctl_rd_rise) dbg_beats <= dbg_beats + 16'd1;
 
 		if (enable) begin
 			if (flash_dirty != dirty_d) begin
@@ -253,9 +278,9 @@ module spi_nvram
 			end
 			else if (dirty_seen) begin
 				if (&quiet) begin
-					dirty_seen       <= 1'b0;
-					ioctl_upload_req <= 1'b1;
-					dbg_saves        <= dbg_saves + 16'd1;
+					dirty_seen <= 1'b0;
+					want_save  <= 1'b1;
+					dbg_saves  <= dbg_saves + 16'd1;
 				end
 				else quiet <= quiet + 1'd1;
 			end
@@ -281,7 +306,10 @@ module spi_nvram
 			fetch_nxt  <= 1'b0;
 			dirty_seen <= 1'b0;
 			quiet      <= '0;
+			want_save  <= 1'b0;
+			reask      <= '0;
 			dbg_saves  <= 16'd0;
+			dbg_beats  <= 16'd0;
 		end
 	end
 

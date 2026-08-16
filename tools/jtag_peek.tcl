@@ -223,6 +223,13 @@ if {$mode eq "list"} {
     # that has an .nvm means the file never reached the core.
     set nv [fld $p 299 26]
     if {$nv} { puts [format "nvram in   = %d bytes  (the save file, at load)" $nv] }
+    # 325..340 asks, 341..356 beats served. asks>0 with beats==0 means the core
+    # asked for a save and the host never came for it.
+    set asks  [fld $p 325 16]
+    set beats [fld $p 341 16]
+    if {$asks || $beats} {
+        puts [format "nvram save = %d asks, %d beats served" $asks $beats]
+    }
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits

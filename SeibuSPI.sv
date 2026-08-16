@@ -685,7 +685,7 @@ spi_jtag_peek peek
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
 	.flash_progs(dbg_flash_progs), .flash_erases(dbg_flash_erases),
 	.flash_drops(dbg_flash_drops), .flash_busy(dbg_flash_busy),
-	.nv_bytes(dbg_nv_bytes),
+	.nv_bytes(dbg_nv_bytes), .nv_saves(dbg_nv_saves), .nv_beats(dbg_nv_beats),
 	.sdr_trans(sdr_trans),
 	.ctrl(dbg_ctrl),
 	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
@@ -780,7 +780,7 @@ wire [15:0] nv_wr_din;
 wire  [1:0] nv_wr_be;
 wire        nv_wr_req, nv_wr_active, nv_rd_req, nv_rd_ack;
 wire [63:0] nv_rd_dout;
-wire [15:0] dbg_nv_saves;
+wire [15:0] dbg_nv_saves, dbg_nv_beats;
 wire [25:0] dbg_nv_bytes;
 
 spi_nvram nvram
@@ -795,7 +795,14 @@ spi_nvram nvram
 	.ioctl_index    (ioctl_index),
 	.ioctl_dout     (ioctl_dout),
 	.ioctl_wait     (nv_dl_wait),
-	.rom_busy       (dl_download),
+	// "The ROM IMAGE is still landing", which is NOT the same as "a download is
+	// in progress": ddr_rom_reader passes ioctl_download through for every
+	// index, so `dl_download` alone is high during the nvram's own transfer and
+	// the hold below could never release. It deadlocked Main solid -- ssh alive,
+	// screenshots gone, nvram in = 0. The index term is what makes it mean the
+	// image; during the DDR3 replay dl_index is forced to 0, which is exactly
+	// the window this exists to cover.
+	.rom_busy       (dl_download & (dl_index == 8'd0)),
 	.ioctl_upload       (ioctl_upload),
 	.ioctl_rd           (ioctl_rd),
 	.ioctl_din          (ioctl_din),
@@ -817,6 +824,7 @@ spi_nvram nvram
 	.rd_dout    (nv_rd_dout),
 
 	.dbg_saves  (dbg_nv_saves),
+	.dbg_beats  (dbg_nv_beats),
 	.dbg_bytes  (dbg_nv_bytes)
 );
 

@@ -113,6 +113,10 @@ module spi_jtag_peek
 	// Bytes of the save file the core received. 0 after a load means the file
 	// never arrived, which is a different fault from arriving wrong.
 	input      [25:0] nv_bytes,
+	// Did the core ASK for a save, and did the host ever answer? Zero beats
+	// against non-zero asks is Main not coming; zero asks is the core's fault.
+	input      [15:0] nv_saves,
+	input      [15:0] nv_beats,
 
 	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
 	// because it is a different question from everything on SNDV.
@@ -230,7 +234,7 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (5),
 		.instance_id             ("SNDV"),
-		.probe_width             (325),
+		.probe_width             (357),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
@@ -242,7 +246,8 @@ module spi_jtag_peek
 		          ymf_overrun, ymf_active, snd_f2_wr, snd_f2_rd,
 		          snd_full_max, snd_fifo_peak, spr_gap_max, snd_wait_max,
 		          stall_eip, stall_cs,
-		          flash_progs, flash_erases, flash_drops, flash_busy, nv_bytes}),
+		          flash_progs, flash_erases, flash_drops, flash_busy,
+		          nv_bytes, nv_saves, nv_beats}),
 		.source ()
 	);
 

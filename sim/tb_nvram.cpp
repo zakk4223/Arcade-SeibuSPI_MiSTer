@@ -182,15 +182,28 @@ int main(int argc, char **argv) {
         while (!dut->ioctl_upload_req && waited < 4000) { tick(); waited++; }
         if (!dut->ioctl_upload_req) { printf("FAIL: burst %d raised no request\n", burst); errors++; break; }
         reqs++;
-        // Still up 500 cycles later? A pulse would be long gone.
-        for (int i = 0; i < 500; i++) { tick(); if (!dut->ioctl_upload_req) short_req++; }
+        // Two properties, both of which the hardware needs and neither of
+        // which a one-cycle pulse has: the line stays up long enough that
+        // hps_io's slower clock cannot miss it, and it is RE-PRESENTED, so an
+        // edge lost or consumed at the wrong moment is not the end of it.
+        int high_run = 0, best_run = 0, edges = 0, prev = 1;
+        for (int i = 0; i < 2000; i++) {
+            tick();
+            int now = dut->ioctl_upload_req;
+            if (now && !prev) edges++;
+            if (now) { high_run++; if (high_run > best_run) best_run = high_run; }
+            else high_run = 0;
+            prev = now;
+        }
+        if (best_run < 4) { printf("FAIL: longest request run %d cycles, too short for clk_sys\n", best_run); short_req++; }
+        if (edges < 1)    { printf("FAIL: request never re-presented\n"); short_req++; }
         (void)save(64, 40);                    // Main takes it
         if (dut->ioctl_upload_req) { printf("FAIL: request still up after the upload started\n"); errors++; }
     }
     if (reqs != 3)   { printf("FAIL: %d requests for 3 bursts\n", reqs); errors++; }
-    if (short_req)   { printf("FAIL: request dropped early on %d cycles\n", short_req); errors++; }
+    if (short_req)   { errors += short_req; }
     if (reqs == 3 && !short_req)
-        printf("request: one per settled burst, held as a level until taken\n");
+        printf("request: one per settled burst, held wide and re-presented until taken\n");
 
     delete dut;
     if (errors) { printf("\n%d FAILURES\n", errors); return 1; }
