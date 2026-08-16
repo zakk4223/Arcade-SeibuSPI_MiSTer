@@ -6717,15 +6717,41 @@ menus -- so a picture was the only thing that could have caught it.
 | rfjet  | SXX2C  | copy + BPE       | 2,004,170| 8/8   | sha256 | yes |
 | viprp1 | SXX2C  | BPE + BPE (386)  | not seen | -     | sha256 | yes |
 | senkyu | SXX2C  | BPE + BPE        | 2,026,002| 8/8   | sha256 | yes |
-| ejanhs | SXX2C  | BPE + BPE        | -        | -     | -    | -     |
+| ejanhs | SXX2C  | BPE + BPE        | 2,095,250| 8/8   | sha256 | video and sound only |
 
 Every payload figure that was watched came back exactly as predicted from
 `build_soundflash.py`'s job-table walk, and every save file that was written is
 byte-identical to the image that tool builds -- which is itself bit-exact
 against MAME's own flash nvram.
 
-What is not done: **ejanhs has never been loaded** (its controls do not work
-either, 19.x), viprp1's payload COUNT was missed although its image is verified,
-rdft2's `.nvm` was never sha256-compared, and the pre-flashed variants that ARE
-possible for senkyu and ejanhs are not built -- they would need two
-CODEC_BPE_DPCM parts in one download, which nothing has exercised.
+What is not done: viprp1's payload COUNT was missed although its image is
+verified, rdft2's `.nvm` was never sha256-compared, ejanhs cannot be PLAYED
+(19.10), and the pre-flashed variants that ARE possible for senkyu and ejanhs
+are not built -- they would need two CODEC_BPE_DPCM parts in one download, which
+nothing has exercised.
+
+### 19.10 ejanhs closes the family, and a stray beat closed a hole
+
+The seventh set, first run: the ritual reached **2,095,250 bytes exactly** --
+predicted before it started -- with 32 blocks erased and 0 dropped, all eight
+image windows matching including the seam at 0x155227, and
+`ejanhs-update.nvm` coming back
+**7693933a13108ffc0b283a64d8f3347f76dd28b0771d71f380e140496936341f**, identical
+to the reference. Reloading reads `nvram in = 2097152`, runs no ritual, and
+comes up on the Seibu Kaihatsu title card with **31 voices** sounding.
+
+Its payload is the largest of the seven and leaves 1,902 bytes of erased tail,
+which is also why `verify_flash.py` had to clamp its tail sample: a fixed
++0x1000 from the payload end falls off the end of the region.
+
+**Its controls still do not work** and that is unchanged by this run: E-Jan
+High School reads a mahjong panel through MAME's `ejanhs_encode`, and this core
+wires the standard SPI joystick ports. Video, sound and the flash all work.
+
+**One panel reading was worth chasing:** `nvram save = 0 asks, 1 beats served`
+on its first load. One upload beat served without the core ever asking for a
+save. The cause: `hps_io`'s `ioctl_upload` is GLOBAL, and spi_nvram answered any
+upload rather than only its own index -- so whatever Main was really reading
+would have been answered with sample-flash bytes. Harmless here because nothing
+was reading, and wrong. The upload is gated on the index now, and `tb_nvram`
+asks for an upload at index 3 and requires nothing to come back.

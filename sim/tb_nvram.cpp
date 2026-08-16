@@ -96,8 +96,9 @@ static void load(const std::vector<uint8_t> &img) {
 
 // ----------------------------------------------------------------- save ----
 // Returns what the HPS would write to the .nvm file.
-static std::vector<uint8_t> save(size_t n, int word_cycles) {
+static std::vector<uint8_t> save(size_t n, int word_cycles, int index = 2) {
     std::vector<uint8_t> out;
+    dut->ioctl_index = index;
     dut->ioctl_upload = 1;
     dut->ioctl_rd = 1; tick(); tick();      // the request that comes with 0xAA
     dut->ioctl_rd = 0;
@@ -164,6 +165,16 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < N; i++) if (got[i] != img[i]) bad++;
     if (bad) { printf("FAIL: %d of %zu bytes wrong with a fast host\n", bad, N); errors++; }
     else     printf("save: byte-exact again with the host 3x faster than the SDRAM\n");
+
+    // ---- an upload at someone ELSE's index --------------------------------
+    // hps_io's ioctl_upload is global. If this module answered every upload,
+    // whatever Main was really reading would come back as sample flash.
+    std::vector<uint8_t> other = save(64, 40, 3);
+    int nonzero = 0;
+    for (uint8_t b : other) if (b) nonzero++;
+    if (nonzero) { printf("FAIL: served %d bytes to an upload at index 3\n", nonzero); errors++; }
+    else         printf("index: an upload at index 3 is not answered\n");
+    dut->ioctl_index = 2;
 
     // ---- the save request -------------------------------------------------
     // One pulse per settled burst of flash writes, not one per write.

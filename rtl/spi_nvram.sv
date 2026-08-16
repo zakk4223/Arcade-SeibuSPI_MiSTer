@@ -195,7 +195,12 @@ module spi_nvram
 		end
 
 		// ---- save ----------------------------------------------------
-		if (upload_start && enable) begin
+		// The index matters here as much as on the load side: hps_io's
+		// ioctl_upload is global, so an upload Main starts for anything else
+		// would otherwise be answered with sample-flash bytes. Seen as
+		// `nvram save = 0 asks, 1 beats served` on ejanhs's first load -- one
+		// stray beat, harmless because nothing was reading it, and wrong.
+		if (upload_start && sel) begin
 			up_run    <= 1'b1;
 			up_cnt    <= 26'd0;
 			nxt_valid <= 1'b0;
