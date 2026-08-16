@@ -160,7 +160,6 @@ module spi_nvram
 	// anything at all -- clock domains, a poll landing at the wrong moment --
 	// would otherwise strand the save forever.
 	reg        want_save;
-	reg [QUIET_BITS-1:0] reask;
 
 	always @(posedge clk) begin
 		ioctl_wr_d     <= ioctl_wr;
@@ -250,24 +249,21 @@ module spi_nvram
 		end
 
 		// ---- ask for a save ------------------------------------------
-		// NOT a one-cycle pulse: this runs on clk_ram and hps_io samples on
-		// clk_sys at half the rate, so 8.7 ns can fall between two 17.5 ns
-		// edges. And not a single level either -- hps_io latches the RISING
-		// edge and clears its latch when Main polls, so one edge that is missed
-		// or consumed at the wrong moment strands the save with no way back.
-		// The state is held and re-presented periodically instead.
+		// A LEVEL, raised when the flash settles and cleared when Main starts
+		// the transfer. Not a one-cycle pulse -- this runs on clk_ram and
+		// hps_io samples on clk_sys at half the rate.
+		//
+		// And deliberately NOT re-presented periodically. That was tried, to
+		// guard against hps_io's edge latch being consumed without a transfer
+		// following, and it turns one particular misconfiguration into an
+		// unusable machine: an `-update` MRA with no <nvram> element (or with
+		// DISABLE_NVRAM set) makes Main answer the poll, show "Saving...",
+		// save nothing, and come straight back for more -- an OSD stuck in a
+		// loop. A stranded request is a far better failure than that, and the
+		// case it was guarding against never existed: the save that appeared
+		// to be ignored was an MRA on the machine that predated the element.
 		if (upload_start) want_save <= 1'b0;
-
-		if (want_save) begin
-			reask <= reask + 1'd1;
-			// A short gap in the line every 2^QUIET_BITS cycles is a fresh
-			// rising edge for hps_io, about seven a second on hardware.
-			ioctl_upload_req <= |reask[QUIET_BITS-1:4];
-		end
-		else begin
-			reask            <= '0;
-			ioctl_upload_req <= 1'b0;
-		end
+		ioctl_upload_req <= want_save && !upload_start;
 
 		if (up_run && ioctl_rd_rise) dbg_beats <= dbg_beats + 16'd1;
 
@@ -307,7 +303,6 @@ module spi_nvram
 			dirty_seen <= 1'b0;
 			quiet      <= '0;
 			want_save  <= 1'b0;
-			reask      <= '0;
 			dbg_saves  <= 16'd0;
 			dbg_beats  <= 16'd0;
 		end

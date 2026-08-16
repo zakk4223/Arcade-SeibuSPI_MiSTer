@@ -6475,3 +6475,44 @@ Reverting to a pulse fails it on 1,500 cycles.
 hardware, twice. The evidence that something was wrong was a file that did not
 exist -- an absence, on the one set that happened to be tested second. A test
 that only ever ran rdft would have called this feature finished.
+
+### 19.2 It was a file I forgot to copy, and I chased a clock-domain ghost for two builds
+
+rfjet's save never happened, twice, and the reason was not in the core at all:
+
+    MRA on the machine           real <nvram index=...>
+    rdft-update.mra   (01:57)          1
+    rdft2-update.mra  (23:54)          0
+    rfjet-update.mra  (23:54)          0
+
+The `-update` MRAs were written before persistence existed and updated when it
+landed -- and only rdft's was re-copied to the MiSTer. With no element,
+Main's `nvram_idx`/`nvram_size` stay zero and `arcade_nvm_save()` returns without
+doing anything: no file, no upload, nothing to see.
+
+**A grep that looked like it checked this did not.** `grep -c "<nvram"` matched
+on all three, because the stale files contain the words `<nvram> element` inside
+a comment explaining that persistence was NOT implemented yet. The element has
+to be matched as `nvram index=`, not as the word.
+
+**What it cost:** two build-and-deploy cycles spent on a clock-domain theory
+that was wrong. The reasoning was seductive -- one set worked, another did not,
+nothing differed but timing -- and it was answered by an instrument in one
+reading: `1 asks, 0 beats`. The core asked; the host never came. That pointed
+outside the core immediately, where two builds of staring at CDC had not.
+
+**And the "robustness" added on the way was worse than the bug.** Re-presenting
+the request periodically, to guard against hps_io's edge latch being consumed
+without a transfer, turns exactly this misconfiguration into an unusable
+machine: Main answers the poll, shows "Saving...", saves nothing, and comes
+straight back for more -- an OSD stuck in a loop, which is how the user found
+it. It is gone. The request is a level, raised when the flash settles and
+cleared when the transfer starts, and a stranded request is a far better failure
+than a wedged menu.
+
+`tb_nvram` now asserts both halves of that: held until taken, and NOT renewed on
+its own.
+
+**The rule this earns:** when one instance works and another does not, check
+what is actually deployed to each before theorising about why they differ. And
+match a config element by its syntax, not by a word that also appears in prose.
