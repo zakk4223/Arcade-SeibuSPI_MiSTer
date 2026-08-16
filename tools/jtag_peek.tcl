@@ -177,6 +177,11 @@ if {$mode eq "list"} {
     puts "fifo reads = [fld $p 16 16]  (commands the Z80 took from the 386)"
     puts "ymf writes = [fld $p 32 16]"
     puts "rom stalls = [fld $p 48 16]  (line-buffer misses that hit SDRAM)"
+    # Which SIDE of the Z80 -> 386 FIFO is stuck. The 386 blocks at 0x26D65A
+    # waiting for a reply; pushes without pops means the 386 is not reading
+    # 0x680, pops without pushes means the Z80 never sent one. Printed because
+    # the sample-flash bring-up needed exactly this and had to guess (18.x).
+    puts "f2 push/pop= [fld $p 96 16]/[fld $p 112 16]  (Z80 -> 386 replies sent/taken)"
     puts "voices     = [fld $p 80 16]  (PCM + FM slots sounding on the last sample)"
     puts "synth ovrun= [fld $p 64 16]  (samples the engine could not finish in time)"
     # These two are high-water marks, so unlike everything above them they mean

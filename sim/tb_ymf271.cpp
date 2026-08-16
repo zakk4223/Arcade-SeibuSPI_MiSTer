@@ -1210,9 +1210,34 @@ static void test_flash_both_chips() {
                (int)dut->dbg_drops);
         errors++;
     }
+    // ---- sixteen erase pairs back to back, per chip ----------------------
+    // What the updater really sends: every block of both chips, with nothing
+    // waiting in between (PLAN.md 18.1). A single pending block per chip lets
+    // each new pair restart the running sweep, and only the last block of each
+    // survives -- so this asks for all 32 and counts them.
+    for (uint32_t i = 0; i < PCM_SIZE; i++) rom[i] = (uint8_t)(i * 91 + 7);
+    uint16_t erases0 = dut->dbg_erases;
+    for (int blk = 0; blk < 16; blk++) {
+        for (int chip = 0; chip < 2; chip++) {
+            uint32_t a = ((uint32_t)chip << 20) | ((uint32_t)blk << 16);
+            ext_seek(a - 1, false);
+            ext_put(0x20);
+            ext_put(0xD0);
+        }
+    }
+    // Every sweep is 32,768 writes; 32 of them at ~15 cycles each is a while.
+    for (int i = 0; i < 40000 && dut->dbg_busy; i++) run(500);
+    if (dut->dbg_busy) { printf("FAIL: still erasing after the whole queue\n"); errors++; }
+    int done = (int)dut->dbg_erases - (int)erases0;
+    if (done != 32) { printf("FAIL: %d blocks erased, want 32\n", done); errors++; }
+    bad = 0;
+    for (uint32_t i = 0; i < PCM_SIZE; i++) if (rom[i] != 0xFF) bad++;
+    if (bad) { printf("FAIL: %d bytes of the two chips are not erased\n", bad); errors++; }
+
     dut->flash_en = 0;
     printf("both chips: 2 blocks erased concurrently, %d bytes programmed "
-           "unpolled, %d drops\n", (int)sizeof(payload), (int)dut->dbg_drops);
+           "unpolled, then all %d blocks queued back to back, %d drops\n",
+           (int)sizeof(payload), done, (int)dut->dbg_drops);
 }
 
 // A flash write has to retire the sample-line cache, and this is the only test

@@ -124,6 +124,13 @@ module spi_soundflash
 	// One erase sweep PER CHIP, because the updater runs both at once. They
 	// share the single SDRAM write port by alternating, `er_turn` picking who
 	// goes next; a program write jumps ahead of both.
+	//
+	// A QUEUE, not a single block: the updater sends all sixteen block-erase
+	// pairs of a chip back to back without waiting, because MAME's intelfsh
+	// erases instantly and only its STATUS is slow (a 1-second timer). One
+	// pending block per chip would let each new pair restart the sweep and
+	// only the last block would ever finish. Sixteen blocks, sixteen bits.
+	reg [15:0] er_q     [0:1];    // blocks still to erase, bit per block
 	reg  [1:0] er_run;
 	reg  [3:0] er_block [0:1];
 	reg [14:0] er_word  [0:1];    // 32,768 halfwords = one 64 KB block
@@ -147,8 +154,8 @@ module spi_soundflash
 	// A chip is busy while its sweep is running, its program slot is full, or
 	// its write is in flight. NOTHING is refused because a chip is busy -- see
 	// the command port.
-	assign dbg_busy = {er_run[1] | pg_pend[1] | (wr_pend &  wr_chip),
-	                   er_run[0] | pg_pend[0] | (wr_pend & ~wr_chip)};
+	assign dbg_busy = {er_run[1] | (|er_q[1]) | pg_pend[1] | (wr_pend &  wr_chip),
+	                   er_run[0] | (|er_q[0]) | pg_pend[0] | (wr_pend & ~wr_chip)};
 
 	// The identifier: manufacturer 0x89 (Intel), device 0xA2 (28F008SA). Bit 0
 	// of the address picks between them, which is what a x8 part does.
@@ -171,6 +178,21 @@ module spi_soundflash
 	// not waiting on it, while a program slot has to be free before the next
 	// byte arrives.
 	wire       pg_pick = pg_pend[0] ? 1'b0 : 1'b1;
+
+	// The next queued block of each chip, lowest first. Order does not matter
+	// to the updater -- it never reads back before programming -- so lowest is
+	// simply the cheapest to pick.
+	function [3:0] lowest;
+		input [15:0] q;
+		integer j;
+		begin
+			lowest = 4'd0;
+			for (j = 15; j >= 0; j = j - 1) if (q[j]) lowest = j[3:0];
+		end
+	endfunction
+	wire [3:0] er_next [0:1];
+	assign er_next[0] = lowest(er_q[0]);
+	assign er_next[1] = lowest(er_q[1]);
 
 	integer k;
 	always @(posedge clk) begin
@@ -211,8 +233,14 @@ module spi_soundflash
 			wr_chip  <= er_pick;
 			er_turn  <= ~er_turn;
 			if (&er_word[er_pick]) begin
-				er_run[er_pick] <= 1'b0;
-				dbg_erases      <= dbg_erases + 16'd1;
+				// Block done. Take the next one out of this chip's queue, or
+				// stop if it is empty.
+				dbg_erases <= dbg_erases + 16'd1;
+				if (|er_q[er_pick]) begin
+					er_block[er_pick] <= er_next[er_pick];
+					er_q[er_pick][er_next[er_pick]] <= 1'b0;
+				end
+				else er_run[er_pick] <= 1'b0;
 			end
 			er_word[er_pick] <= er_word[er_pick] + 15'd1;
 		end
@@ -241,11 +269,16 @@ module spi_soundflash
 				// D0 confirms; anything else is an aborted command sequence,
 				// which the part reports rather than acting on.
 				if (din == 8'hD0) begin
-					er_run[sel]   <= 1'b1;
-					er_block[sel] <= addr[19:16];
-					er_word[sel]  <= 15'd0;
-					mode[sel]     <= M_STATUS;
-					status[sel]   <= 8'h80;
+					// Idle: start on this block. Busy: queue it, because
+					// restarting the running sweep would abandon it.
+					if (er_run[sel]) er_q[sel][addr[19:16]] <= 1'b1;
+					else begin
+						er_run[sel]   <= 1'b1;
+						er_block[sel] <= addr[19:16];
+						er_word[sel]  <= 15'd0;
+					end
+					mode[sel]   <= M_STATUS;
+					status[sel] <= 8'h80;
 				end
 				else begin
 					mode[sel]   <= M_STATUS;
@@ -278,6 +311,8 @@ module spi_soundflash
 			wr_chip    <= 1'b0;
 			er_run     <= 2'd0;
 			er_turn    <= 1'b0;
+			er_q[0]    <= 16'd0;
+			er_q[1]    <= 16'd0;
 			pg_pend    <= 2'd0;
 			dirty      <= 1'b0;
 			dbg_progs  <= 32'd0;
