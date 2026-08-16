@@ -50,7 +50,18 @@ module tb_ymf_top
 	output     [31:0] dbg_progs,
 	output     [15:0] dbg_erases,
 	output     [15:0] dbg_drops,
-	output      [1:0] dbg_busy
+	output      [1:0] dbg_busy,
+
+	// The watch (PLAN.md 19.11), brought out so the testbench can check the
+	// INSTRUMENT before hardware is asked to trust it. The replayed page
+	// contains the watched byte, so a watch that counts nothing here would
+	// have read as "the write was never issued" on the board.
+	output      [7:0] dbg_w_progs,
+	output      [1:0] dbg_w_be,
+	output      [7:0] dbg_w_data,
+	output      [7:0] dbg_w_erases,
+	output            dbg_w_er_after,
+	output     [55:0] dbg_w_trace
 );
 
 	wire        ext_wr;
@@ -113,7 +124,14 @@ module tb_ymf_top
 		.dbg_progs  (dbg_progs),
 		.dbg_erases (dbg_erases),
 		.dbg_drops  (dbg_drops),
-		.dbg_busy   (dbg_busy)
+		.dbg_busy   (dbg_busy),
+
+		.dbg_w_progs    (dbg_w_progs),
+		.dbg_w_be       (dbg_w_be),
+		.dbg_w_data     (dbg_w_data),
+		.dbg_w_erases   (dbg_w_erases),
+		.dbg_w_er_after (dbg_w_er_after),
+		.dbg_w_trace    (dbg_w_trace)
 	);
 
 	/* verilator lint_off UNUSEDSIGNAL */

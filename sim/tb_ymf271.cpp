@@ -1487,6 +1487,39 @@ static void test_flash_replay() {
         printf("replay: 256 bytes of rdft2's page 0x2900 match MAME byte for byte\n");
     }
 
+    // ---- the instrument itself -------------------------------------------
+    // The watch is what hardware will be asked to believe, so check it here
+    // where the answer is already known. This page programs the watched
+    // halfword twice: 0x29FE on the low lane, then 0x29FF on the high one.
+    if (dut->dbg_w_progs != 2 || dut->dbg_w_be != 0x2 || dut->dbg_w_data != 0xFF) {
+        printf("FAIL: watch saw %u writes, last be=%X data=%02X; want 2, be=2, FF\n",
+               dut->dbg_w_progs, dut->dbg_w_be, dut->dbg_w_data);
+        errors++;
+    } else if (dut->dbg_w_erases || dut->dbg_w_er_after) {
+        printf("FAIL: watch saw %u erases of a halfword nothing erased\n",
+               dut->dbg_w_erases);
+        errors++;
+    } else {
+        // Oldest first: 0x29FC low, 0x29FC high, 0x29FE low, 0x29FE high --
+        // the two halfwords either side of the byte, both lanes each.
+        static const uint32_t want[4] = {0x9FC << 2 | 1, 0x9FC << 2 | 2,
+                                         0x9FE << 2 | 1, 0x9FE << 2 | 2};
+        uint64_t tr = dut->dbg_w_trace;
+        int trbad = 0;
+        for (int i = 3; i >= 0; i--) {
+            if ((uint32_t)(tr & 0x3FFF) != want[i]) trbad++;
+            tr >>= 14;
+        }
+        if (trbad) {
+            printf("FAIL: watch trace %014llX does not walk 29FC,29FC,29FE,29FE\n",
+                   (unsigned long long)dut->dbg_w_trace);
+            errors++;
+        } else {
+            printf("watch: 2 writes to the watched halfword, last be=2 data=FF, "
+                   "0 erases, trace walks its neighbours\n");
+        }
+    }
+
     // Nothing may land ABOVE the page either. A datum that misses its address
     // by a carry goes 256 bytes up, where the updater's next page would later
     // overwrite it -- which is precisely why hardware showed only ONE wrong

@@ -103,8 +103,40 @@ module spi_soundflash
 	output reg [31:0] dbg_progs,
 	output reg [15:0] dbg_erases,
 	output reg [15:0] dbg_drops,
-	output      [1:0] dbg_busy
+	output      [1:0] dbg_busy,
+
+	// ---- the watch (PLAN.md 19.11) ------------------------------------
+	// rdft2's flash comes out with byte 0x29FE erased where MAME holds 0xFE:
+	// one byte in two megabytes, reproducibly, on two builds. Everything the
+	// counters above can see says the write happened -- `dbg_progs` counts at
+	// ISSUE and matches MAME's command total exactly, `dbg_drops` is zero --
+	// and replaying the updater's real writes through this module reproduces
+	// MAME byte for byte. So the question is no longer whether a write was
+	// issued but WHAT was issued, and whether the other end got it.
+	//
+	// These watch one halfword. `w_progs` counts program writes issued to it,
+	// `w_be`/`w_data` hold the last one's byte-enable and datum: a write that
+	// lands one byte high is the SAME halfword with the other lane, so a wrong
+	// `w_be` is the whole hypothesis in one field. `w_erases` and
+	// `w_er_after` cover the sweep -- an erase of that halfword AFTER it was
+	// programmed would put the erased value back.
+	//
+	// `w_trace` is the four program writes from WATCH_TRIG onwards, as
+	// {addr[11:0], be} each, oldest first: if the byte was issued somewhere
+	// else entirely, the neighbours say where.
+	output reg  [7:0] dbg_w_progs,
+	output reg  [1:0] dbg_w_be,
+	output reg  [7:0] dbg_w_data,
+	output reg  [7:0] dbg_w_erases,
+	output reg        dbg_w_er_after,
+	output reg [55:0] dbg_w_trace
 );
+
+// Byte addresses within the 2 MB sample region. WATCH is the byte in question;
+// the compare is on its halfword, since that is what a write addresses.
+// WATCH_TRIG is two bytes below, so the trace starts one write early.
+parameter [20:0] WATCH      = 21'h029FE;
+parameter [20:0] WATCH_TRIG = 21'h029FC;
 
 `include "spi_defs.vh"
 
@@ -179,6 +211,15 @@ module spi_soundflash
 	// byte arrives.
 	wire       pg_pick = pg_pend[0] ? 1'b0 : 1'b1;
 
+	// The byte address a program write is about to go to, and the halfword the
+	// watch compares against. Taken from the same expressions the write port
+	// is built from below, so this cannot agree with a broken address.
+	wire [20:0] pg_byte  = {pg_pick, pg_addr[pg_pick], 1'b0};
+	wire        pg_watch = (pg_byte == {WATCH[20:1], 1'b0});
+	wire        pg_trig  = (pg_byte == {WATCH_TRIG[20:1], 1'b0});
+	reg   [2:0] w_tr_n;      // trace entries still to take
+	reg         w_tr_armed;
+
 	// The next queued block of each chip, lowest first. Order does not matter
 	// to the updater -- it never reads back before programming -- so lowest is
 	// simply the cheapest to pick.
@@ -223,6 +264,21 @@ module spi_soundflash
 			wr_chip  <= pg_pick;
 			pg_pend[pg_pick] <= 1'b0;
 			dbg_progs <= dbg_progs + 32'd1;
+
+			// The watch, on the values actually being sent.
+			if (pg_watch) begin
+				dbg_w_progs <= dbg_w_progs + 8'd1;
+				dbg_w_be    <= pg_lane[pg_pick] ? 2'b10 : 2'b01;
+				dbg_w_data  <= pg_data[pg_pick];
+			end
+			if (pg_trig) w_tr_armed <= 1'b1;
+			if (pg_trig || w_tr_armed) begin
+				if (|w_tr_n) begin
+					dbg_w_trace <= {dbg_w_trace[41:0], pg_byte[11:0],
+					                pg_lane[pg_pick] ? 2'b10 : 2'b01};
+					w_tr_n <= w_tr_n - 3'd1;
+				end
+			end
 		end
 		else if (|er_run) begin
 			sdr_addr <= SDR_PCM_BASE + {5'd0, er_addr};
@@ -232,6 +288,13 @@ module spi_soundflash
 			wr_pend  <= 1'b1;
 			wr_chip  <= er_pick;
 			er_turn  <= ~er_turn;
+			// A sweep over the watched halfword, and whether it came after the
+			// byte was programmed -- which is the one way an erase could put
+			// the erased value back without eating the rest of the block too.
+			if (er_addr == {WATCH[20:1], 1'b0}) begin
+				dbg_w_erases <= dbg_w_erases + 8'd1;
+				if (|dbg_w_progs) dbg_w_er_after <= 1'b1;
+			end
 			if (&er_word[er_pick]) begin
 				// Block done. Take the next one out of this chip's queue, or
 				// stop if it is empty.
@@ -318,6 +381,14 @@ module spi_soundflash
 			dbg_progs  <= 32'd0;
 			dbg_erases <= 16'd0;
 			dbg_drops  <= 16'd0;
+			dbg_w_progs    <= 8'd0;
+			dbg_w_be       <= 2'd0;
+			dbg_w_data     <= 8'd0;
+			dbg_w_erases   <= 8'd0;
+			dbg_w_er_after <= 1'b0;
+			dbg_w_trace    <= 56'd0;
+			w_tr_n         <= 3'd4;
+			w_tr_armed     <= 1'b0;
 			for (k = 0; k < 2; k = k + 1) begin
 				mode[k]     <= M_ARRAY;
 				status[k]   <= 8'h80;

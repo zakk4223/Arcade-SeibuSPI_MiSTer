@@ -66,6 +66,14 @@ module spi_sound
 	// Toggles once per store into the sample flash. spi_nvram uses it to know
 	// when there is something worth saving.
 	output            flash_dirty_o,
+	// The watch (PLAN.md 19.11), straight out of spi_soundflash.
+	output      [7:0] dbg_flash_w_progs,
+	output      [1:0] dbg_flash_w_be,
+	output      [7:0] dbg_flash_w_data,
+	output      [7:0] dbg_flash_w_erases,
+	output            dbg_flash_w_er_after,
+	output     [55:0] dbg_flash_w_trace,
+
 	output     [31:0] dbg_flash_progs,
 	output     [15:0] dbg_flash_erases,
 	output     [15:0] dbg_flash_drops,
@@ -545,6 +553,12 @@ module spi_sound
 		.sdr_ack    (flash_sdr_ack),
 
 		.dirty      (flash_dirty),
+		.dbg_w_progs    (dbg_flash_w_progs),
+		.dbg_w_be       (dbg_flash_w_be),
+		.dbg_w_data     (dbg_flash_w_data),
+		.dbg_w_erases   (dbg_flash_w_erases),
+		.dbg_w_er_after (dbg_flash_w_er_after),
+		.dbg_w_trace    (dbg_flash_w_trace),
 		.dbg_progs  (dbg_flash_progs),
 		.dbg_erases (dbg_flash_erases),
 		.dbg_drops  (dbg_flash_drops),

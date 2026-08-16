@@ -230,6 +230,42 @@ if {$mode eq "list"} {
     if {$asks || $beats} {
         puts [format "nvram save = %d asks, %d beats served" $asks $beats]
     }
+
+    # ---- the watch (PLAN.md 19.11) ------------------------------------
+    # One halfword of the sample flash -- byte 0x29FE, the one rdft2 comes back
+    # erased -- seen at BOTH ends of the clk_sys -> clk_ram handoff. 367..393
+    # is what spi_soundflash issued, 450..493 what spi_sdr_arb4 latched.
+    #
+    # Read it as: the two must agree, and both must show ONE low-lane write of
+    # 0xFE. A high-lane write means the byte went to 0x29FF, where the next
+    # program overwrites it -- which is the only way to lose exactly one byte
+    # and still issue the right number of writes.
+    set fwn  [fld $p 367 8]
+    set fwbe [fld $p 375 2]
+    set fwd  [fld $p 377 8]
+    set fwe  [fld $p 385 8]
+    set fwea [fld $p 393 1]
+    set awn  [fld $p 450 8]
+    set awbe [fld $p 458 2]
+    set awd  [fld $p 460 8]
+    set awt  [fld $p 468 26]
+    if {$fwn || $awn || $awt} {
+        puts [format "watch flash= %d writes, last be=%d data=%02X, %d erases%s" \
+              $fwn $fwbe $fwd $fwe [expr {$fwea ? " AFTER a program (!)" : ""}]]
+        puts [format "watch arb  = %d writes, last be=%d data=%02X, %d taken on d total" \
+              $awn $awbe $awd $awt]
+        # Four entries of {addr[11:0], be}: the writes from two bytes below the
+        # watch onwards, so a byte issued somewhere else has its neighbours to
+        # place it against. The shift register puts the NEWEST in the low bits,
+        # and the probe is read most-significant first, so walking i upwards
+        # walks it oldest to newest.
+        set tr ""
+        for {set i 0} {$i < 4} {incr i} {
+            set e [fld $p [expr {394 + $i*14}] 14]
+            append tr [format " %03X/%d" [expr {$e >> 2}] [expr {$e & 3}]]
+        }
+        puts "watch trace=$tr  (addr/be, oldest first)"
+    }
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits

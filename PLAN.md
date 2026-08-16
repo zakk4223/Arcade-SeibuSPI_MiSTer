@@ -6834,3 +6834,73 @@ emitted the wrong one.
 Meanwhile the machine has a correct rdft2 save: the reference image was copied
 over `rdft2-update.nvm` and loads clean. The bad one is kept beside it as
 `rdft2-update.nvm.bad`.
+
+### 19.12  The watch: the write is issued, latched, and never lands
+
+19.11 left one question: the core issues the right number of writes and one
+byte does not arrive, so is the request wrong or is what happens to it wrong?
+The instrument is a watch on ONE halfword -- byte 0x29FE, the byte rdft2 loses
+-- at BOTH ends of the clk_sys -> clk_ram handoff. `spi_soundflash` records what
+it issues, `spi_sdr_arb4` records what it latches, and a four-entry trace of
+{address, byte-enable} from two bytes below the watch says where a misplaced
+byte went instead.
+
+It was checked in simulation before hardware was asked to believe it: the
+replayed page contains the watched byte, and `tb_ymf271` requires the watch to
+see two writes, the right lanes, no erases, and a trace that walks the
+neighbours. A watch that counted nothing would have read on the board as "the
+write was never issued".
+
+**First ritual on the instrumented build: the byte was CORRECT.** Which is its
+own finding -- the fault is not deterministic, and the two earlier observations
+were on two builds that both happened to lose it. **Second ritual, same build,
+same everything:**
+
+```
+flash prog = 2028340 bytes, 32 blocks erased, 0 DROPPED
+watch flash= 2 writes, last be=2 data=FF, 1 erases
+watch arb  = 2 writes, last be=2 data=FF, 3076916 taken on d total
+watch trace= 9FC/1 9FC/2 9FE/1 9FE/2   (addr/be, oldest first)
+02829F8    FFFF0000FEFDFE00      byte 0x29FE erased
+MAME:      FFFE0000FEFDFE00
+```
+
+Read that carefully, because it is the whole answer:
+
+* The trace's third entry is **9FE/1** -- the controller issued a write to the
+  right halfword on the LOW lane, which is byte 0x29FE itself. Not one byte
+  high, not one lane across, not 256 bytes away.
+* The arbiter latched two writes to that halfword, on its own clock, and
+  **3,076,916** taken on port `d` in total -- exactly 2,028,340 programs plus
+  1,048,576 erase writes. Nothing was dropped or duplicated in the handoff.
+* The one erase of that halfword is flagged as coming BEFORE any program to it,
+  so the sweep is now excluded by measurement rather than by argument.
+* And the byte is still erased in memory.
+
+**The write is issued correctly, received correctly, and never reaches SDRAM.**
+The fault is downstream of `spi_sdr_arb4`.
+
+**Where that leaves it.** ch3 is the lowest-priority channel in sdram.sv and its
+writes carry the byte-enables as DQM on SDRAM_A[12:11], captured at the moment
+the request is taken; all of that reads correctly. What does not is the gap
+after the write. `STATE_RW1` issues CMD_WRITE with auto-precharge and the state
+machine reaches `STATE_IDLE` three clocks later, so the next ACTIVE can go out
+26 ns after the write. tWR + tRP on this part is nearer 33 ns. For a different
+bank that is fine; for the SAME bank it is a violation, and the write is cut
+short by its own precharge.
+
+That fits everything: it is rare (it needs the next ACTIVE to hit the same bank
+in that window), it is intermittent rather than deterministic, and it bites the
+sample flash and nothing else -- ch5 reads the sample region continuously while
+ch3 writes it, which is the only place in this core where sustained writes and
+reads land in the same banks. The nvram load writes the same addresses through
+the same channel and never loses a byte, and it runs with the board held in
+reset and every other channel quiet.
+
+It is a hypothesis, not a measurement. The instrument that would settle it
+counts, inside sdram.sv, the ch3 writes actually issued to the watched address
+and what the state machine did in the three clocks after each.
+
+**A caveat on every "clean" run above:** the check is ONE byte. A ritual that
+gets 0x29FE right may have lost some other byte, and only comparing the whole
+save file would show it -- which needs the OSD to be opened by hand.

@@ -118,6 +118,21 @@ module spi_jtag_peek
 	input      [15:0] nv_saves,
 	input      [25:0] nv_beats,
 
+	// The watch (PLAN.md 19.11): one halfword of the sample flash, seen from
+	// BOTH ends of the clk_sys -> clk_ram handoff. `fw_*` is what
+	// spi_soundflash issued, `aw_*` is what spi_sdr_arb4 latched. They differ
+	// only if the handoff is where the byte is being lost.
+	input       [7:0] fw_progs,
+	input       [1:0] fw_be,
+	input       [7:0] fw_data,
+	input       [7:0] fw_erases,
+	input             fw_er_after,
+	input      [55:0] fw_trace,
+	input       [7:0] aw_n,
+	input       [1:0] aw_be,
+	input       [7:0] aw_data,
+	input      [25:0] aw_total,
+
 	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
 	// because it is a different question from everything on SNDV.
 	input      [94:0] sdr_trans,
@@ -234,7 +249,7 @@ module spi_jtag_peek
 		.sld_auto_instance_index ("YES"),
 		.sld_instance_index      (5),
 		.instance_id             ("SNDV"),
-		.probe_width             (367),
+		.probe_width             (494),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
@@ -247,7 +262,9 @@ module spi_jtag_peek
 		          snd_full_max, snd_fifo_peak, spr_gap_max, snd_wait_max,
 		          stall_eip, stall_cs,
 		          flash_progs, flash_erases, flash_drops, flash_busy,
-		          nv_bytes, nv_saves, nv_beats}),
+		          nv_bytes, nv_saves, nv_beats,
+		          fw_progs, fw_be, fw_data, fw_erases, fw_er_after, fw_trace,
+		          aw_n, aw_be, aw_data, aw_total}),
 		.source ()
 	);
 

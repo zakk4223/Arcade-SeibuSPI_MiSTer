@@ -61,14 +61,39 @@ module spi_sdr_arb4
 	input      [63:0] m_dout,
 
 	output reg [63:0] a_dout,
-	output reg [63:0] b_dout
+	output reg [63:0] b_dout,
+
+	// ---- the other half of the watch (PLAN.md 19.11) ------------------
+	// spi_soundflash watches what it ISSUES; this watches what arrives. The
+	// two modules are on different clocks -- the flash on clk_sys, this on
+	// clk_ram -- so `d_addr`, `d_din` and `d_be` change on the same source
+	// edge as `d_req` and are sampled here on a different one. Recording what
+	// this actually latched is what separates a write issued wrong from a
+	// write received wrong.
+	//
+	// `dbg_d_total` counts every write taken on `d`, which must equal the
+	// flash's own programs plus its erase writes: a request that was never
+	// picked up at all shows here and nowhere else.
+	output reg  [7:0] dbg_d_watch_n,
+	output reg  [1:0] dbg_d_watch_be,
+	output reg  [7:0] dbg_d_watch_data,
+	output reg [25:0] dbg_d_total
 );
+
+// The same halfword spi_soundflash's WATCH names, as a full SDRAM address:
+// SDR_PCM_BASE + 0x29FE. Kept as a parameter rather than an include so this
+// module stays free of the memory map it only ever forwards.
+parameter [25:0] WATCH_ADDR = 26'h028_29FE;
 
 	localparam [2:0] S_IDLE = 3'd0, S_A = 3'd1, S_B = 3'd2, S_C = 3'd3,
 	                 S_D    = 3'd4;
 	reg [2:0] state = S_IDLE;
 
 	initial begin
+		dbg_d_watch_n    = 8'd0;
+		dbg_d_watch_be   = 2'd0;
+		dbg_d_watch_data = 8'd0;
+		dbg_d_total      = 26'd0;
 		a_ack  = 1'b0;
 		b_ack  = 1'b0;
 		c_ack  = 1'b0;
@@ -112,6 +137,15 @@ module spi_sdr_arb4
 					m_rnw  <= 1'b0;
 					m_req  <= ~m_req;
 					state  <= S_D;
+					// Sampled in the same cycle, from the same wires that
+					// feed m_*, so this records what was captured and not
+					// what was meant.
+					dbg_d_total <= dbg_d_total + 26'd1;
+					if (d_addr == WATCH_ADDR && d_be != 2'b11) begin
+						dbg_d_watch_n    <= dbg_d_watch_n + 8'd1;
+						dbg_d_watch_be   <= d_be;
+						dbg_d_watch_data <= d_be[0] ? d_din[7:0] : d_din[15:8];
+					end
 				end
 
 			S_A: if (m_ack == m_req) begin

@@ -689,6 +689,11 @@ spi_jtag_peek peek
 	.flash_progs(dbg_flash_progs), .flash_erases(dbg_flash_erases),
 	.flash_drops(dbg_flash_drops), .flash_busy(dbg_flash_busy),
 	.nv_bytes(dbg_nv_bytes), .nv_saves(dbg_nv_saves), .nv_beats(dbg_nv_beats),
+	.fw_progs(dbg_flash_w_progs), .fw_be(dbg_flash_w_be),
+	.fw_data(dbg_flash_w_data),   .fw_erases(dbg_flash_w_erases),
+	.fw_er_after(dbg_flash_w_er_after), .fw_trace(dbg_flash_w_trace),
+	.aw_n(dbg_arb_w_n), .aw_be(dbg_arb_w_be), .aw_data(dbg_arb_w_data),
+	.aw_total(dbg_arb_d_total),
 	.sdr_trans(sdr_trans),
 	.ctrl(dbg_ctrl),
 	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
@@ -706,6 +711,15 @@ wire        z80dl_sdr_req, z80dl_sdr_ack;
 wire [31:0] dbg_flash_progs;
 wire [15:0] dbg_flash_erases, dbg_flash_drops;
 wire  [1:0] dbg_flash_busy;
+// The watch (PLAN.md 19.11): one halfword of the sample flash, from both ends
+// of the clk_sys -> clk_ram handoff.
+wire  [7:0] dbg_flash_w_progs, dbg_flash_w_data, dbg_flash_w_erases;
+wire  [1:0] dbg_flash_w_be;
+wire        dbg_flash_w_er_after;
+wire [55:0] dbg_flash_w_trace;
+wire  [7:0] dbg_arb_w_n, dbg_arb_w_data;
+wire  [1:0] dbg_arb_w_be;
+wire [25:0] dbg_arb_d_total;
 wire [25:0] flash_sdr_addr;
 wire [15:0] flash_sdr_din;
 wire  [1:0] flash_sdr_be;
@@ -737,7 +751,11 @@ spi_sdr_arb4 ch3_arb
 	.m_addr (arb_addr),     .m_req (arb_req),     .m_ack (arb_ack),
 	.m_din  (arb_din),      .m_be  (arb_be),      .m_rnw (arb_rnw),
 	.m_dout (sdr_rw_dout),
-	.a_dout (sdr_z80_dout), .b_dout (peek_dout)
+	.a_dout (sdr_z80_dout), .b_dout (peek_dout),
+	.dbg_d_watch_n    (dbg_arb_w_n),
+	.dbg_d_watch_be   (dbg_arb_w_be),
+	.dbg_d_watch_data (dbg_arb_w_data),
+	.dbg_d_total      (dbg_arb_d_total)
 );
 
 // ch3's owners in order of life: the ROM loader, the checker, then the board's
@@ -942,6 +960,12 @@ spi_top spi_top
 	.flash_sdr_be   (flash_sdr_be),
 	.flash_sdr_req  (flash_sdr_req),
 	.flash_sdr_ack  (flash_sdr_ack),
+	.dbg_flash_w_progs    (dbg_flash_w_progs),
+	.dbg_flash_w_be       (dbg_flash_w_be),
+	.dbg_flash_w_data     (dbg_flash_w_data),
+	.dbg_flash_w_erases   (dbg_flash_w_erases),
+	.dbg_flash_w_er_after (dbg_flash_w_er_after),
+	.dbg_flash_w_trace    (dbg_flash_w_trace),
 	.dbg_flash_progs  (dbg_flash_progs),
 	.dbg_flash_erases (dbg_flash_erases),
 	.dbg_flash_drops  (dbg_flash_drops),
