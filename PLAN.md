@@ -6224,18 +6224,43 @@ and MAME charges nothing for the 386/FIFO/Z80 round trip that actually paces
 this. Real hardware takes minutes for a different reason (flash program time),
 so the figures coincide by accident.
 
-### 18.5 What is still not tested
+### 18.5 IT PLAYS. The cartridge flashed itself and then booted from it
 
-**Whether it PLAYS afterwards.** The game halts and wants a power cycle. A
-`load_core` re-downloads the blank flash and starts the ritual again, so the
-test needs a reset that keeps SDRAM -- the OSD's own Reset item, by hand at the
-machine, or the save-file work in 17.6. `echo reset > /dev/MiSTer_cmd` is not a
-command; it is accepted by the shell and ignored, and the screenshot's md5 is
-unchanged either side of it.
+Reset from the OSD -- which keeps SDRAM, where `load_core` would re-download the
+blank flash and start over -- and rdft comes up in **attract with sound**: the
+title logo over a live demo, rock terrain, shot patterns and explosions, INSERT
+COIN(S), the copyright line. 94 KB of screenshot, against the 13.7 KB the halt
+screen was.
 
-**Persistence**, which is what makes that moot: 17.6's `ioctl_upload` plumbing
-plus an `<nvram>` element. Until then every boot of an `-update` MRA is a
-six-minute ritual ending in a halt screen.
+    voices = 21   synth ovrun = 0
+
+Twenty-one PCM and FM slots sounding, which means the samples being played are
+the ones the game programmed into its own flash a few minutes earlier. The
+region's eight sample windows still match `build_soundflash.py` after the reset.
+
+**And the updater was SKIPPED**, on a core still wired to update mode: the
+panel's flash counters read 0 erases, 0 bytes, 0 drops on this boot. That is
+section 0's last unverified claim -- a matching stamp skips the ritual whatever
+JP1 says -- confirmed on hardware rather than inferred from MAME. So leaving the
+authentic MRAs in update mode costs nothing once the flash is good, and the DIP
+17.8 proposed is not needed.
+
+The whole chain now runs on real hardware: a stock MRA with a BLANK flash, the
+game's own updater reading its own ROMs through the 386's window, 1,939,011
+bytes programmed a byte at a time through the wave-memory port, and the game
+booting from the result.
+
+### 18.6 What is still not tested
+
+**Persistence.** The flash lives in SDRAM, so this survives a reset and not a
+reload: every `load_core` of an `-update` MRA is another six-minute ritual
+ending on the halt screen. 17.6's `ioctl_upload` plumbing plus an `<nvram>`
+element is what turns "it works" into "it works once".
 
 **The other two sets.** rdft2 and rfjet have the same table and the same
 handshake but their own payloads and job tables; nothing about them has been run.
+
+**Sound quality against MAME.** That the samples play is not that they are
+right; 10d's method (`-wavwrite` against a hardware capture) is what would say
+so, and rdft's pre-flashed audio has been through it while this image has not --
+though the two images are byte-identical, which is most of the argument.
