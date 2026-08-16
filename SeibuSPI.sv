@@ -382,13 +382,14 @@ end
 // to have meant.
 wire       set_sxx2c   = mod_byte[0];
 wire [2:0] set_variant = mod_byte[3:1];
-reg  [1:0] set_id;
+reg  [2:0] set_id;
 always @* begin
-	if (!set_sxx2c)        set_id = 2'd0;    // SET_RDFTS
+	if (!set_sxx2c)        set_id = 3'd0;    // SET_RDFTS
 	else case (set_variant)
-		3'd1:              set_id = 2'd2;    // SET_RDFT2
-		3'd2:              set_id = 2'd3;    // SET_RFJET
-		default:           set_id = 2'd1;    // SET_RDFT
+		3'd1:              set_id = 3'd2;    // SET_RDFT2
+		3'd2:              set_id = 3'd3;    // SET_RFJET
+		3'd3:              set_id = 3'd4;    // SET_VIPRP1
+		default:           set_id = 3'd1;    // SET_RDFT
 	endcase
 end
 

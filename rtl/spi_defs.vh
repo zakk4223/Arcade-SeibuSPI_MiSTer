@@ -77,6 +77,7 @@ localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
 //   mod 0x01  SXX2C, set 0  -> rdft
 //   mod 0x03  SXX2C, set 1  -> rdft2
 //   mod 0x05  SXX2C, set 2  -> rfjet
+//   mod 0x07  SXX2C, set 3  -> viprp1  (authentic only; see rom_loader.sv)
 //
 // Bit 4 is the authentic-flash variant of any SXX2C set: the MRA ships a BLANK
 // flash plus the cartridge's own sound ROMs and the game runs its own updater,
@@ -84,18 +85,27 @@ localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
 // the alternate tail of the part table and opens the 386's sound01 source
 // window; it is meaningless without bit 0 and ignored on SXX2E.
 //
-//   mod 0x11  SXX2C, set 0  -> rdft,  authentic flash
-//   mod 0x13  SXX2C, set 1  -> rdft2, authentic flash
-//   mod 0x15  SXX2C, set 2  -> rfjet, authentic flash
+//   mod 0x11  SXX2C, set 0  -> rdft,   authentic flash
+//   mod 0x13  SXX2C, set 1  -> rdft2,  authentic flash
+//   mod 0x15  SXX2C, set 2  -> rfjet,  authentic flash
+//   mod 0x17  SXX2C, set 3  -> viprp1, authentic flash
 //
-// set_id is 2 bits and rfjet fills it. A fifth set needs it widened here, in
-// rom_loader's `set_id` port and in SeibuSPI.sv's decode -- the mod byte itself
-// has room for eight.
+// set_id is 3 bits since viprp1 became the fifth set; the mod byte's bits 3:1
+// have room for eight in total.
 // --------------------------------------------------------------------------
-localparam [1:0] SET_RDFTS = 2'd0;
-localparam [1:0] SET_RDFT  = 2'd1;
-localparam [1:0] SET_RDFT2 = 2'd2;
-localparam [1:0] SET_RFJET = 2'd3;
+localparam [2:0] SET_RDFTS  = 3'd0;
+localparam [2:0] SET_RDFT   = 3'd1;
+localparam [2:0] SET_RDFT2  = 3'd2;
+localparam [2:0] SET_RFJET  = 3'd3;
+localparam [2:0] SET_VIPRP1 = 3'd4;
+
+// The updater's generation, which is a property of the SET and shows up in one
+// place the core cares about: how the PCM source ROM sits in the 386's sound01
+// window. Generation B (rdft, rdft2, rfjet) puts a 2 MB ROM on TWO byte lanes;
+// generation A (senkyu, ejanhs, viprp1) puts a 1 MB ROM on ONE. Same two
+// windows either way -- half the ROM at one byte per dword covers exactly what
+// half at two does -- so it is one bit of decode, not a new address map.
+// PLAN.md 17.2.
 
 // --------------------------------------------------------------------------
 // ROM download codecs (rtl/spi_rom_decode.sv).

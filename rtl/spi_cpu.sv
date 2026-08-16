@@ -85,6 +85,10 @@ module spi_cpu
 	input             z80dl_stall,  // SXX2C: a Z80 download byte is in flight
 	input             snd01_en,     // cartridge: decode sound1.u0222's window
 	input             pcmsrc_en,    // authentic flash: decode the PCM source too
+	// Generation A (senkyu, ejanhs, viprp1) puts a 1 MB PCM source ROM on ONE
+	// byte lane where generation B puts 2 MB on two. The windows are the same
+	// either way; only how much of a dword the ROM occupies changes.
+	input             pcmsrc_1lane,
 
 	// SDRAM channel 1 - PRG ROM
 	output reg [25:0] sdr_addr,
@@ -413,24 +417,33 @@ module spi_cpu
 	wire [25:0] s01_grp_addr = SDR_SND01_BASE + {7'd0, cur_dw[18:3], 3'b000};
 	wire  [7:0] s01_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
 
-	// PCM source: two byte lanes per dword, so the packed byte index is the
-	// dword index DOUBLED, with cur_dw[20] (386 address bit 22) carrying the
-	// ROM_CONTINUE skip as the ROM's own address bit 20:
+	// PCM source, generation B: two byte lanes per dword, so the packed byte
+	// index is the dword index DOUBLED, with cur_dw[20] (386 address bit 22)
+	// carrying the ROM_CONTINUE skip as the ROM's own address bit 20:
 	//
 	//   idx[20:0] = { cur_dw[20], cur_dw[18:0], 1'b0 }
 	//
-	// A group is therefore four dwords, not eight, and the pair sought within
-	// it sits at byte offset idx[2:0] = {cur_dw[1:0], 1'b0} -- always even, so
-	// a dword's two bytes never straddle two groups.
+	// A group is therefore four dwords, and the pair sought within it sits at
+	// byte offset idx[2:0] = {cur_dw[1:0], 1'b0} -- always even, so a dword's
+	// two bytes never straddle two groups.
+	//
+	// Generation A is the same windows with ONE lane: the index is the dword
+	// index undoubled, a group is eight dwords, and the byte sits at
+	// idx[2:0] = cur_dw[2:0]. That is the sound1 arithmetic with the skip bit
+	// on top, which is why it costs a mux and not a second decode.
 	wire [25:0] pcm_grp_addr = SDR_PCMSRC_BASE
-	                         + {5'd0, cur_dw[20], cur_dw[18:2], 3'b000};
+	                         + (pcmsrc_1lane
+	                            ? {6'd0, cur_dw[20], cur_dw[18:3], 3'b000}
+	                            : {5'd0, cur_dw[20], cur_dw[18:2], 3'b000});
+	wire  [7:0] pcm_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
 	wire [15:0] pcm_pair     = rom_data[{cur_dw[1:0], 4'b0000} +: 16];
 
 	// Where the group ends: a program dword pair spans one group, eight packed
 	// sound01 bytes do, four PCM-source dwords do, so a burst crossing the end
 	// needs a fresh fetch.
 	wire        grp_last     = (rd_src == R_S01) ? (cur_dw[2:0] == 3'b111)
-	                         : (rd_src == R_PCM) ? (cur_dw[1:0] == 2'b11)
+	                         : (rd_src == R_PCM) ? (pcmsrc_1lane ? (cur_dw[2:0] == 3'b111)
+	                                                             : (cur_dw[1:0] == 2'b11))
 	                                             :  cur_dw[0];
 
 	// Snoop the GDT the boot code builds at byte 0x800 (dword index 0x200).
@@ -611,7 +624,8 @@ module spi_cpu
 				// ERASE00 and the updater's fetcher reads whole dwords.
 				case (rd_src)
 					R_S01:   mem_din <= {24'd0, s01_byte};
-					R_PCM:   mem_din <= {16'd0, pcm_pair};
+					R_PCM:   mem_din <= pcmsrc_1lane ? {24'd0, pcm_byte}
+					                                : {16'd0, pcm_pair};
 					default: mem_din <= cur_dw[0] ? rom_data[63:32]
 					                              : rom_data[31:0];
 				endcase

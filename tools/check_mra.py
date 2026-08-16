@@ -141,6 +141,16 @@ SETS = {
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV_R", spr_chunk=0x600000),
+    # viprp1 is authentic-ONLY: its flash payload's second job reads the 386's
+    # interleaved program image rather than a ROM file, so no MRA can assemble
+    # a pre-flashed one. It is also the first generation-A set here -- 1 MB of
+    # PCM source on ONE byte lane -- and the first to use rdfts's text layout
+    # on the cartridge board.
+    "viprp1-upd": dict(mra="viprp1-update.mra", table="viprp1", mod=0x17,
+                       mame="viprp1", skip=("audiocpu",),
+                       special={"v_pcm.215": ("pcmsrc", "M_LINEAR"),
+                                "flash0_blank_regionbe.u1053": ("pcm", "M_LINEAR")},
+                       spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     "rfjet-upd": dict(mra="rfjet-update.mra", table="rfjet", mod=0x15,
                       mame="rfjet", skip=("audiocpu", "pals"),
                       special={"pcm-d.u0227":  ("pcmsrc", "M_LINEAR"),
@@ -347,8 +357,14 @@ def parse_loader(path, table, upd=False):
     out["default"] = {"base": base.strip(), "size": int(size.replace("_", ""), 16),
                       "mode": mode, "name": name.strip()}
 
+    # `_U` is the authentic-flash part count. A set that exists ONLY in that
+    # form -- viprp1, whose pre-flashed image no MRA can assemble -- has a
+    # single table and a single count, so fall back to the plain name.
     sym = "NPARTS_" + table.upper() + ("_U" if upd else "")
     n = re.search(r"localparam \[4:0\] %s\s*=\s*5'd(\d+)" % sym, src)
+    if not n and upd:
+        sym = "NPARTS_" + table.upper()
+        n = re.search(r"localparam \[4:0\] %s\s*=\s*5'd(\d+)" % sym, src)
     if not n:
         fail("cannot find %s in %s" % (sym, path))
     return out, int(n.group(1))

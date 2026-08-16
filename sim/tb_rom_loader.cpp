@@ -162,6 +162,28 @@ static std::vector<Part> upd_table(const Part *pre, const char *pcm_rom,
     return v;
 }
 
+// viprp1: the fifth set, authentic-flash only, and the first generation-A one.
+// Same SEI252 decryption as rdft (MAME's init_viprp1 IS init_sei252) with
+// rdfts's text layout, a half-size second bg group, one 1 MB PCM source ROM
+// and no second sound ROM at all.
+static const Part parts_viprp1[] = {
+    { "seibu1.211",                  PRG_BASE,                0x080000, W32_B0  },
+    { "seibu2.212",                  PRG_BASE,                0x080000, W32_B1  },
+    { "seibu3.210",                  PRG_BASE,                0x080000, W32_B2  },
+    { "seibu4.29",                   PRG_BASE,                0x080000, W32_B3  },
+    { "seibu5.u0413",                CHARS_BASE,              0x020000, W24_W01 },
+    { "seibu6.u048",                 CHARS_BASE,              0x010000, W24_B2  },
+    { "v_bg-11.415",                 TILES_BASE,              0x200000, W24_W01 },
+    { "v_bg-12.415",                 TILES_BASE,              0x100000, W24_B2  },
+    { "v_bg-21.410",                 TILES_BASE + 0x300000,   0x100000, W24_W01 },
+    { "v_bg-22.416",                 TILES_BASE + 0x300000,   0x080000, W24_B2  },
+    { "v_obj-1.322",                 SPRITES_BASE + 0,        0x400000, SPR_ILV },
+    { "v_obj-2.324",                 SPRITES_BASE + 2,        0x400000, SPR_ILV },
+    { "v_obj-3.323",                 SPRITES_BASE + 4,        0x400000, SPR_ILV },
+    { "v_pcm.215",                   PCMSRC_BASE,             0x100000, LINEAR  },
+    { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
+};
+
 static uint32_t dest_of(const Part &p, uint32_t i)
 {
     switch (p.mode) {
@@ -564,6 +586,12 @@ int main(int argc, char **argv)
     if (rc) return rc;
     rc = run_set(upd_rfjet.data(), (int)upd_rfjet.size(),
                  3, "rfjet, authentic flash (SXX2C)", -1, 1, 1);
+    if (rc) return rc;
+    // viprp1, the fifth set: a half-size bg group at the same base as rdft's
+    // full-size one, and a 1 MB part landing at PCMSRC where the others put
+    // 2 MB. Both are the kind of number that gets carried across by eye.
+    rc = run_set(parts_viprp1, (int)(sizeof(parts_viprp1) / sizeof(parts_viprp1[0])),
+                 4, "viprp1, authentic flash (SXX2C, gen A)", -1, 1, 1);
     if (rc) return rc;
 
     // The same two sets again with ioctl_wr held for TWO loader clocks, which

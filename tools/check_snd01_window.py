@@ -56,7 +56,7 @@ SND01_BASE = 0x0480000
 SND01_SIZE = 0x080000
 
 
-def rtl_dword(addr, pcm, snd, pcmsrc_en=True, snd01_en=True):
+def rtl_dword(addr, pcm, snd, pcmsrc_en=True, snd01_en=True, one_lane=False):
     """A literal transcription of the decode in rtl/spi_cpu.sv.
 
     Deliberately literal -- bit selects rather than the tidier arithmetic they
@@ -75,6 +75,12 @@ def rtl_dword(addr, pcm, snd, pcmsrc_en=True, snd01_en=True):
         # s01_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8]
         grp = ((cur_dw >> 3) & 0xFFFF) << 3
         return snd[grp + (cur_dw & 7)]
+
+    if sel_pcm and one_lane:
+        # Generation A. pcm_grp_addr = SDR_PCMSRC_BASE +
+        #   {cur_dw[20], cur_dw[18:3], 3'b000}, byte at cur_dw[2:0]
+        grp = ((((cur_dw >> 20) & 1) << 16) | ((cur_dw >> 3) & 0xFFFF)) << 3
+        return pcm[grp + (cur_dw & 7)]
 
     if sel_pcm:
         # pcm_grp_addr = SDR_PCMSRC_BASE + {cur_dw[20], cur_dw[18:2], 3'b000}
@@ -97,20 +103,16 @@ def packed_roms(zf, setname):
     A 2-lane PCM source is a GEN-B fact, not a cartridge fact: senkyu, ejanhs
     and viprp1 put a 1 MB PCM ROM on ONE lane instead. The two windows land in
     the same place either way -- a 1 MB ROM at one lane spans exactly what a
-    2 MB ROM at two lanes does, including the ROM_CONTINUE skip -- so those sets
-    need one more bit of mode in the decode rather than new windows. Nothing
-    reads them today: the core has no part table for any gen-A set.
+    2 MB ROM at two lanes does, including the ROM_CONTINUE skip -- so it is one
+    more bit of mode in the decode rather than new windows. viprp1 is the first
+    gen-A set with a part table, and senkyu and ejanhs are checked here too even
+    though nothing loads them yet: the decode is the same either way.
     """
     pcm = bytes(PCMSRC_SIZE)
     snd = bytes(SND01_SIZE)
     for name, base, lanes in GAMES[setname]["sound01"]:
         data = zread(zf, setname, name)
         if base == 0:
-            if lanes != 2:
-                raise SystemExit(
-                    "%s: %d-lane PCM source. spi_cpu.sv decodes two lanes, "
-                    "which is every set the core has a table for; see "
-                    "packed_roms()." % (setname, lanes))
             pcm = data.ljust(PCMSRC_SIZE, b"\xFF")[:PCMSRC_SIZE]
         elif base == 0x800000:
             snd = data.ljust(SND01_SIZE, b"\xFF")[:SND01_SIZE]
@@ -135,6 +137,11 @@ def packed_from_image(path):
 def check(zf, setname, image=None):
     region = load_sound01(zf, setname, GAMES[setname]["sound01"])
     pcm, snd = packed_from_image(image) if image else packed_roms(zf, setname)
+    one_lane = GAMES[setname]["sound01"][0][2] == 1
+    # snd01_en in spi_top.sv means "this set has a second sound ROM", not "this
+    # is an authentic MRA": a set without one must leave the window undecoded so
+    # it reads as MAME's ERASE00 zeroes rather than as unwritten SDRAM.
+    has_snd = any(base == 0x800000 for _, base, _ in GAMES[setname]["sound01"])
 
     bad = 0
     first_bad = None
@@ -142,7 +149,8 @@ def check(zf, setname, image=None):
     nonzero_ok = 0
     for off in range(0, S01_SIZE, 4):
         want = int.from_bytes(region[off:off + 4], "little")
-        got = rtl_dword(S01_BASE + off, pcm, snd)
+        got = rtl_dword(S01_BASE + off, pcm, snd, snd01_en=has_snd,
+                        one_lane=one_lane)
         if want:
             nonzero_seen += 1
         if got == want:
@@ -187,11 +195,6 @@ def main():
         romdir = argv[k + 1]
         rc = 0
         for name in sorted(GAMES):
-            lanes = GAMES[name]["sound01"][0][2]
-            if lanes != 2:
-                print("%s: SKIP, %d-lane PCM source and no part table in the "
-                      "core yet" % (name, lanes))
-                continue
             path = os.path.join(romdir, name + ".zip")
             if not os.path.exists(path):
                 print("%s: SKIP, no %s" % (name, path))

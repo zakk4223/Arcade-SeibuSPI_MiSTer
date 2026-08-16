@@ -104,6 +104,25 @@ PARTS_RDFT = [
     # only thing that ever puts seibu_8.u0216 in SDRAM is --upd.
 ]
 
+# viprp1, the fifth set and the first generation-A one. Authentic flash ONLY --
+# its pre-flashed image cannot be assembled from file slices, because the second
+# of its two compressed jobs reads the 386's interleaved program image.
+PARTS_VIPRP1 = [
+    ("prg",     0xe5caf4ff,  0x80000, "W32_B0",  0),
+    ("prg",     0x688a998e,  0x80000, "W32_B1",  0),
+    ("prg",     0x990fa76a,  0x80000, "W32_B2",  0),
+    ("prg",     0x13e3e343,  0x80000, "W32_B3",  0),
+    ("chars",   0x5ece677c,  0x20000, "W24_W01", 0),
+    ("chars",   0x44844ef8,  0x10000, "W24_B2",  0),
+    ("tiles",   0x6fc96736, 0x200000, "W24_W01", 0),
+    ("tiles",   0xd3c7281c, 0x100000, "W24_B2",  0),
+    ("tiles",   0xd65b4318, 0x100000, "W24_W01", 0x300000),
+    ("tiles",   0x24a0a23a,  0x80000, "W24_B2",  0x300000),
+    ("sprites", 0x3be5b631, 0x400000, "SPR_ILV", 0),
+    ("sprites", 0x924153b4, 0x400000, "SPR_ILV", 2),
+    ("sprites", 0xe9fb9062, 0x400000, "SPR_ILV", 4),
+]
+
 # rdft2. Order and modes are rom_loader.sv's rdft2 table, which check_mra.py
 # holds against MAME's ROM_START(rdft2).
 PARTS_RDFT2 = [
@@ -171,6 +190,7 @@ PARTS_RFJET = [
 # region byte lives in it, and region80 is what every parent set carries.
 # rom_loader.sv's authentic tail is these three parts in this order.
 BLANK_FLASH = 0xe2adaff5        # flash0_blank_region80.u1053, 1 MB
+BLANK_VIPRP1 = 0xa4c181d0       # flash0_blank_regionbe.u1053, viprp1's region
 SETS = {
     "rdfts": dict(parts=PARTS_RDFTS, probe=0xe278dddd, flash=False),
     "rdft":  dict(parts=PARTS_RDFT,  probe=0xadcb5dbc, flash=True,
@@ -189,6 +209,13 @@ SETS = {
                   flash_stream=(("pcm-d.u0227", 4, 0x189DD5),
                                 ("sound1.u0222", 0, 0x41C08)),
                   upd=(0x8ee3ff45, 0xd4fc3da1)),
+    # viprp1 has NO pre-flashed form here: `flash` is False and there is no
+    # flash_stream, so a plain build leaves the sample region blank. --upd is
+    # the only mode that produces a runnable image, and its PCM source is 1 MB
+    # rather than 2 and has no second sound ROM behind it.
+    "viprp1": dict(parts=PARTS_VIPRP1, probe=0xe5caf4ff, flash=False,
+                   upd=(0xe3111b60, None), upd_pcm_size=0x100000,
+                   upd_blank=BLANK_VIPRP1),
 }
 
 
@@ -287,11 +314,13 @@ def main():
         # and re-added in place so the order matches the loader's table for
         # every set, which is what --concat depends on. That order is MAME's own
         # region order -- sound01's two ROMs, then soundflash1's blank.
-        PARTS = [p for p in PARTS if p[0] != "snd01"] + [
-            ("pcmsrc", pcm_crc,     0x200000, "LINEAR", 0),
-            ("snd01",  snd_crc,     0x080000, "LINEAR", 0),
-            ("pcm",    BLANK_FLASH, 0x100000, "LINEAR", 0),
-        ]
+        tail = [("pcmsrc", pcm_crc, cfg.get("upd_pcm_size", 0x200000), "LINEAR", 0)]
+        # viprp1 has no second sound ROM: its compressed tail lives in the 386
+        # program image, which needs no part of its own.
+        if snd_crc is not None:
+            tail.append(("snd01", snd_crc, 0x080000, "LINEAR", 0))
+        tail.append(("pcm", cfg.get("upd_blank", BLANK_FLASH), 0x100000, "LINEAR", 0))
+        PARTS = [p for p in PARTS if p[0] != "snd01"] + tail
 
     image = bytearray(b"\xFF" * (SDRAM_SIZE_UPD if upd else SDRAM_SIZE))
     placed = 0

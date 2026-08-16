@@ -45,7 +45,7 @@ module rom_loader
 	// decoded in SeibuSPI.sv from the MRA's index-1 mod byte. It must be
 	// stable before the
 	// index-0 download starts, which it is: the HPS sends the mod byte first.
-	input       [1:0] set_id,
+	input       [2:0] set_id,
 
 	// The authentic-flash variant of a cartridge set: the same head of the
 	// table, a different tail. Instead of a finished sample-flash image the MRA
@@ -143,6 +143,13 @@ module rom_loader
 	// becomes two source ROMs plus a blank; rdft2 and rfjet keep seventeen,
 	// because their image was already two parts and the second sound ROM they
 	// carry for the Z80 program is one of the sources.
+	// viprp1: fifteen parts, and AUTHENTIC ONLY. Its flash payload is two
+	// COMPRESSED jobs and the second reads the 386's own interleaved program
+	// image rather than a ROM file (tools/build_soundflash.py: "the only game
+	// whose second job reads the PROGRAM ROM"), so no MRA can assemble a
+	// pre-flashed image out of file slices the way rdft2's does. The game
+	// reading it itself is the whole point of the authentic path.
+	localparam [4:0] NPARTS_VIPRP1 = 5'd15;
 	localparam [4:0] NPARTS_RDFT_U  = 5'd17;
 	localparam [4:0] NPARTS_RDFT2_U = 5'd17;
 	localparam [4:0] NPARTS_RFJET_U = 5'd17;
@@ -152,6 +159,7 @@ module rom_loader
 		SET_RDFT : nparts = set_upd ? NPARTS_RDFT_U  : NPARTS_RDFT;
 		SET_RDFT2: nparts = set_upd ? NPARTS_RDFT2_U : NPARTS_RDFT2;
 		SET_RFJET: nparts = set_upd ? NPARTS_RFJET_U : NPARTS_RFJET;
+		SET_VIPRP1: nparts = NPARTS_VIPRP1;
 		default  : nparts = NPARTS_RDFTS;
 	endcase
 
@@ -348,6 +356,38 @@ module rom_loader
 		default: if (set_upd)
 		       begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region80.u1053 + 1 MB of FF
 		  else begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222 whole: holds the Z80 program at 0x44000
+		endcase
+
+		// ---- TABLE viprp1: SPI cartridge, authentic flash only (SXX2C) ----
+		//
+		// Same decryption as rdft -- MAME's init_viprp1 is init_sei252, so the
+		// text, tile and sprite keys and the 4 MB sprite chunk are the ones
+		// already wired for the SEI252 sets. What differs from rdft:
+		//   * text is a WORD plus a byte, as rdfts has it, not three byte lanes
+		//   * 6 MB of tiles, but the second bg group is HALF rdft's (0x100000 +
+		//     0x80000 against 0x200000 + 0x100000) at the same 3 MB base
+		//   * the PCM source is 1 MB on ONE byte lane -- generation A -- where
+		//     rdft's is 2 MB on two. spi_cpu.sv's pcmsrc_1lane is that bit.
+		//   * NO second sound ROM at all, so there is no snd01 part: viprp1's
+		//     compressed tail lives in the 386 program image, which the game
+		//     reads through a window that is already mapped.
+		SET_VIPRP1: case (part_sel)
+		//                                                    base   size          mode
+		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B0;  end // seibu1.211
+		5'd1 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B1;  end // seibu2.212
+		5'd2 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B2;  end // seibu3.210
+		5'd3 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h008_0000; part_mode = M_32_B3;  end // seibu4.29
+		5'd4 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h002_0000; part_mode = M_24_W01; end // seibu5.u0413
+		5'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // seibu6.u048
+		5'd6 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_W01; end // v_bg-11.415
+		5'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h010_0000; part_mode = M_24_B2;  end // v_bg-12.415
+		5'd8 : begin part_base = SDR_TILES_BASE + 26'h030_0000;     part_size = 26'h010_0000; part_mode = M_24_W01; end // v_bg-21.410
+		5'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;     part_size = 26'h008_0000; part_mode = M_24_B2;  end // v_bg-22.416
+		5'd10: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-1.322
+		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-2.324
+		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-3.323
+		5'd13: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // v_pcm.215
+		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_regionbe.u1053 + 1 MB of FF
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----

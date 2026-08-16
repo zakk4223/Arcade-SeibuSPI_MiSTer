@@ -19,7 +19,7 @@ module spi_top
 	input             set_sxx2c,
 	// Which ROM set, for the things that differ per GAME rather than per board:
 	// the sprite chunk stride and which sprite crypt to use. See spi_defs.vh.
-	input       [1:0] set_id,
+	input       [2:0] set_id,
 	// The authentic-flash variant of an SXX2C set: a blank flash plus the
 	// cartridge's own sound ROMs, and the game programs it itself. See
 	// PLAN.md section 17; meaningless without set_sxx2c.
@@ -282,10 +282,21 @@ module spi_top
 		// real Z80 ROM, so neither one ever looks -- UNLESS the flash is being
 		// programmed, which reads that ROM as source material on every
 		// cartridge set including rdft's seibu_8.u0216.
-		.snd01_en  ((set_id == SET_RDFT2) || (set_id == SET_RFJET) || set_upd),
+		// "This set HAS a second sound ROM", which is not the same as "this is
+		// an authentic MRA". rdft2 and rfjet always do -- their Z80 program
+		// lives in it -- and rdft's is loaded only by its authentic MRA, as
+		// updater source. viprp1 has none at all: its compressed tail is in the
+		// 386 program image. Leaving the window on for it made the 386 read the
+		// unwritten SDRAM there as 0xFF where MAME reads 0x00, on all 512 K
+		// dwords of it -- caught by tools/check_snd01_window.py before it ever
+		// reached hardware.
+		.snd01_en  ((set_id == SET_RDFT2) || (set_id == SET_RFJET)
+		            || (set_upd && (set_id == SET_RDFT))),
 		// The PCM source window exists only while the game is programming its
 		// own flash. A pre-flashed set loads nothing behind it.
 		.pcmsrc_en (set_upd),
+		// Generation A puts the PCM source on one byte lane instead of two.
+		.pcmsrc_1lane (set_id == SET_VIPRP1),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),
