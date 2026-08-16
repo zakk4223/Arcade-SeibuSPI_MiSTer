@@ -6534,11 +6534,12 @@ all three:
 | set   | ritual    | image (8 windows) | save file | load |
 |-------|-----------|-------------------|-----------|------|
 | rdft  | 1,939,011 | match             | sha256 match | skips the ritual |
-| rdft2 | 2,028,340 | match             | not run   | not run |
+| rdft2 | 2,028,340 | match             | sha256 not checked | skips the ritual, `nvram in` 2,097,152 |
 | rfjet | 2,004,170 | match             | sha256 match | skips the ritual |
 
-rdft2's save/load was not run: it shares every line of code with the other two,
-and its ritual and image are verified.
+rdft2's save/load turned out to be proven too, found while setting up 19.5: it
+boots from its own save file with `nvram in = 2097152` and no ritual. Its .nvm
+was never compared by sha256, which is the one gap left in this table.
 
 **`beats` read 0 for a transfer that had just written a byte-perfect file.** A
 full save is 2,097,152 beats, which is thirty-two exact wraps of a 16-bit
@@ -6589,3 +6590,42 @@ chain rather than the core; that has not been done.
 hardware silent while MAME plays. A stricter threshold (hw RMS < 20 against
 MAME > 200) finds a single 60 ms run, at t = 46.6 s. Too small to hear and too
 small to chase, but it is not zero and it is written down.
+
+### 19.5 All three sets against MAME, and one number that stands out
+
+Each set recorded from hardware running its OWN self-flashed image (loaded from
+its save file, no ritual) against a 400 s MAME reference built from the same
+image. The set was confirmed from the core each time by its build stamp at
+0x1FFFFC, not from what was last loaded -- the stamp is 4A4A36 / 37 / 38.
+
+| set   | envelope | spectrum | per-window spectral | silence | side/mid hw vs MAME |
+|-------|----------|----------|---------------------|---------|---------------------|
+| rdft  | 0.8030   | 0.9967   | 0.9751 med, 99%     | 99.4%   | -19.1 / -18.3 dB    |
+| rdft2 | 0.9289   | 0.9898   | 0.9718 med, 100%    | 99.9%   | -24.9 / -20.8 dB    |
+| rfjet | 0.8525   | 0.9726   | 0.9806 med, 91%     | 99.9%   | -16.0 / -16.2 dB    |
+
+**All three pass on the figures that mean synthesis is right.** rfjet's numbers
+sit just below T-N's earlier pre-flashed run (spectrum 0.9855, median 0.9844,
+96% above 0.8, envelope 0.9025) on a shorter capture, which is the same result
+rather than a different one.
+
+**T-K's stereo bug stays fixed.** It found the cartridge sets summing to mono --
+side/mid -82.4 dB against MAME's -16.3 -- and all three now sit within a few dB
+of MAME instead of eighty.
+
+**The one number worth flagging: rdft2 is 4.1 dB narrower than MAME** where rdft
+is 0.8 dB and rfjet 0.2 dB apart. Hardware reads -24.9 dB, which matches the
+-25.3 dB measured on rdft2 in an earlier session, so it is OUR stable figure and
+not noise. It is NOT diagnosed. The innocent explanation is that side/mid
+depends on which sounds are playing and the attract DEMO diverges between
+hardware and MAME (T-N's finding); rdft2's alignment landed 220 s into the
+reference, a different part of the cycle from the other two. The guilty
+explanation would be per-voice panning differing slightly. Distinguishing them
+needs a comparison over a stretch where both sides are known to be playing the
+same thing -- the attract music before the demo starts -- which has not been done.
+
+**Envelope r is the weakest figure on every set and 19.4 says why**: 20 ms
+envelopes of this music decorrelate to 0.187 against themselves one window
+later, so anything that shifts time by a fraction of a window -- the 44.1 to
+48 kHz resampling in the capture chain, or the demo diverging -- costs most of
+it while leaving spectra untouched.
