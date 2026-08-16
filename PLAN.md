@@ -6303,3 +6303,47 @@ from the core side.
 `spi_nvram` index 2, each with its own `ioctl_wait`, OR'd together on the way
 back to `ddr_rom_reader`. The fast-load replay passes any non-zero index
 straight through, so nothing there needed changing.
+
+### 18.8 The save file came back wrong, and the bench that should have existed
+
+The nvram work went to hardware untested. The ritual ran, the OSD was opened,
+`/media/fat/config/nvram/rdft-update.nvm` appeared at exactly 2,097,152 bytes --
+and its sha256 was not the image's. The file was:
+
+    80 | 80 4A 4A 36 03 FC FB FB | 80 4A 4A 36 03 FC FB FB | ...
+
+byte 0 twice over, then the first eight bytes repeated 262,143 times. Two
+separate faults, one line each, and the byte stream names both:
+
+* **The prefetch re-armed without asking for anything.** `fetching <= 1` with no
+  `rd_req <= ~rd_req` leaves ack == req, so the completion branch fires again
+  immediately and latches the PREVIOUS line's `rd_dout` as though it were the
+  next one. `nxt` therefore always equalled `cur`, and every line crossing swapped
+  in the line it already had.
+* **The 0xAA's `ioctl_rd` was counted as a byte.** hps_io raises `ioctl_upload`
+  and that first `ioctl_rd` on the same edge; it is a request for byte 0, not an
+  acknowledgement of one. Counting it left the index a beat behind and sent byte
+  0 twice.
+
+**`sim/tb_nvram.cpp` is what should have gone first.** It drives both directions
+against a behavioural SDRAM, modelling the save exactly as `sys/hps_io.sv` does
+-- 0xAA opens the transfer, then each data word takes the byte on `ioctl_din`
+and asks for the next, with no way to stall. Both faults reintroduced fail it in
+under a second, and in the same shape hardware showed: the missing request makes
+byte 8 the first wrong one, and the miscounted `ioctl_rd` shifts the whole file
+by one from byte 0.
+
+Two things the bench pinned down that hardware could not:
+
+* **the read latency the prefetch must cover.** Its SDRAM model answers reads in
+  30 cycles and it runs the host at 12 cycles a word -- faster than any real SPI
+  transfer, and three times faster than the memory -- so a fetch issued at a
+  crossing could not possibly arrive. Only the one-line lead makes that pass.
+* **the quiet timer**, which is 2^24 clk_ram cycles in hardware and would need
+  fifty million simulated ones. It is a parameter now, and the bench builds with
+  `-GQUIET_BITS=8`.
+
+The one thing the bench deliberately does NOT assert is that the first line is
+ready before the first byte is asked for. It cannot be: the 0xAA and the first
+data word are separate SPI transactions on the HPS side, microseconds apart, so
+the bench gives that gap and stresses only the steady state.

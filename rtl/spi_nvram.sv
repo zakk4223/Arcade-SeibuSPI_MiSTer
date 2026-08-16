@@ -26,6 +26,12 @@
 //============================================================================
 
 module spi_nvram
+#(
+	// How long the flash must be quiet before a save is asked for, as a power
+	// of two clk_ram cycles: 24 is about 0.15 s. The testbench turns it down
+	// rather than simulating fifty million cycles.
+	parameter QUIET_BITS = 24
+)
 (
 	input             clk,          // clk_ram, with the arbiters
 	input             reset,
@@ -105,7 +111,6 @@ module spi_nvram
 	// ------------------------------------------------------------------
 	reg [25:0] up_cnt;      // byte index into the region
 	reg        up_run;
-	reg        up_first;    // the request that comes with the 0xAA, not a byte
 	reg [63:0] cur, nxt;
 	reg        nxt_valid;
 	reg        fetching;
@@ -122,7 +127,7 @@ module spi_nvram
 	// been quiet for about a tenth of a second at clk_ram.
 	// ------------------------------------------------------------------
 	reg        dirty_d, dirty_seen;
-	reg [23:0] quiet;
+	reg [QUIET_BITS-1:0] quiet;
 
 	always @(posedge clk) begin
 		ioctl_wr_d     <= ioctl_wr;
@@ -153,7 +158,6 @@ module spi_nvram
 		// ---- save ----------------------------------------------------
 		if (upload_start && enable) begin
 			up_run    <= 1'b1;
-			up_first  <= 1'b1;
 			up_cnt    <= 26'd0;
 			nxt_valid <= 1'b0;
 			fetching  <= 1'b1;
@@ -163,6 +167,11 @@ module spi_nvram
 		end
 		else if (!ioctl_upload) up_run <= 1'b0;
 
+		// EVERY re-arm toggles rd_req. Setting `fetching` without asking for
+		// anything leaves ack == req, so the branch below fires again on the
+		// next cycle and latches the PREVIOUS line's data as though it were the
+		// next one -- which is how the first save file came back as line 0
+		// repeated two million times.
 		if (fetching && (rd_ack == rd_req)) begin
 			fetching <= 1'b0;
 			if (fetch_nxt) begin
@@ -177,22 +186,28 @@ module spi_nvram
 				fetching  <= 1'b1;
 				fetch_nxt <= 1'b1;
 				rd_addr   <= SDR_PCM_BASE + {up_cnt[25:3], 3'b000} + 26'd8;
+				rd_req    <= ~rd_req;
 			end
 		end
 
-		if (up_run && ioctl_rd_rise) begin
-			if (up_first) up_first <= 1'b0;
-			else begin
-				up_cnt <= up_cnt + 26'd1;
-				if (up_cnt[2:0] == 3'b111) begin
-					// Crossing into the line that was prefetched.
-					cur       <= nxt;
-					nxt_valid <= 1'b0;
-					if (!fetching) begin
-						fetching  <= 1'b1;
-						fetch_nxt <= 1'b1;
-						rd_addr   <= SDR_PCM_BASE + {up_cnt[25:3], 3'b000} + 26'd16;
-					end
+		// Every ioctl_rd advances the byte EXCEPT the one that arrives with the
+		// 0xAA opening the transfer -- hps_io asserts ioctl_upload and that
+		// first ioctl_rd on the same edge, so it is a request for byte 0 and
+		// not an acknowledgement of one. Treating it as a byte sent byte 0
+		// twice, which is what the first save file did. `up_run` is still low
+		// in that cycle and would swallow it on its own; the explicit term is
+		// there so a one-cycle skew between the two cannot resurrect the bug.
+		if (up_run && ioctl_rd_rise && !upload_start) begin
+			up_cnt <= up_cnt + 26'd1;
+			if (up_cnt[2:0] == 3'b111) begin
+				// Crossing into the line that was prefetched.
+				cur       <= nxt;
+				nxt_valid <= 1'b0;
+				if (!fetching) begin
+					fetching  <= 1'b1;
+					fetch_nxt <= 1'b1;
+					rd_addr   <= SDR_PCM_BASE + {up_cnt[25:3], 3'b000} + 26'd16;
+					rd_req    <= ~rd_req;
 				end
 			end
 		end
@@ -201,7 +216,7 @@ module spi_nvram
 		if (enable) begin
 			if (flash_dirty != dirty_d) begin
 				dirty_seen <= 1'b1;
-				quiet      <= 24'd0;
+				quiet      <= '0;
 			end
 			else if (dirty_seen) begin
 				if (&quiet) begin
@@ -209,7 +224,7 @@ module spi_nvram
 					ioctl_upload_req <= 1'b1;
 					dbg_saves        <= dbg_saves + 16'd1;
 				end
-				else quiet <= quiet + 24'd1;
+				else quiet <= quiet + 1'd1;
 			end
 		end
 
@@ -224,7 +239,6 @@ module spi_nvram
 			rd_req     <= 1'b0;
 			rd_addr    <= 26'd0;
 			up_run     <= 1'b0;
-			up_first   <= 1'b0;
 			up_cnt     <= 26'd0;
 			cur        <= 64'd0;
 			nxt        <= 64'd0;
@@ -232,7 +246,7 @@ module spi_nvram
 			fetching   <= 1'b0;
 			fetch_nxt  <= 1'b0;
 			dirty_seen <= 1'b0;
-			quiet      <= 24'd0;
+			quiet      <= '0;
 			dbg_saves  <= 16'd0;
 		end
 	end

@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_decode run-ddr_rom_reader run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271
+all: run-rom_decode run-ddr_rom_reader run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -283,6 +283,15 @@ obj_dir/Vtb_sdram_top: tb_sdram_top.sv tb_sdram.cpp sdram_model.sv altddio_out.s
 
 # spi_romcheck is the instrument that reports whether the hardware download
 # worked, so it gets its own test.
+# The sample flash's save file, both directions. Went to hardware untested once
+# and came back as byte 0 twice followed by one line repeated 262,143 times.
+run-nvram: obj_dir/Vspi_nvram
+	@./obj_dir/Vspi_nvram
+
+obj_dir/Vspi_nvram: $(RTL)/spi_nvram.sv $(RTL)/spi_defs.vh tb_nvram.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) -GQUIET_BITS=8 --top-module spi_nvram \
+	    $(RTL)/spi_nvram.sv tb_nvram.cpp
+
 run-romcheck: obj_dir/Vspi_romcheck
 	@./obj_dir/Vspi_romcheck $(SDRAM)
 
