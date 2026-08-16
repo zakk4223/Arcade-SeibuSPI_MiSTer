@@ -6685,3 +6685,47 @@ So the restructure was dropped. What the swing really shows is a device at 83%
 ALMs where seed choice moves the worst path by more than a nanosecond, and the
 tightest paths belong to the SDRAM controller's pin timing, which no amount of
 tidying in the loader would touch.
+
+### 19.8 senkyu on hardware, and the seventh set closes the family
+
+Generation A's second set, first run:
+
+* the ritual reached **2,026,002 bytes exactly** -- predicted from the job-table
+  walk (4 + 1,334,444 + 691,554) before the run, stable across two reads -- with
+  32 blocks erased and 0 dropped;
+* all eight image windows match `build_soundflash.py`, including both sides of
+  the seam at 0x145CB0 where the second compressed job takes over;
+* `senkyu-update.nvm` is **dd081ebad5534f72d97d815ba9ab3e9a2281c70cd017efada262a04659edd528**,
+  identical to the reference;
+* reloading reads `nvram in = 2097152`, runs no ritual, and comes up in attract
+  with 8 voices sounding.
+
+**The screenshot corrected the MRA.** Senkyu's how-to-play screen came up with
+its Japanese text UPRIGHT, which a `<rotation>vertical (cw)</rotation>` game
+cannot do. MAME agrees: `GAME(1995, senkyu, ... ROT0 ...)`. It was also filed as
+Sports; it is a puzzle game. viprp1 (ROT270) and ejanhs (ROT0) were right.
+Nothing in the checker looks at those fields -- they are for the MiSTer's own
+menus -- so a picture was the only thing that could have caught it.
+
+### 19.9 Where the seven sets stand
+
+| set    | board  | flash payload    | ritual   | image | save | plays |
+|--------|--------|------------------|----------|-------|------|-------|
+| rdfts  | SXX2E  | mask ROM         | n/a      | n/a   | n/a  | yes   |
+| rdft   | SXX2C  | concatenation    | 1,939,011| 8/8   | sha256 | yes |
+| rdft2  | SXX2C  | copy + BPE       | 2,028,340| 8/8   | -    | yes   |
+| rfjet  | SXX2C  | copy + BPE       | 2,004,170| 8/8   | sha256 | yes |
+| viprp1 | SXX2C  | BPE + BPE (386)  | not seen | -     | sha256 | yes |
+| senkyu | SXX2C  | BPE + BPE        | 2,026,002| 8/8   | sha256 | yes |
+| ejanhs | SXX2C  | BPE + BPE        | -        | -     | -    | -     |
+
+Every payload figure that was watched came back exactly as predicted from
+`build_soundflash.py`'s job-table walk, and every save file that was written is
+byte-identical to the image that tool builds -- which is itself bit-exact
+against MAME's own flash nvram.
+
+What is not done: **ejanhs has never been loaded** (its controls do not work
+either, 19.x), viprp1's payload COUNT was missed although its image is verified,
+rdft2's `.nvm` was never sha256-compared, and the pre-flashed variants that ARE
+possible for senkyu and ejanhs are not built -- they would need two
+CODEC_BPE_DPCM parts in one download, which nothing has exercised.

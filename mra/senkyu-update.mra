@@ -16,9 +16,9 @@
     <manufacturer>Seibu Kaihatsu</manufacturer>
     <players>2</players>
     <joystick>8</joystick>
-    <rotation>vertical (cw)</rotation>
+    <rotation>horizontal</rotation>
     <region>Japan</region>
-    <category>Sports</category>
+    <category>Puzzle</category>
 
     <!--
       THE GAME FLASHES ITSELF. The sample flash ships BLANK and the cartridge's
