@@ -6755,3 +6755,9 @@ upload rather than only its own index -- so whatever Main was really reading
 would have been answered with sample-flash bytes. Harmless here because nothing
 was reading, and wrong. The upload is gated on the index now, and `tb_nvram`
 asks for an upload at index 3 and requires nothing to come back.
+
+**Confirmed on hardware** (seed 6, clk_ram +0.167): the same ejanhs load that
+reported one stray beat now reports none at all -- the panel's nvram-save line
+is printed only when either counter is non-zero, and it is silent -- while the
+save file still loads (`nvram in = 2097152`), the ritual still skips, and 36
+voices sound.
