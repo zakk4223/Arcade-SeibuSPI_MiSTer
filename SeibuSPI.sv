@@ -389,6 +389,8 @@ always @* begin
 		3'd1:              set_id = 3'd2;    // SET_RDFT2
 		3'd2:              set_id = 3'd3;    // SET_RFJET
 		3'd3:              set_id = 3'd4;    // SET_VIPRP1
+		3'd4:              set_id = 3'd5;    // SET_SENKYU
+		3'd5:              set_id = 3'd6;    // SET_EJANHS
 		default:           set_id = 3'd1;    // SET_RDFT
 	endcase
 end

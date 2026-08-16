@@ -78,6 +78,8 @@ localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
 //   mod 0x03  SXX2C, set 1  -> rdft2
 //   mod 0x05  SXX2C, set 2  -> rfjet
 //   mod 0x07  SXX2C, set 3  -> viprp1  (authentic only; see rom_loader.sv)
+//   mod 0x09  SXX2C, set 4  -> senkyu
+//   mod 0x0B  SXX2C, set 5  -> ejanhs
 //
 // Bit 4 is the authentic-flash variant of any SXX2C set: the MRA ships a BLANK
 // flash plus the cartridge's own sound ROMs and the game runs its own updater,
@@ -89,6 +91,8 @@ localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
 //   mod 0x13  SXX2C, set 1  -> rdft2,  authentic flash
 //   mod 0x15  SXX2C, set 2  -> rfjet,  authentic flash
 //   mod 0x17  SXX2C, set 3  -> viprp1, authentic flash
+//   mod 0x19  SXX2C, set 4  -> senkyu, authentic flash
+//   mod 0x1B  SXX2C, set 5  -> ejanhs, authentic flash
 //
 // set_id is 3 bits since viprp1 became the fifth set; the mod byte's bits 3:1
 // have room for eight in total.
@@ -98,6 +102,8 @@ localparam [2:0] SET_RDFT   = 3'd1;
 localparam [2:0] SET_RDFT2  = 3'd2;
 localparam [2:0] SET_RFJET  = 3'd3;
 localparam [2:0] SET_VIPRP1 = 3'd4;
+localparam [2:0] SET_SENKYU = 3'd5;
+localparam [2:0] SET_EJANHS = 3'd6;
 
 // The updater's generation, which is a property of the SET and shows up in one
 // place the core cares about: how the PCM source ROM sits in the 386's sound01

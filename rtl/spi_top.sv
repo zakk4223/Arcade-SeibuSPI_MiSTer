@@ -291,12 +291,14 @@ module spi_top
 		// dwords of it -- caught by tools/check_snd01_window.py before it ever
 		// reached hardware.
 		.snd01_en  ((set_id == SET_RDFT2) || (set_id == SET_RFJET)
+		            || (set_id == SET_SENKYU) || (set_id == SET_EJANHS)
 		            || (set_upd && (set_id == SET_RDFT))),
 		// The PCM source window exists only while the game is programming its
 		// own flash. A pre-flashed set loads nothing behind it.
 		.pcmsrc_en (set_upd),
 		// Generation A puts the PCM source on one byte lane instead of two.
-		.pcmsrc_1lane (set_id == SET_VIPRP1),
+		.pcmsrc_1lane ((set_id == SET_VIPRP1) || (set_id == SET_SENKYU)
+		               || (set_id == SET_EJANHS)),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),

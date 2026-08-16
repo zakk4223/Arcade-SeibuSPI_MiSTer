@@ -150,6 +150,14 @@ module rom_loader
 	// pre-flashed image out of file slices the way rdft2's does. The game
 	// reading it itself is the whole point of the authentic path.
 	localparam [4:0] NPARTS_VIPRP1 = 5'd15;
+	// senkyu and ejanhs, the other two generation-A cartridges. Both put their
+	// program in the UPPER half of the 2 MB region -- four 256 KB ROMs at
+	// offset 0x100000 -- so part 0 is a megabyte of zeroes that nothing reads
+	// but that makes the region match MAME's rather than hold whatever the last
+	// core left in SDRAM. Both also have a second sound ROM, which viprp1 does
+	// not.
+	localparam [4:0] NPARTS_SENKYU = 5'd15;
+	localparam [4:0] NPARTS_EJANHS = 5'd17;
 	localparam [4:0] NPARTS_RDFT_U  = 5'd17;
 	localparam [4:0] NPARTS_RDFT2_U = 5'd17;
 	localparam [4:0] NPARTS_RFJET_U = 5'd17;
@@ -160,6 +168,8 @@ module rom_loader
 		SET_RDFT2: nparts = set_upd ? NPARTS_RDFT2_U : NPARTS_RDFT2;
 		SET_RFJET: nparts = set_upd ? NPARTS_RFJET_U : NPARTS_RFJET;
 		SET_VIPRP1: nparts = NPARTS_VIPRP1;
+		SET_SENKYU: nparts = NPARTS_SENKYU;
+		SET_EJANHS: nparts = NPARTS_EJANHS;
 		default  : nparts = NPARTS_RDFTS;
 	endcase
 
@@ -388,6 +398,58 @@ module rom_loader
 		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-3.323
 		5'd13: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // v_pcm.215
 		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_regionbe.u1053 + 1 MB of FF
+		endcase
+
+		// ---- TABLE senkyu: SPI cartridge, authentic flash only (SXX2C) ----
+		//
+		// Fever Soccer's board, and the smallest cartridge set here: ONE bg
+		// group (3 MB of tiles, not 6), 1 MB of program rather than 2, and the
+		// same SEI252 decryption as rdft. Part 0 is the zero fill for the half
+		// of the program region MAME leaves empty.
+		SET_SENKYU: case (part_sel)
+		//                                                    base   size          mode
+		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h010_0000; part_mode = M_LINEAR; end // zero fill: maincpu 0x000000-0x0FFFFF
+		5'd1 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B0;  end // fb_1.211
+		5'd2 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B1;  end // fb_2.212
+		5'd3 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B2;  end // fb_3.210
+		5'd4 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B3;  end // fb_4.29
+		5'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h002_0000; part_mode = M_24_W01; end // fb_6.413
+		5'd6 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // fb_5.48
+		5'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_W01; end // fb_bg-1d.415
+		5'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h010_0000; part_mode = M_24_B2;  end // fb_bg-1p.410
+		5'd9 : begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // fb_obj-1.322
+		5'd10: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // fb_obj-2.324
+		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // fb_obj-3.323
+		5'd12: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // fb_pcm-1.215
+		5'd13: begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // fb_7.216
+		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region01.u1053 + 1 MB of FF
+		endcase
+
+		// ---- TABLE ejanhs: SPI cartridge, authentic flash only (SXX2C) ----
+		//
+		// senkyu's shape with two bg groups instead of one, the second at the
+		// same 3 MB base and half the size -- viprp1's arrangement. A mahjong
+		// game: the flash, video and sound work, but its controls are a custom
+		// encoding (MAME's ejanhs_encode) that this core does not decode.
+		SET_EJANHS: case (part_sel)
+		//                                                    base   size          mode
+		5'd0 : begin part_base = SDR_PRG_BASE;                      part_size = 26'h010_0000; part_mode = M_LINEAR; end // zero fill: maincpu 0x000000-0x0FFFFF
+		5'd1 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B0;  end // ejan3_1.211
+		5'd2 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B1;  end // ejan3_2.212
+		5'd3 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B2;  end // ejan3_3.210
+		5'd4 : begin part_base = SDR_PRG_BASE + 26'h010_0000;       part_size = 26'h004_0000; part_mode = M_32_B3;  end // ejan3_4.29
+		5'd5 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h002_0000; part_mode = M_24_W01; end // ejan3_6.413
+		5'd6 : begin part_base = SDR_CHARS_BASE;                    part_size = 26'h001_0000; part_mode = M_24_B2;  end // ejan3_5.48
+		5'd7 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h020_0000; part_mode = M_24_W01; end // ej3_bg1d.415
+		5'd8 : begin part_base = SDR_TILES_BASE;                    part_size = 26'h010_0000; part_mode = M_24_B2;  end // ej3_bg1p.410
+		5'd9 : begin part_base = SDR_TILES_BASE + 26'h030_0000;     part_size = 26'h010_0000; part_mode = M_24_W01; end // ej3_bg2d.416
+		5'd10: begin part_base = SDR_TILES_BASE + 26'h030_0000;     part_size = 26'h008_0000; part_mode = M_24_B2;  end // ej3_bg2p.49
+		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // ej3_obj1.322
+		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // ej3_obj2.324
+		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // ej3_obj3.323
+		5'd14: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // ej3_pcm1.215
+		5'd15: begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // ejan3_7.216
+		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region01.u1053 + 1 MB of FF
 		endcase
 
 		// ---- TABLE rdfts: SXX2E single board ----

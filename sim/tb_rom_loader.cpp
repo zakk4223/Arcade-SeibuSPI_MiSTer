@@ -184,6 +184,50 @@ static const Part parts_viprp1[] = {
     { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
 };
 
+// senkyu and ejanhs, the other two generation-A cartridges. Both put 1 MB of
+// program in the UPPER half of the region behind a megabyte of fill, which no
+// other set does, and senkyu has a single bg group where everything else has
+// two. The bytes the MRA supplies for part 0 are zeroes; what is checked here
+// is that the parts after it land at the right addresses, which is what a wrong
+// base for the fill would break.
+static const Part parts_senkyu[] = {
+    { "zero fill",                   PRG_BASE,                0x100000, LINEAR  },
+    { "fb_1.211",                    PRG_BASE + 0x100000,     0x040000, W32_B0  },
+    { "fb_2.212",                    PRG_BASE + 0x100000,     0x040000, W32_B1  },
+    { "fb_3.210",                    PRG_BASE + 0x100000,     0x040000, W32_B2  },
+    { "fb_4.29",                     PRG_BASE + 0x100000,     0x040000, W32_B3  },
+    { "fb_6.413",                    CHARS_BASE,              0x020000, W24_W01 },
+    { "fb_5.48",                     CHARS_BASE,              0x010000, W24_B2  },
+    { "fb_bg-1d.415",                TILES_BASE,              0x200000, W24_W01 },
+    { "fb_bg-1p.410",                TILES_BASE,              0x100000, W24_B2  },
+    { "fb_obj-1.322",                SPRITES_BASE + 0,        0x400000, SPR_ILV },
+    { "fb_obj-2.324",                SPRITES_BASE + 2,        0x400000, SPR_ILV },
+    { "fb_obj-3.323",                SPRITES_BASE + 4,        0x400000, SPR_ILV },
+    { "fb_pcm-1.215",                PCMSRC_BASE,             0x100000, LINEAR  },
+    { "fb_7.216",                    SND01_BASE,              0x080000, LINEAR  },
+    { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
+};
+
+static const Part parts_ejanhs[] = {
+    { "zero fill",                   PRG_BASE,                0x100000, LINEAR  },
+    { "ejan3_1.211",                 PRG_BASE + 0x100000,     0x040000, W32_B0  },
+    { "ejan3_2.212",                 PRG_BASE + 0x100000,     0x040000, W32_B1  },
+    { "ejan3_3.210",                 PRG_BASE + 0x100000,     0x040000, W32_B2  },
+    { "ejan3_4.29",                  PRG_BASE + 0x100000,     0x040000, W32_B3  },
+    { "ejan3_6.413",                 CHARS_BASE,              0x020000, W24_W01 },
+    { "ejan3_5.48",                  CHARS_BASE,              0x010000, W24_B2  },
+    { "ej3_bg1d.415",                TILES_BASE,              0x200000, W24_W01 },
+    { "ej3_bg1p.410",                TILES_BASE,              0x100000, W24_B2  },
+    { "ej3_bg2d.416",                TILES_BASE + 0x300000,   0x100000, W24_W01 },
+    { "ej3_bg2p.49",                 TILES_BASE + 0x300000,   0x080000, W24_B2  },
+    { "ej3_obj1.322",                SPRITES_BASE + 0,        0x400000, SPR_ILV },
+    { "ej3_obj2.324",                SPRITES_BASE + 2,        0x400000, SPR_ILV },
+    { "ej3_obj3.323",                SPRITES_BASE + 4,        0x400000, SPR_ILV },
+    { "ej3_pcm1.215",                PCMSRC_BASE,             0x100000, LINEAR  },
+    { "ejan3_7.216",                 SND01_BASE,              0x080000, LINEAR  },
+    { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
+};
+
 static uint32_t dest_of(const Part &p, uint32_t i)
 {
     switch (p.mode) {
@@ -592,6 +636,12 @@ int main(int argc, char **argv)
     // 2 MB. Both are the kind of number that gets carried across by eye.
     rc = run_set(parts_viprp1, (int)(sizeof(parts_viprp1) / sizeof(parts_viprp1[0])),
                  4, "viprp1, authentic flash (SXX2C, gen A)", -1, 1, 1);
+    if (rc) return rc;
+    rc = run_set(parts_senkyu, (int)(sizeof(parts_senkyu) / sizeof(parts_senkyu[0])),
+                 5, "senkyu, authentic flash (SXX2C, gen A)", -1, 1, 1);
+    if (rc) return rc;
+    rc = run_set(parts_ejanhs, (int)(sizeof(parts_ejanhs) / sizeof(parts_ejanhs[0])),
+                 6, "ejanhs, authentic flash (SXX2C, gen A)", -1, 1, 1);
     if (rc) return rc;
 
     // The same two sets again with ioctl_wr held for TWO loader clocks, which

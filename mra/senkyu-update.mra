@@ -1,0 +1,133 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SlopperPI.                                     -->
+<!--                                                                     -->
+<!-- SlopperPI is free software: you can redistribute it and/or modify   -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Senkyu (Japan, SPI cartridge, self-flashing)</name>
+    <setname>senkyu</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1995</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>Japan</region>
+    <category>Sports</category>
+
+    <!--
+      THE GAME FLASHES ITSELF. The sample flash ships BLANK and the cartridge's
+      own sound ROMs come along as the material the game's updater reads, so on
+      first boot it runs the real "NOW UPDATING" ritual and programs its own
+      samples.
+
+      TWO THINGS TO KNOW BEFORE RUNNING IT.
+
+      * The update takes a few minutes and ends on "UPDATE COMPLETED. PLEASE
+        TURN THE POWER BACK ON." Reset the core (or reload the MRA) and it
+        plays.
+      * IT SAVES, BUT NOT BY ITSELF. When the ritual finishes, OPEN THE OSD
+        once: MiSTer asks the core for its nvram only while that menu is up
+        (Main_MiSTer's menu.cpp, MENU_GENERIC_MAIN2). After that the save file
+        loads on every boot and the ritual never runs again.
+
+      A pre-flashed variant of this set IS possible -- both halves of its
+      payload are compressed slices of ROM files, unlike viprp1's, whose second
+      job reads the 386's own program image -- but it is not built. It would
+      need two CODEC_BPE_DPCM parts in one download, which nothing has
+      exercised yet.
+    -->
+
+    <!--
+      Part order is significant. rtl/rom_loader.sv walks this list with a fixed
+      table -- selected by the mod byte below -- and performs MAME's
+      ROM_LOAD24_* / ROM_LOAD32_* byte scatter in hardware. `make check-mra`
+      holds this file, that table and MAME's ROM_START against each other.
+
+      This is a GENERATION A cartridge, which differs from rdft's family in two
+      ways the core cares about:
+
+        * the program is 1 MB in the UPPER half of the 2 MB region -- four
+          256 KB ROMs at offset 0x100000 -- so the first part is a megabyte of
+          zeroes for the half MAME leaves empty. Nothing is known to read it;
+          filling it means the region matches MAME's rather than holding
+          whatever the previously loaded core left in SDRAM.
+        * the PCM source is 1 MB on ONE byte lane where rdft's is 2 MB on two.
+          spi_cpu.sv's pcmsrc_1lane is that bit.
+
+      Decryption is the same SEI252 as rdft (MAME's init is init_sei252), so
+      nothing in the graphics path is new.
+    -->
+
+    <!--
+      Index 1 is the core's config blob. Byte 0 is the mod byte: bit 0 selects
+      the SXX2C board wiring, bits 3:1 the set, and BIT 4 the authentic-flash
+      tail plus the 386's sound01 source window.
+
+      IT MUST COME BEFORE THE index="0" ROM.
+    -->
+    <rom index="1"><part>19</part></rom>
+
+    <rom index="0" address="0x30000000" zip="senkyu.zip" md5="none">
+        <!-- the empty lower half of the program region -->
+        <part repeat="0x100000">00</part>
+
+        <!-- 386 program: four 256 KB byte lanes at region offset 0x100000 -->
+        <part name="fb_1.211" crc="20a3e5db"/>
+        <part name="fb_2.212" crc="38e90619"/>
+        <part name="fb_3.210" crc="226f0429"/>
+        <part name="fb_4.29"  crc="b46d66b7"/>
+
+        <!-- text layer: a word plus a byte -->
+        <part name="fb_6.413" crc="b57115c9"/>
+        <part name="fb_5.48"  crc="440a9ae3"/>
+
+        <!-- background tiles: ONE D+P group, 3 MB -->
+        <part name="fb_bg-1d.415" crc="eae7a1fc"/>
+        <part name="fb_bg-1p.410" crc="b46e774e"/>
+
+        <!-- sprites: 12 MB in three 4 MB plane-pair chunks, SEI252 -->
+        <part name="fb_obj-1.322" crc="29f86f68"/>
+        <part name="fb_obj-2.324" crc="c9e3130b"/>
+        <part name="fb_obj-3.323" crc="f6c3bc49"/>
+
+        <!-- MAME's sound01: the PCM source, then the second sound ROM -->
+        <part name="fb_pcm-1.215" crc="1d83891c"/>
+        <part name="fb_7.216"     crc="874d7b59"/>
+
+        <!--
+          The sample flash, BLANK. flash0_blank_region01.u1053 is a real dump
+          and carries the region ID in byte 0 -- 01, Japan, for this set. MAME
+          has no dump for the second E28F008SA because an erased chip has
+          nothing to dump, so it is a megabyte of FF here.
+        -->
+        <part name="flash0_blank_region01.u1053" crc="7ae7ab76"/>
+        <part repeat="0x100000">FF</part>
+    </rom>
+
+    <!--
+      The sample flash, saved to /media/fat/config/nvram/. Index 2 because 0 is
+      the ROM image, 1 the core's config blob and 254 the DIP switches; the size
+      is the two E28F008SA chips exactly. Main_MiSTer sends this file AFTER the
+      index-0 image, which is what lets it land on top of the blank flash that
+      image carries -- so it must stay below the <rom> element here.
+    -->
+    <nvram index="2" size="2097152"/>
+
+    <!--
+      Same control layout as the other sets; the names map to joystick bits
+      4 upwards IN ORDER and SeibuSPI.sv decodes them at exactly those positions.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
+             default="A,B,X,Start,Select,R,L" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>
