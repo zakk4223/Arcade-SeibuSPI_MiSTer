@@ -113,7 +113,12 @@ module spi_nvram
 	reg [25:0] dl_off;
 	reg        dl_run;
 	assign wr_active = dl_run;
-	assign dbg_bytes = dl_off;
+	// STICKY, and not `dl_off`: that one is cleared when the download ends, so
+	// it reads zero from the moment there is anything to report. The first
+	// version made exactly that mistake and reported "the save file never
+	// arrived" about a load that had just worked.
+	reg [25:0] dbg_got;
+	assign dbg_bytes = dbg_got;
 
 	// ------------------------------------------------------------------
 	// SAVE: a byte counter and two lines of prefetch.
@@ -168,6 +173,7 @@ module spi_nvram
 				wr_req     <= ~wr_req;
 				ioctl_wait <= 1'b1;
 				dl_off     <= dl_off + 26'd1;
+				dbg_got    <= dl_off + 26'd1;
 			end
 		end
 		else begin
@@ -255,6 +261,7 @@ module spi_nvram
 			wr_din     <= 16'd0;
 			wr_be      <= 2'd0;
 			dl_off     <= 26'd0;
+			dbg_got    <= 26'd0;
 			dl_run     <= 1'b0;
 			rd_req     <= 1'b0;
 			rd_addr    <= 26'd0;

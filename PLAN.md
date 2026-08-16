@@ -6385,3 +6385,47 @@ sound panel, the bytes the core actually received. Zero after a load, with an
 `.nvm` present, is a different fault from loading the wrong thing -- and this
 whole diagnosis was inferred from `bytes_in` NOT moving, which is a much weaker
 signal than the one that should have been there.
+
+### 18.10 PERSISTENCE WORKS: flashed once, loaded on every boot after
+
+Deployed with 18.9's fix, with the correct `.nvm` already on the card, and
+reloading the MRA -- which re-downloads the BLANK flash over the sample region --
+comes straight up in **attract**, 145 KB of screenshot, 19 voices sounding, and
+no ritual at all.
+
+The chain of evidence, because "it played" alone would not separate the load
+from a leftover SDRAM image:
+
+* `bytes_in` = `bytes_out` = 25,886,720 -- the whole authentic image landed,
+  which INCLUDES the two megabytes of blank flash written over the sample
+  region. Whatever is there now arrived after that.
+* the flash region matches `build_soundflash.py` in all eight sampled windows.
+* the flash counters are all zero: no erase, no byte programmed. The updater
+  never ran, so the game found a stamp it accepted.
+
+Only the nvram load can put a correct image there after the blank. So:
+**program the flash once, open the OSD once, and every boot after that is
+straight into the game.**
+
+**One reading in that panel was wrong, and it was mine.** `nvram in` showed 0
+for a load that had just worked, because `dbg_bytes` was wired to `dl_off` --
+which the module clears when the download ends, so it reads zero from the moment
+there is anything to report. It is a sticky counter now. The conclusion above
+does not rest on it, which is why the other three readings were worth taking.
+
+### 18.11 The cost of skipping the bench, in one table
+
+Four hardware cycles for the nvram, three of them avoidable:
+
+| what broke | where it was found | where it SHOULD have been found |
+|---|---|---|
+| prefetch re-armed without asking | a 2 MB file of one repeated line | `tb_nvram`, one second |
+| the 0xAA's `ioctl_rd` counted as a byte | same file, byte 0 twice | `tb_nvram`, one second |
+| nvram discarded by the DDR3 replay | ritual ran again; `bytes_in` said why | integration, not the module |
+| `rom_busy` included its own download | Main wedged solid | integration, not the module |
+
+The module bench pays for the first two and cannot reach the last two: both live
+in the wiring between `hps_io`, `ddr_rom_reader`, the ch3 mux and reset, which
+`tb_nvram` does not contain. `tb_boot_top` does. If persistence needs touching
+again, the next instrument is a load/save cycle driven through THAT, not through
+the module in isolation.
