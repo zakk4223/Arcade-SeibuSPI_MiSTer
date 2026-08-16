@@ -6187,3 +6187,55 @@ what section 0 measured under MAME's own default of Update.
 `EIP 0x26D65A` were normal, and the fault was in a port nobody was watching.
 Sampling the Z80 PC and disassembling out of SDRAM cost one command and found
 it. Do that before building a new probe.
+
+### 18.4 THE RITUAL RUNS, AND WHAT IT WROTE IS THE VERIFIED IMAGE
+
+Fourth run, with JP1 in update mode. It works.
+
+    flash prog = 1939011 bytes, 32 blocks erased, 0 DROPPED
+    fifo reads = 40747     f2 push/pop = 40773/40773
+
+**1,939,011 is exactly the payload section 0 measured under MAME**, to the byte,
+and `tools/build_soundflash.py` accounts for the same total from the other end
+(1,708,978 + 230,029 + the four stamp bytes). All 32 blocks erased, which is the
+queue from 547f150 doing its job -- and 0 drops.
+
+It ends on the screen the hardware ends on:
+
+    UPDATE COMPLETED. AFTER SWITCHING OFF THE POWER, RETURN 'JP1' TO ITS
+    ORIGINAL POSITION AND THEN TURN THE POWER BACK ON.
+
+which is the game confirming 18.3 in its own words.
+
+**The contents were checked, not assumed.** Eight windows dumped over JTAG and
+compared against `build_soundflash.py`'s image -- itself verified bit-for-bit
+against MAME's own flash nvram -- chosen at the places an off-by-one shows: the
+stamp, the head, the middle, both sides of the seam at 0x1A13B6 where the second
+source ROM takes over, the last payload byte at 0x1D9642, and the erased tail.
+**All eight match.**
+
+That is 17.7 step 1's acceptance test, passed: zip -> MRA -> loader -> the 386's
+source window -> the Z80 -> the wave port -> the flash controller -> SDRAM, and
+what comes out the far end is the image MAME produces.
+
+**Pace: about 5,150 bytes a second, so ~6 minutes for the payload.** Slower than
+16.6's "tens of seconds" guess -- that reasoned from MAME's ~7 emulated seconds,
+and MAME charges nothing for the 386/FIFO/Z80 round trip that actually paces
+this. Real hardware takes minutes for a different reason (flash program time),
+so the figures coincide by accident.
+
+### 18.5 What is still not tested
+
+**Whether it PLAYS afterwards.** The game halts and wants a power cycle. A
+`load_core` re-downloads the blank flash and starts the ritual again, so the
+test needs a reset that keeps SDRAM -- the OSD's own Reset item, by hand at the
+machine, or the save-file work in 17.6. `echo reset > /dev/MiSTer_cmd` is not a
+command; it is accepted by the shell and ignored, and the screenshot's md5 is
+unchanged either side of it.
+
+**Persistence**, which is what makes that moot: 17.6's `ioctl_upload` plumbing
+plus an `<nvram>` element. Until then every boot of an `-update` MRA is a
+six-minute ritual ending in a halt screen.
+
+**The other two sets.** rdft2 and rfjet have the same table and the same
+handshake but their own payloads and job tables; nothing about them has been run.
