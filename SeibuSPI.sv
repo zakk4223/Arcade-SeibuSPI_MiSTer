@@ -807,13 +807,25 @@ spi_top spi_top
 	.set_sxx2c      (set_sxx2c),
 	.set_id         (set_id),
 	.set_upd        (set_upd),
-	// JP1, SXX2C only. MAME's sxx2c port: bits [1:0] = 0x3 "Update" (which is
-	// its default), 0x0 "Normal"; bits [7:2] are unused IP_ACTIVE_LOW and read
-	// as 1. All-ones is therefore UPDATE MODE, and that is not inert -- the
-	// sound program sits in the reflash path waiting for data a pre-flashed
-	// core never sends, which deadlocks both CPUs in poll loops. Normal it is;
-	// update mode would need the flash write path this core does not have.
-	.jumpers        (8'hFC),
+	// JP1, SXX2C only. MAME's sxx2c port: bits [1:0] = 0x3 "Update", 0x0
+	// "Normal"; bits [7:2] are unused IP_ACTIVE_LOW and read as 1. So 0xFF is
+	// update mode and 0xFC is normal.
+	//
+	// THE AUTHENTIC MRAS NEED UPDATE MODE, and that is measured, not assumed.
+	// The updater erases its first block pair and then sits in this loop, read
+	// off the running hardware at Z80 0x18F5 (PLAN.md 18.3):
+	//
+	//     LD A,(0x400A) / AND 0x03 / CP 0x03 / JP NZ,0x18F5
+	//
+	// With 0xFC it spins there forever, with the music still playing. Section
+	// 10b blamed an earlier deadlock on this port being all-ones; that was the
+	// 0x4009 d0 bug, and the note it left behind ("update mode is not
+	// reachable") was wrong.
+	//
+	// Leaving it in update mode does NOT make a programmed cartridge reflash:
+	// the game skips the updater on a matching stamp whatever the jumper says,
+	// which is what section 0 measured under MAME's own default of Update.
+	.jumpers        (set_upd ? 8'hFF : 8'hFC),
 	.flash_sdr_addr (flash_sdr_addr),
 	.flash_sdr_din  (flash_sdr_din),
 	.flash_sdr_be   (flash_sdr_be),

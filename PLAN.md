@@ -6138,3 +6138,52 @@ one and the toggle handshake lost writes. The testbench caught it immediately:
 58,960 bytes of a 65,536-byte block left unerased. On hardware it would have
 been a quietly incomplete flash image, which is the failure mode this whole
 section exists to avoid.
+
+### 18.3 The updater waits for the JUMPER, and the Z80's own code said so
+
+Third run, with the erase queue: `2 blocks erased, 0 DROPPED, prog 0` -- exactly
+the second run. The queue changed nothing, which means the updater was not
+sending the other thirty pairs at all.
+
+**Two controls, both cheap, and both changed the question.** Loading the
+pre-flashed `rdft.mra` on the same bitstream reads `f2 push/pop = 14/14` -- the
+identical figure the stalled run shows, so that counter was boot chatter and not
+a stuck handshake. The working core's EIP sits at 0x203F0A, the vblank loop,
+where the stalled one sits at 0x26D65A -- which is the updater's normal Z80
+round-trip wait (16.6), so THAT reading was expected too. Between them they
+killed both theories in about two minutes.
+
+**What actually named it: the Z80's PC, sampled eight times.** 1901, 18F5, 1901,
+18F9, 1903, 1901, 18F9, 1903 -- a fifteen-byte loop. The Z80's program is in
+SDRAM, so the instrument for reading it already existed:
+
+    tools/slop dump 0x2018F0
+
+    18F5: 3A D4 3C     LD   A,(0x3CD4)
+    18F8: B7           OR   A
+    18F9: C4 47 01     CALL NZ,0x0147
+    18FC: 3A 0A 40     LD   A,(0x400A)      ; JP1
+    18FF: E6 03        AND  0x03
+    1901: FE 03        CP   0x03            ; update mode?
+    1903: C2 F5 18     JP   NZ,0x18F5       ; no -> spin
+
+The updater erases its first block pair and then **waits for the jumper**. The
+core ties `jumpers` to 0xFC, Normal, so it spins there forever with the music
+playing -- which is why every symptom pointed at the flash and none of them was
+the flash.
+
+**17.8's open question is closed the other way.** Section 10b saw a deadlock with
+this port all-ones and concluded update mode "is not reachable"; that deadlock
+was the 0x4009 d0 bug fixed later in the same section, and the note it left
+behind was wrong. `jumpers` is now `set_upd ? 8'hFF : 8'hFC` -- the authentic
+MRAs run in update mode, the pre-flashed ones do not.
+
+Leaving update mode selected does not make a programmed cartridge reflash: the
+game skips the updater on a matching stamp whatever the jumper says, which is
+what section 0 measured under MAME's own default of Update.
+
+**The lesson, and it is 13b's again.** Three of the four instruments read
+"wrong" and only one of them was: `flash prog = 0` was a symptom, `f2 14/14` and
+`EIP 0x26D65A` were normal, and the fault was in a port nobody was watching.
+Sampling the Z80 PC and disassembling out of SDRAM cost one command and found
+it. Do that before building a new probe.
