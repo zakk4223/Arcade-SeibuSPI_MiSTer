@@ -130,7 +130,16 @@
     </rom>
 
     <!--
-      Same control layout as the pre-flashed MRA; the names map to joystick bits
+      The sample flash, saved to /media/fat/config/nvram/. Index 2 because 0 is
+      the ROM image, 1 the core's config blob and 254 the DIP switches; the size
+      is the two E28F008SA chips exactly. Main_MiSTer sends this file AFTER the
+      index-0 image, which is what lets it land on top of the blank flash that
+      image carries -- so it must stay below the <rom> element here.
+    -->
+    <nvram index="2" size="2097152"/>
+
+    <!--
+      Same control layout as the other sets; the names map to joystick bits
       4 upwards IN ORDER and SeibuSPI.sv decodes them at exactly those positions.
     -->
     <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"

@@ -6629,3 +6629,59 @@ envelopes of this music decorrelate to 0.187 against themselves one window
 later, so anything that shifts time by a fraction of a window -- the 44.1 to
 48 kHz resampling in the capture chain, or the demo diverging -- costs most of
 it while leaving spectra untouched.
+
+### 19.6 viprp1 on hardware: it flashes itself, saves, and plays
+
+The fifth set, first run, on the seed-6 build:
+
+* the ritual ran -- **32 blocks erased, 0 dropped**, `flash prog` climbing
+  through 300k while `fifo reads` climbed 19k -> 24k -> 29k;
+* `/media/fat/config/nvram/viprp1-update.nvm` is
+  **274495438f7acc2593c57441d7eb02d1371eb0e275e7ef3ca55e7774fa71a44e**,
+  identical to `build_soundflash.py`'s image;
+* reloading reads `nvram in = 2097152` with the flash counters at zero -- the
+  updater skipped -- and the game plays: a CONTINUE? screen over live gameplay,
+  10 voices sounding.
+
+So generation A works: the 1 MB PCM source on ONE byte lane feeds the updater
+correctly, which is the only new decode this set needed.
+
+**One number was NOT observed:** the final `flash prog`. The prediction was
+1,634,816 (4 + 1,291,669 + 343,143 from the job-table walk) and the core was
+reloaded between two samples, so the counter had been cleared by the time it was
+read. The image it produced is byte-exact, which says more about the outcome
+than the counter would have, but the count itself is unconfirmed for viprp1
+where it was confirmed for the other three.
+
+**And a reading was misjudged on the way.** The first panel after loading showed
+`fifo reads = 0` with the 386 -> Z80 FIFO at 470 of 511, which looks exactly
+like a Z80 that never starts -- and was called that. It was a snapshot taken
+before the 386 released the Z80: the FIFO backlog is what the updater's first
+seconds always look like. Two more samples showed everything climbing. On this
+board, one reading of a counter that is supposed to move is not evidence; two
+are.
+
+### 19.7 The timing scare, and why the mux was NOT restructured
+
+The viprp1 build missed on seed 5 by **-0.852 ns on clk_ram** -- the core's own
+clock, not the framework's, and far worse than the marginal ascal misses of
+17.13. The suspicion was structural: `set_id` had just widened from 2 bits to 3,
+adding a fifth arm to a table mux that 17.13 already named as the core's worst
+path, and a restructure was proposed.
+
+**Seed 6 then passed at +0.431, and the path report says the mux is not the
+problem.** The worst 25 on the passing build:
+
+    0.431  sdram|dq_reg[8]      -> sdram|dq_reg_d[8]      the DQ capture
+    0.546  sdram|ch3_addr_1[17] -> sdram|SDRAM_A[7]       address pin
+    0.648  sdram|ch1_rq         -> sdram|SDRAM_A[7]
+    0.631  ascal|o_vpix_inner...                          framework scaler
+
+Every one is inside `sdram.sv` -- and post-register, so upstream of the ch3 mux
+the nvram work added -- or in ascal. `mod_byte -> part_base_r` does not appear
+at all: an 85-entry lookup has 8.7 ns to resolve and uses a fraction of it.
+
+So the restructure was dropped. What the swing really shows is a device at 83%
+ALMs where seed choice moves the worst path by more than a nanosecond, and the
+tightest paths belong to the SDRAM controller's pin timing, which no amount of
+tidying in the loader would touch.
