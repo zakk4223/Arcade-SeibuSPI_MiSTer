@@ -63,6 +63,9 @@ module spi_sound
 	output      [1:0] flash_sdr_be,
 	output            flash_sdr_req,
 	input             flash_sdr_ack,
+	// Toggles once per store into the sample flash. spi_nvram uses it to know
+	// when there is something worth saving.
+	output            flash_dirty_o,
 	output     [31:0] dbg_flash_progs,
 	output     [15:0] dbg_flash_erases,
 	output     [15:0] dbg_flash_drops,
@@ -513,6 +516,7 @@ module spi_sound
 	wire        ext_ovr;
 	wire  [7:0] ext_ovr_data;
 	wire        flash_dirty;
+	assign flash_dirty_o = flash_dirty;
 
 	/* verilator lint_off UNUSEDSIGNAL */
 	wire _unused_ext = &{1'b0, ext_a[22:21]};

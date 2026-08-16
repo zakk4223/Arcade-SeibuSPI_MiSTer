@@ -6252,10 +6252,7 @@ booting from the result.
 
 ### 18.6 What is still not tested
 
-**Persistence.** The flash lives in SDRAM, so this survives a reset and not a
-reload: every `load_core` of an `-update` MRA is another six-minute ritual
-ending on the halt screen. 17.6's `ioctl_upload` plumbing plus an `<nvram>`
-element is what turns "it works" into "it works once".
+**Persistence: BUILT, not yet run on hardware.** See 18.7.
 
 **The other two sets.** rdft2 and rfjet have the same table and the same
 handshake but their own payloads and job tables; nothing about them has been run.
@@ -6264,3 +6261,45 @@ handshake but their own payloads and job tables; nothing about them has been run
 right; 10d's method (`-wavwrite` against a hardware capture) is what would say
 so, and rdft's pre-flashed audio has been through it while this image has not --
 though the two images are byte-identical, which is most of the argument.
+
+### 18.7 Persistence: the flash as an arcade NVRAM
+
+`rtl/spi_nvram.sv`, both directions of MiSTer's `<nvram>` mechanism on index 2,
+plus the element in the three `-update` MRAs. Lint-clean and `make verify`
+green; NOT yet run on hardware.
+
+**The two directions want different SDRAM ports, and that is the design.**
+
+* **Load** arrives as an ordinary ioctl download at index 2, AFTER the ROM
+  image, so it lands on top of the blank flash the MRA just carried. It takes
+  ch3's write path -- the only writable one -- and holds the board in reset
+  while it runs, exactly as the ROM image does. Nothing else is asking for ch3
+  then.
+* **Save** runs while the GAME is running, so it reads through **ch5**, the
+  YMF271's own sample channel, behind a `spi_sdr_arb2` with the YMF winning
+  ties. ch5 is idle between voice fetches and the sound CPU never waits on it,
+  so a two-megabyte read-back cannot starve anything that matters.
+
+**The save side cannot be stalled, so it prefetches two lines.** `hps_io`
+samples `ioctl_din` on the same edge it advances its address and there is no
+wait signal in that direction. Fetching a line when the address crosses into it
+would arrive late; instead the NEXT line is fetched as soon as the current one
+lands, so a crossing swaps in a line that is already here and the fetch that
+follows has eight SPI byte times to complete.
+
+**One save request per settled burst, not per byte.** The ritual programs two
+million bytes; asking Main two million times would be absurd. `spi_nvram`
+watches the flash's `dirty` toggle, restarts a counter on every store, and
+raises `ioctl_upload_req` once when the flash has been quiet for ~0.1 s.
+
+**When the save actually happens is Main's business, and it is worth knowing:**
+`UIO_CHK_UPLOAD` is polled in `MENU_GENERIC_MAIN2` -- the OSD's main menu --
+not on a background timer. So the flash is written to
+`/media/fat/config/nvram/<mra>.nvm` the next time the user OPENS THE OSD, which
+the MRAs now say in as many words. There is no way to make it happen unprompted
+from the core side.
+
+**Two ioctl consumers now share one stream**: `rom_loader` takes index 0 and
+`spi_nvram` index 2, each with its own `ioctl_wait`, OR'd together on the way
+back to `ddr_rom_reader`. The fast-load replay passes any non-zero index
+straight through, so nothing there needed changing.

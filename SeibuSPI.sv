@@ -228,6 +228,11 @@ wire [25:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_index;
 wire        ioctl_wait;
+wire        ioctl_upload;
+wire        ioctl_upload_req;
+wire  [7:0] ioctl_upload_index;
+wire  [7:0] ioctl_din;
+wire        ioctl_rd;
 
 // The loader's side of ddr_rom_reader. For a slow download these are the ioctl
 // signals unchanged; for a fast one the HPS has already put the image in DDR3
@@ -238,7 +243,12 @@ wire        dl_download;
 wire        dl_wr;
 wire  [7:0] dl_dout;
 wire  [7:0] dl_index;
+// Two consumers of the same ioctl stream, each with its own backpressure: the
+// ROM loader takes index 0 and spi_nvram index 2, and whichever is not
+// interested holds its wait low.
 wire        dl_wait;
+wire        ldr_wait, nv_dl_wait;
+assign      dl_wait = ldr_wait | nv_dl_wait;
 
 wire [15:0] joystick_p1, joystick_p2;
 
@@ -264,6 +274,14 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.ioctl_dout(ioctl_dout),
 	.ioctl_index(ioctl_index),
 	.ioctl_wait(ioctl_wait),
+
+	// The sample flash's save file. Main polls for the request when the OSD is
+	// open, then reads the region back a byte at a time. See rtl/spi_nvram.sv.
+	.ioctl_upload(ioctl_upload),
+	.ioctl_upload_req(ioctl_upload_req),
+	.ioctl_upload_index(ioctl_upload_index),
+	.ioctl_din(ioctl_din),
+	.ioctl_rd(ioctl_rd),
 
 	.joystick_0(joystick_p1),
 	.joystick_1(joystick_p2),
@@ -296,7 +314,11 @@ pll pll
 // any of it has reached SDRAM; keying the reset off that releases the 386 into
 // an empty image. dl_download stays high until ddr_rom_reader has handed over
 // the last byte, and is identical to ioctl_download for a slow download.
-wire reset = RESET | status[0] | buttons[1] | (dl_download & (dl_index == 8'd0)) | ~pll_locked;
+// The nvram download writes the sample region through ch3, which the running
+// board also uses, so the board is held down for it exactly as it is for the
+// ROM image. It is two megabytes and arrives once, at load.
+wire reset = RESET | status[0] | buttons[1] | (dl_download & (dl_index == 8'd0))
+           | nv_wr_active | ~pll_locked;
 
 ///////////////////////////  DIP SWITCHES  ///////////////////////
 
@@ -438,8 +460,8 @@ sdram #(.USE_CH5(1)) sdram
 	.ch4_addr({1'b0, sdr_spr_addr}), .ch4_dout(sdr_spr_dout),
 	.ch4_req (sdr_spr_req),  .ch4_ack (sdr_spr_ack),
 
-	.ch5_addr({1'b0, sdr_pcm_addr}), .ch5_dout(sdr_pcm_dout),
-	.ch5_req (sdr_pcm_req),  .ch5_ack (sdr_pcm_ack)
+	.ch5_addr({1'b0, ch5_addr}), .ch5_dout(ch5_dout),
+	.ch5_req (ch5_req),      .ch5_ack (ch5_ack)
 );
 
 // How busy that bus actually is. Taps the handshakes only -- nothing here
@@ -576,7 +598,7 @@ rom_loader rom_loader
 	.ioctl_wr       (dl_wr),
 	.ioctl_index    (dl_index),
 	.ioctl_dout     (dl_dout),
-	.ioctl_wait     (dl_wait),
+	.ioctl_wait     (ldr_wait),
 	.set_id         (set_id),
 	.set_upd        (set_upd),
 	.part_codec     (part_codec),
@@ -712,15 +734,84 @@ spi_sdr_arb4 ch3_arb
 	.a_dout (sdr_z80_dout), .b_dout (peek_dout)
 );
 
+// ch3's owners in order of life: the ROM loader, the checker, then the board's
+// arbiter -- and, cutting in front of all of them, the nvram load. That one
+// arrives AFTER the image (Main sends <nvram> in file order) so it cannot use
+// the loader's slot, and it holds the board in reset while it runs, so nothing
+// else is asking.
 assign arb_ack     = sdr_rw_ack;
-assign sdr_rw_addr = chk_done  ? arb_addr
-                   : rom_ready ? chk_addr : ldr_addr;
-assign sdr_rw_din  = chk_done  ? arb_din  : ldr_din;
-assign sdr_rw_be   = chk_done  ? arb_be   : ldr_be;
-assign sdr_rw_req  = chk_done  ? arb_req
-                   : rom_ready ? chk_req  : ldr_req;
-assign sdr_rw_rnw  = chk_done  ? arb_rnw
-                   : rom_ready ? 1'b1     : ldr_rnw;
+assign sdr_rw_addr = nv_wr_active ? nv_wr_addr
+                   : chk_done     ? arb_addr
+                   : rom_ready    ? chk_addr : ldr_addr;
+assign sdr_rw_din  = nv_wr_active ? nv_wr_din
+                   : chk_done     ? arb_din  : ldr_din;
+assign sdr_rw_be   = nv_wr_active ? nv_wr_be
+                   : chk_done     ? arb_be   : ldr_be;
+assign sdr_rw_req  = nv_wr_active ? nv_wr_req
+                   : chk_done     ? arb_req
+                   : rom_ready    ? chk_req  : ldr_req;
+assign sdr_rw_rnw  = nv_wr_active ? 1'b0
+                   : chk_done     ? arb_rnw
+                   : rom_ready    ? 1'b1     : ldr_rnw;
+
+// ch5 has two readers once there is a save file: the YMF271's sample fetch and
+// spi_nvram reading the region back. The YMF wins ties -- it is feeding a
+// running voice, while the save is paced by the HPS a byte at a time.
+wire [25:0] ch5_addr;
+wire [63:0] ch5_dout;
+wire        ch5_req, ch5_ack;
+
+spi_sdr_arb2 ch5_arb
+(
+	.clk    (clk_ram),
+	.a_addr (sdr_pcm_addr), .a_req (sdr_pcm_req), .a_ack (sdr_pcm_ack),
+	.b_addr (nv_rd_addr),   .b_req (nv_rd_req),   .b_ack (nv_rd_ack),
+	.m_addr (ch5_addr),     .m_req (ch5_req),     .m_ack (ch5_ack),
+	.m_dout (ch5_dout),
+	.a_dout (sdr_pcm_dout), .b_dout (nv_rd_dout)
+);
+
+wire        flash_dirty;
+wire [25:0] nv_wr_addr, nv_rd_addr;
+wire [15:0] nv_wr_din;
+wire  [1:0] nv_wr_be;
+wire        nv_wr_req, nv_wr_active, nv_rd_req, nv_rd_ack;
+wire [63:0] nv_rd_dout;
+wire [15:0] dbg_nv_saves;
+
+spi_nvram nvram
+(
+	.clk        (clk_ram),
+	.reset      (RESET | ~pll_locked),
+	.enable     (set_upd),
+
+	.ioctl_download (dl_download),
+	.ioctl_wr       (dl_wr),
+	.ioctl_index    (dl_index),
+	.ioctl_dout     (dl_dout),
+	.ioctl_wait     (nv_dl_wait),
+	.ioctl_upload       (ioctl_upload),
+	.ioctl_rd           (ioctl_rd),
+	.ioctl_din          (ioctl_din),
+	.ioctl_upload_req   (ioctl_upload_req),
+	.ioctl_upload_index (ioctl_upload_index),
+
+	.flash_dirty (flash_dirty),
+
+	.wr_addr    (nv_wr_addr),
+	.wr_din     (nv_wr_din),
+	.wr_be      (nv_wr_be),
+	.wr_req     (nv_wr_req),
+	.wr_ack     (sdr_rw_ack),
+	.wr_active  (nv_wr_active),
+
+	.rd_addr    (nv_rd_addr),
+	.rd_req     (nv_rd_req),
+	.rd_ack     (nv_rd_ack),
+	.rd_dout    (nv_rd_dout),
+
+	.dbg_saves  (dbg_nv_saves)
+);
 
 // Refresh aggressively while the board is idle; the controller also has its own
 // emergency refresh, which is what covers the download.
@@ -826,6 +917,7 @@ spi_top spi_top
 	// the game skips the updater on a matching stamp whatever the jumper says,
 	// which is what section 0 measured under MAME's own default of Update.
 	.jumpers        (set_upd ? 8'hFF : 8'hFC),
+	.flash_dirty    (flash_dirty),
 	.flash_sdr_addr (flash_sdr_addr),
 	.flash_sdr_din  (flash_sdr_din),
 	.flash_sdr_be   (flash_sdr_be),
