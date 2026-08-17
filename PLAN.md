@@ -7333,3 +7333,84 @@ mismatch, `spi_soundflash.sv`'s `dbg_w_hit` against `tb_ymf_top.sv`. It fails
 identically at HEAD with this change stashed, so it is pre-existing and
 unrelated -- but it means `make test` has not been green for however long that
 has been true, and the YMF271 testbench has not been running.
+
+### 20.5 Timing, and a fit that is better by luck rather than by construction
+
+    Setup Summary                                Slack     TNS
+      pll_hdmi                                   +0.278    0.000
+      emu|pll general[0]  (clk_ram)              +0.479    0.000
+      emu|pll general[1]                         +1.286    0.000
+      emu|pll general[2]                         +2.660    0.000
+      h2f_user0_clk                              +4.266    0.000
+    Hold: worst +0.239, TNS 0.000 on every clock. 0 errors.
+
+clk_ram closes at **+0.479** against the **+0.018** 19.16 recorded, and 19.16's
+critical endpoint `sdram|ch5_rq -> SDRAM_A[11]` now sits at +0.607 with
+`ch4_rq -> SDRAM_A[8]` taking over as the worst.
+
+**That is not a fix and should not be recorded as one.** This change took no
+logic out of any clk_ram path -- the single adder it adds is `pcm_grp_addr`'s
+base in spi_cpu, on clk_cpu at 28.6 MHz, and it appears nowhere in the worst 25.
+19.16's rule applies: at 87% RAM utilisation the failing endpoint moves between
+fits and placement alone swings it. The right reading is that the change is
+timing-neutral and this fit happened to land well. The margin problem is still
+there and still wants a seed sweep.
+
+### 20.6 On hardware, and the region is where it should be
+
+Deployed and run on the MiSTer with `rdft-update.mra`. The saved flash loaded,
+the ritual was skipped, and rdft came up in attract with sprites -- 103 KB and
+92 KB of screenshot across two loads.
+
+What the run actually establishes, in the order it was measured:
+
+* `bytes_in = 25,886,720`, `bytes_out` the same, which is `check_mra.py`'s
+  predicted download total for rdft-upd **to the byte**.
+* **gun_dogs_pcm.u0217 is byte-exact at 0x1D00000**: 96 groups dumped over JTAG
+  from the base and from 0x1D80000, all 768 bytes matching the ROM out of the
+  zip. That is the moved base, confirmed on the board and not just in the image.
+* **The sprites abut it with no gap.** 0x1CFFFE0-0x1CFFFFF reads
+  `26D5 6FCB 584D` repeating -- the three plane-pair chunks interleaving -- so
+  the last sprite byte and the first PCM-source byte are adjacent.
+* **The old base is no longer written.** 0x2900000 reads `00FFFEFF00000000`,
+  which is neither the PCM ROM nor fill: it is whatever the previously loaded
+  core left in SDRAM, exactly as it should be now that rdft's map stops at 31 MB.
+* PRG, CHARS, TILES and SPRITES all match `build_sdram_image.py --upd`'s image
+  at their bases, 16/16 groups.
+
+Note the JTAG `dump` prints each 64-bit word MSB-first, so a group reads
+byte-reversed against the ROM. Every comparison above is against the reversed
+bytes. Getting that backwards would make a perfect region look like garbage.
+
+### 20.7 A PRE-EXISTING fault in the `sums` panel, found by not trusting it
+
+`sums` on rdft-update reports:
+
+    part_end    = 10          (rdft-upd has 17 parts, so this should be 16)
+    ok bits     = 0000
+    sum SPRITES = 209DB042
+    sum TILES   = 00000000
+    sum CHARS   = 00000000
+    sum PRG     = 00000000
+
+Three regions summing to ZERO is not the same as the expected mismatch the
+README describes (the constants are rdfts', so rdft's differing regions are
+*supposed* to fail). A zero sum means the walk did not happen.
+
+**The data is fine.** Dumping all four regions and comparing against the
+reference image gives 16/16 groups matching, including the three that sum to
+zero. So the panel is wrong and the memory is right.
+
+**It is not this change.** The pre-change RBF was reloaded on the same MRA as a
+control and reads *identically* -- `part_end 10`, `ok bits 0000`, the same three
+zeros, the same `209DB042`, the same `bytes_in`. Only the pass counter differs,
+and that is a time-since-load counter.
+
+So this is an existing fault in either `spi_romcheck.sv`'s walk or
+`jtag_peek.tcl`'s field offsets, of unknown age, and it means **`sums` has been
+reporting a useless `ok bits 0000` on the cartridge sets rather than the
+per-region answer it is supposed to give.** Stale Tcl field offsets have lied
+here before (PLAN.md 10d), and `part_end = 10` alongside three zeroed sums looks
+much more like a field-offset problem than like three failed walks. Not chased
+here; logged so the next person does not read `ok bits 0000` as evidence of
+anything.
