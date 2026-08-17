@@ -7135,3 +7135,75 @@ roulette in this project has been more than an annoyance.
 corrupt a byte on the core as it ships. The five sets whose saves matched their
 references in section 19 were single runs each, and that is now the right way to
 read them: not a clean bill, but five coin flips that happened to land well.
+
+### 19.17  The integrity counter already existed, and it narrows this to one address
+
+The counter did not need building. The JTAG peek reads a 64-bit line through
+ch3, the regions it reads are READ-ONLY, and a read-only location that returns
+two different values has proved its own corruption -- no reference, no pattern,
+no writer. Hammering one address 100 times takes about ten seconds and gives a
+rate instead of an anecdote. Everything below came from that, with no rebuild:
+
+**Under load, one address in eight fails, and only one address.**
+
+```
+0x0000100 PRG      0/150      0x2902000 PCMSRC   0/150
+0x0080000 PRG      0/150      0x0500000 tiles    0/150
+0x0100000 PRG      0/150      0x1100000 sprites  0/150
+0x2829F8  flash    0/150
+0x29029F8 PCMSRC  13/150 bad, beat3 only
+```
+
+and a scan of the 128 lines either side of it -- 5,120 reads -- found **zero**
+errors anywhere but that one line. Which kills the theory 19.15 ended on: if the
+last beat of a burst were marginal in general, every line whose last beat is not
+already 0xFFFF would show it, and 127 of them show nothing.
+
+**It is a read error, not a stored one.** The failures are isolated and
+scattered, never in runs:
+
+```
+.X..X.XX........XX.........X............X.X....X........X...
+..X.......X...X............................X...............X
+....X...X....X....X......XX.X.X.X.X.X....X......X..X...XX...
+```
+
+A DRAM cell that had decayed would be sensed wrong, latched, and written back
+wrong -- the value would go bad and STAY bad. It flips back every time, so the
+memory holds the right bits and the read misreports them. Retention is out.
+
+**And it is not the data pattern either**, though it looked like it twice:
+
+* Other lines whose last beat is 0xFFFE, the exact failing value: clean.
+* Other lines with the same 0x0000 -> lone-zero mass transition into the last
+  beat -- fifteen lines slewing high while one holds low, which is what
+  simultaneous-switching noise would pick on: clean, at every beat position.
+* The SAME address holding rdft's data instead of rdft2's, whose last beat
+  0xE100 also has a zero in bit 0: **250 reads, zero errors.**
+
+So it is neither the address alone nor the data alone. It is one location
+holding one value, misread about one time in eight, in a single bit, always the
+last beat of its burst. That is analog behaviour of this particular module at
+one column under one condition, not core logic -- and the decisive test is
+another MiSTer: same core, same MRA, hammer 0x29029F8. Clean there means the
+module.
+
+**Why only rdft2 ever showed it.** The byte at source offset 0x29FE, per set:
+
+```
+rdft    00   bit0=0   exposed        rfjet   FF   bit0=1   invisible
+rdft2   FE   bit0=0   exposed        viprp1  F5   bit0=1   invisible
+                                     senkyu  D7   bit0=1   invisible
+                                     ejanhs  49   bit0=1   invisible
+```
+
+Only two sets can even see this bit, and rdft's one ritual had about an 85%
+chance of getting away with it -- which is exactly what its matching sha256
+means, no more.
+
+**Corrections to the sections above.** 19.15 speculated that every ch1 read took
+the same risk and that the implication was "far wider than one byte"; the
+128-line scan says otherwise, and 19.16's reading of the rate as a property of
+the build rather than of the address was wrong for the same reason. What stands
+from 19.12-19.15 is the chain itself, every link of which was measured: memory
+holds FE, the read returns FF, and the 386 pushes what it read.
