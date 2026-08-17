@@ -102,6 +102,12 @@ collapse to one MRA possible at all — the surviving shape is the one that
 carries these ROMs. `rtl/spi_defs.vh` `SDR_PCMSRC_*`, and
 `build_sdram_image.py --upd` prints the map top it produces.
 
+## Where this is right now
+
+`RESUME.md` is the live state: what is finished, the one thing blocking a
+release, and what to try next on it. `PLAN.md` is the design record and reads
+chronologically.
+
 ## Building
 
     make            # full Quartus compile -> output_files/SeibuSPI.rbf
