@@ -184,7 +184,28 @@ module spi_jtag_peek
 	output     [31:0] prof_lo,
 	output     [31:0] prof_hi,
 	input      [39:0] prof_in,
-	input      [39:0] prof_total
+	input      [39:0] prof_total,
+
+	// The sample-flash derivation (PLAN.md 24-26). Its own probe rather than
+	// fields bolted onto SUMS: every offset in that one is hand-written in
+	// tools/jtag_peek.tcl and widening it has silently shifted every field
+	// after the change twice already (10d, 21.1). A new instance moves nothing.
+	// 72 bits, trimmed from 136. The stamp and the live source address came out
+	// again: the stamp is already held against build_soundflash by
+	// `make check-mra`, and the source only mattered while the walk itself was
+	// unproven. What is left is what says whether it RAN and how far it got.
+	// The 136-bit version tipped sdram.sv's `ch1_rq -> command[1]` over on
+	// clk_ram -- a path with none of this logic in it, which is what routing
+	// pressure on a clock at 87% RAM utilisation looks like.
+	input      [31:0] drv_cfg_job,
+	input       [1:0] drv_cfg_gen,
+	input             drv_en,
+	input             drv_done,
+	input             drv_overrun,
+	input             drv_badjob,
+	input       [7:0] drv_jobs,
+	input      [21:0] drv_bytes,
+	input       [3:0] drv_state
 );
 
 	// Width of the SUMS probe, written as the sum of its fields rather than as a
@@ -362,6 +383,26 @@ module spi_jtag_peek
 	gdt_issp
 	(
 		.probe  (gdt),
+		.source ()
+	);
+
+	// 72 bits: cfg_job(32) cfg_gen(2) en done overrun badjob(4) jobs(8)
+	// bytes(22) state(4).
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (3),
+		.instance_id             ("DRIV"),
+		.probe_width             (72),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	drive_issp
+	(
+		.probe  ({drv_cfg_job, drv_cfg_gen,
+		          drv_en, drv_done, drv_overrun, drv_badjob,
+		          drv_jobs, drv_bytes, drv_state}),
 		.source ()
 	);
 

@@ -138,6 +138,27 @@ if {$mode eq "list"} {
     puts "sum TILES   = [bin2hex [string range $p 125 156]]"
     puts "sum CHARS   = [bin2hex [string range $p 157 188]]"
     puts "sum PRG     = [bin2hex [string range $p 189 220]]"
+} elseif {$mode eq "derive"} {
+    set p [read_probe_data -instance_index [index_of "DRIV"]]
+    # 72 bits, MSB first, matching spi_jtag_peek.sv's DRIV concatenation:
+    #   0..31 cfg_job   32..33 cfg_gen   34 en  35 done  36 overrun  37 badjob
+    #   38..45 jobs     46..67 bytes     68..71 state
+    #
+    # It was 136 with the stamp and the live source address in it; both came out
+    # to give clk_ram back its margin. Re-derive this whole list if it ever
+    # changes again -- every field after a widened one moves (PLAN.md 10d).
+    set n [string length $p]
+    puts "raw width   = $n  (expected 72)"
+    if {$n != 72} { puts "WIDTH MISMATCH -- the fields below are meaningless." }
+    puts "cfg job     = [bin2hex [string range $p 0 31]]   (0 = the MRA sent none)"
+    puts "cfg gen     = [expr 0b[string range $p 32 33]]   (0 A, 1 B0, 2 B1)"
+    puts "enabled     = [string index $p 34]"
+    puts "done        = [string index $p 35]"
+    puts "err overrun = [string index $p 36]"
+    puts "err badjob  = [string index $p 37]"
+    puts "jobs done   = [expr 0b[string range $p 38 45]]"
+    puts "bytes out   = [expr 0b[string range $p 46 67]]"
+    puts "state       = [expr 0b[string range $p 68 71]]"
 } elseif {$mode eq "vitals"} {
     set p [read_probe_data -instance_index [index_of "VITL"]]
     # 254 bits, MSB first: 0..15 spr_starved, 16..31 spr_tiles,
@@ -632,7 +653,7 @@ if {$mode eq "list"} {
     }
 } else {
     puts "usage: quartus_stp -t tools/jtag_peek.tcl \[list | sums | vitals | sound | sdram |"
-    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\] | sdram | pcmread]"
+    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\] | sdram | pcmread | derive]"
 }
 
 end_insystem_source_probe

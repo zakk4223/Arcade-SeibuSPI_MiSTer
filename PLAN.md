@@ -8012,3 +8012,113 @@ byte of it reaches the sample region, then toggles `flash_dirty` and requires no
 request on any of 4,000 cycles. Checked for the ability to fail by setting
 `enable` back to 1 for that section: 4,096 bytes leak and the request comes up
 on 3,763 cycles.
+
+## 26. One MRA per set
+
+`mra/` is seven files now, one per set, and the pre-flashed / self-flashing
+split is gone:
+
+    rdfts.mra  rdft.mra  rdft2.mra  rfjet.mra  viprp1.mra  senkyu.mra  ejanhs.mra
+
+The three pre-flashed MRAs are deleted and the six `-update` ones took their
+names. What survives is the shape that carries the cartridge's own ROMs,
+because that is the one the core can build anything from.
+
+### 26.1 The default had to flip with it
+
+Before this, `rdft`, `rdft2` and `rfjet` each had a pre-flashed MRA that booted
+instantly. Collapsing to the update shape while leaving **Ritual** as the
+default would have given those three a six-minute first boot where they
+previously had none -- the collapse would have been a regression for exactly the
+sets that were best served.
+
+So the option is now **Sample Flash: Pre-built (default) / Ritual**. Two things
+fall out of that beyond not regressing:
+
+* the common path no longer depends on the OSD option being touched at all,
+  which matters because that option is still unverified (25.7)
+* Pre-built neither loads nor saves an nvram (25.8), so the default path has no
+  save file to go stale, and the flash is rebuilt from the ROMs every boot
+
+`derive_sel` is `~status[22]` -- the option's first label is its zero value.
+
+### 26.2 What the collapse costs, and what it buys
+
+**Costs.** Every cartridge download grows, because the MRA now carries the
+source ROMs instead of a finished image: rdft 22.2 -> 24.7 MB, rdft2 34.5 ->
+36.7, rfjet 37.5 -> 39.7. That is the price of the sets being buildable at all,
+and section 20's per-set `pcmsrc` base is what kept it from also costing rdft
+its 32 MB fit.
+
+**Save files are orphaned.** MiSTer names nvram after the MRA, so an existing
+`rdft-update.nvm` no longer matches `rdft.mra`. It does not matter on the
+default path -- Pre-built uses no save -- but anyone who wants Ritual to persist
+across the rename should rename the file to match.
+
+**Buys.** Seven sets get an instant first boot where three did. viprp1, senkyu
+and ejanhs could not have a pre-flashed MRA built at all -- viprp1 structurally,
+the other two because nothing had exercised two decoded parts in one download.
+And a clone needs no new derived image and no new sha256: its job-table address
+rides in its MRA (batlball is the worked example, 23.2).
+
+### 26.3 The check that replaced the one this deleted
+
+`check_mra.py` used to rebuild each pre-flashed set's derived image from the
+MRA's own slices and compare a sha256. With no MRA carrying a derived image
+there is nothing left to rebuild, and that check is gone from it.
+
+`make check-derive ROMS=...` is what took over, and it covers **seven** sets
+where that covered two -- deriving each one from its SDRAM image alone and
+comparing against both the ROM-set route and the reference hash. `make
+check-mra` still holds every MRA against MAME's ROM_START and the RTL loader
+table, and now also holds the derivation constants against build_soundflash.
+
+### 26.4 Timing: my logic is off the critical path, and the path that fails is 19.16's
+
+The collapse's own build passed (+0.163). Adding the `DRIV` telemetry probe did
+not, and chasing it produced the most useful number in this section.
+
+The failing endpoint is `sdram|ch1_rq -> sdram|command[1]`, with **none of the
+derivation, the probe or the config registers anywhere in the worst 25**. What
+moved was routing pressure, not logic depth. Two changes and a reseed:
+
+| build | clk_ram | note |
+|---|---|---|
+| collapse, no probe        | **+0.163** | passed |
+| + DRIV probe, 136 bits    | -0.175 | `mod_byte -> rom_loader\|part_size_r` |
+| + config registered onto clk_ram | -2.906 | see 26.5 -- this was my error |
+| per-domain config copies  | -0.256 | `sdram\|ch1_rq -> command\|1]` |
+| probe trimmed to 72 bits  | -0.034 | same path |
+| + seed 13                 | -0.020 | same path |
+
+**The comparison that matters: 19.16 recorded the shipping build closing at
++0.018 ns on the sibling path `sdram|ch5_rq -> SDRAM_A[11]`.** This build sits at
+-0.020 on `ch1_rq -> command[1]`. Those two numbers are 38 ps apart. The design
+has been balanced on this endpoint the whole time, and whether any given fit
+passes it is close to a coin flip -- which is why a seed sweep moved it between
+-0.256 and -0.020 without ever resolving it.
+
+So seeds are not a fix here and this should not be recorded as one. What the
+path needs is real work: registering sdram.sv's request arbitration so `ch*_rq`
+does not reach the command encoder combinationally. That is 19.16's open item,
+it predates all of this, and it is out of scope for the MRA collapse.
+
+Tried and abandoned, for the record: seeds 12, 13, 14, 15 give -0.256, -0.061,
+-0.239, -0.099 with the 136-bit probe. Do not repeat that sweep.
+
+### 26.5 Moving a static signal's clock domain was the wrong fix
+
+`mod_byte` and `cfg_job_table` are captured on clk_sys and static from the
+moment the MRA lands, and two of them were driving long routes into clk_ram
+logic. So they were re-registered onto clk_ram -- and general[1] went to
+**-2.906 ns with TNS -409**, on `mod_byte_r[0] -> ymf271_synth|acc_l[26]`.
+
+`set_sxx2c` feeds spi_sound's mono/stereo mux, which is on clk_sys. Moving the
+source did not remove a crossing, it relocated one -- into the audio
+accumulator, where the combinational tail is far longer than the loader's.
+
+**A static signal with consumers in two clock domains wants a register copy in
+each, not a move.** That is what is there now: `mod_byte`/`cfg_*` stay the
+clk_sys masters feeding every clk_sys consumer exactly as before, and
+`mod_byte_r`/`cfg_*_r` are clk_ram copies feeding the loader-side logic, the
+derivation, the nvram gate and ch3. `derive_en` likewise exists once per domain.

@@ -208,7 +208,12 @@ localparam CONF_STR = {
 	// H1: hidden when status_menumask bit 1 is set, which is ~set_sxx2c. SXX2E
 	// has a mask ROM where the cartridge has a flash chip, so there is nothing
 	// to build and nothing to choose.
-	"H1O[22],Sample Flash,Ritual,Pre-built;",
+	// Pre-built is the DEFAULT. Before the MRAs collapsed, rdft, rdft2 and
+	// rfjet each had a pre-flashed MRA that booted instantly; with one MRA
+	// per set, defaulting to the ritual would have made those three boot in
+	// six minutes where they used to boot in seconds. It also means the
+	// common path does not depend on this option being touched at all.
+	"H1O[22],Sample Flash,Pre-built,Ritual;",
 	"-;",
 	"DIP;",
 	"-;",
@@ -431,6 +436,34 @@ end
 // being wrong -- and the derivation needs SDR_PCMSRC_* anyway, which cannot be
 // written as a literal without repeating spi_defs.vh's arithmetic.
 `include "spi_defs.vh"
+
+// RE-REGISTERED ONTO clk_ram before anything on that clock reads them.
+//
+// These are captured on clk_sys and are STATIC from the moment the MRA's index-1
+// element lands, long before rom_ready -- but "static" does not make the ROUTE
+// short, and the route is what failed: `mod_byte[0] -> rom_loader|part_size_r`
+// at -0.175 ns and `cfg_job_table[21] -> sdram|ch3_watch_r` at -0.108, on the
+// clock with no margin. A register hop costs one clk_ram cycle of a value that
+// settles seconds early, and it is the same fix 10a(2) applied to the loader's
+// part table for the same reason.
+//
+// ONLY the clk_ram consumers use these. The clk_sys ones -- hps_io's menumask,
+// and everything spi_top hands to spi_sound -- keep reading `mod_byte` itself.
+// Moving them all was tried and was much worse: set_sxx2c feeds spi_sound's
+// mono/stereo mux, so sourcing it from clk_ram put a cross-domain path into
+// ymf271_synth's accumulator and general[1] closed at -2.906 with TNS -409.
+// A static signal with consumers in two domains wants a copy in each, not a
+// move.
+reg  [7:0] mod_byte_r    = 8'd0;
+reg [31:0] cfg_job_r     = 32'd0;
+reg [31:0] cfg_stamp_r   = 32'd0;
+reg  [1:0] cfg_gen_r     = 2'd0;
+always @(posedge clk_ram) begin
+	mod_byte_r  <= mod_byte;
+	cfg_job_r   <= cfg_job_table;
+	cfg_stamp_r <= cfg_stamp;
+	cfg_gen_r   <= cfg_gen;
+end
 
 wire       set_sxx2c   = mod_byte[0];
 wire [2:0] set_variant = mod_byte[3:1];
@@ -784,6 +817,11 @@ spi_jtag_peek peek
 	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
 	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
 	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
+	.drv_cfg_job  (cfg_job_r),     .drv_cfg_gen  (cfg_gen_r),
+	.drv_en       (derive_en),     .drv_done     (drv_done),
+	.drv_overrun  (drv_overrun),   .drv_badjob   (drv_badjob),
+	.drv_jobs     (drv_jobs),      .drv_bytes    (drv_bytes),
+	.drv_state    (drv_dbg_state),
 	.flash_progs(dbg_flash_progs), .flash_erases(dbg_flash_erases),
 	.flash_drops(dbg_flash_drops), .flash_busy(dbg_flash_busy),
 	.nv_bytes(dbg_nv_bytes), .nv_saves(dbg_nv_saves), .nv_beats(dbg_nv_beats),
@@ -913,8 +951,13 @@ always @* case (set_id)
 	default:   pcmsrc_base = SDR_PCMSRC_SEI252;
 endcase
 
-wire derive_sel = status[22];
-wire derive_en  = set_sxx2c & set_upd & derive_sel & (|cfg_job_table);
+wire derive_sel = ~status[22];   // 0 = Pre-built, the default
+// Two copies for the same reason as above. The clk_ram one drives the
+// derivation, the nvram gate and ch3; the clk_sys one drives JP1, which spi_sound
+// reads. Both are the same static condition, computed from their own domain's
+// registers so neither becomes a crossing.
+wire derive_en     = mod_byte_r[0] & mod_byte_r[4] & derive_sel & (|cfg_job_r);
+wire derive_en_sys = mod_byte[0]   & mod_byte[4]   & derive_sel & (|cfg_job_table);
 
 wire [25:0] drv_addr;
 wire [15:0] drv_din;
@@ -922,6 +965,7 @@ wire  [1:0] drv_be;
 wire        drv_req, drv_rnw, drv_done, drv_overrun, drv_badjob;
 wire [21:0] drv_bytes;
 wire  [7:0] drv_jobs;
+wire  [3:0] drv_dbg_state;
 
 // One shot per download. Toggling the OSD option afterwards does not re-run it
 // -- the sources are still resident, but a half-written flash would be worse
@@ -943,9 +987,9 @@ spi_flash_derive derive
 	.reset        (RESET | ~pll_locked | ~derive_en),
 	.start        (derive_en & rom_ready & ~derive_started),
 
-	.job_table    (cfg_job_table),
-	.stamp_addr   (cfg_stamp),
-	.gen          (cfg_gen),
+	.job_table    (cfg_job_r),
+	.stamp_addr   (cfg_stamp_r),
+	.gen          (cfg_gen_r),
 
 	.snd01_en     ((set_id == SET_RDFT2) || (set_id == SET_RFJET)
 	               || (set_id == SET_SENKYU) || (set_id == SET_EJANHS)
@@ -968,7 +1012,7 @@ spi_flash_derive derive
 	.jobs_done    (drv_jobs),
 	.err_overrun  (drv_overrun),
 	.err_badjob   (drv_badjob),
-	.dbg_state    (), .dbg_esi (), .dbg_src (),
+	.dbg_state    (drv_dbg_state), .dbg_esi (), .dbg_src (),
 	.dbg_len      (), .dbg_mode(), .dbg_dec ()
 );
 
@@ -1031,7 +1075,7 @@ spi_nvram nvram
 	.reset      (RESET | ~pll_locked),
 	// Pre-built mode has no ritual to record, and loading a save over a freshly
 	// derived image would be the same bytes at best and a stale one at worst.
-	.enable     (set_upd & ~derive_en),
+	.enable     (mod_byte_r[0] & mod_byte_r[4] & ~derive_en),
 
 	// Raw ioctl, not the replayed copy -- see the header of spi_nvram.sv.
 	.ioctl_download (ioctl_download),
@@ -1177,7 +1221,7 @@ spi_top spi_top
 	// which is what section 0 measured under MAME's own default of Update.
 	// JP1. Pre-built mode sends the not-update position: the matching stamp
 	// already makes the game skip its updater (18.5), and this says so twice.
-	.jumpers        ((set_upd & ~derive_en) ? 8'hFF : 8'hFC),
+	.jumpers        ((set_upd & ~derive_en_sys) ? 8'hFF : 8'hFC),
 	.flash_dirty    (flash_dirty),
 	.flash_sdr_addr (flash_sdr_addr),
 	.flash_sdr_din  (flash_sdr_din),

@@ -1,15 +1,15 @@
 # SlopperPI — Seibu SPI / SXX2E for MiSTer
 
-Raiden Fighters on Seibu **SXX2E** single-board hardware (MAME set `rdfts`),
-and on the **SPI cartridge** board it shares almost everything with — `rdft`,
-`rdft2` and `rfjet`, all pre-flashed so they skip the cartridge's first-boot
-sample reflash.
+Seven Seibu games on **SXX2E** single-board hardware (MAME set `rdfts`) and on
+the **SPI cartridge** board it shares almost everything with — `rdft`, `rdft2`,
+`rfjet`, `viprp1`, `senkyu` and `ejanhs`. One MRA each; the cartridge's
+first-boot sample reflash is a third of a second, built by the core.
 
 ## Status
 
 **The rendered frame is bit-exact against MAME** — every one of 76,800 pixels,
 on two independent captures with different register state, plus ten rdft2
-scenes and eleven rfjet ones. **All four sets boot and run on real hardware**,
+scenes and eleven rfjet ones. **All seven sets boot and run on real hardware**,
 and **`rdft2`'s sound has been matched against MAME** over two minutes of
 attract (envelope r = 0.951, spectrum r = 0.993, zero dropouts). The hardware
 ROM checker verifies all four regions on the board (`ok bits 1111` on rdfts;
@@ -52,82 +52,42 @@ The music itself matches; this is fidelity. `PLAN.md` T-K.
 2. Put the MRA you want from `mra/` in `/media/fat/_Arcade/`.
 3. Put its zip in `/media/fat/games/mame/`.
 
-| MRA | set | zip | download | state |
+| MRA | set | zip | download | SDRAM |
 |---|---|---|---|---|
-| `rdfts.mra` | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | runs on hardware |
-| `rdft.mra`  | `rdft`, SPI cartridge, pre-flashed | `rdft.zip` | 22.2 MB | runs on hardware |
-| `rdft2.mra` | `rdft2`, SPI cartridge, pre-flashed | `rdft2.zip` | 34.5 MB | runs on hardware |
-| `rfjet.mra` | `rfjet`, SPI cartridge, pre-flashed | `rfjet.zip` | 37.5 MB | runs on hardware |
-| `rdft-update.mra`  | `rdft`, SPI cartridge, self-flashing | `rdft.zip` | 24.7 MB | not yet run on hardware |
-| `rdft2-update.mra` | `rdft2`, SPI cartridge, self-flashing | `rdft2.zip` | 36.7 MB | not yet run on hardware |
-| `rfjet-update.mra` | `rfjet`, SPI cartridge, self-flashing | `rfjet.zip` | 39.7 MB | not yet run on hardware |
+| `rdfts.mra`  | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | 32 MB |
+| `rdft.mra`   | `rdft`, SPI cartridge   | `rdft.zip`   | 24.7 MB | 32 MB |
+| `rdft2.mra`  | `rdft2`, SPI cartridge  | `rdft2.zip`  | 36.7 MB | 64 MB |
+| `rfjet.mra`  | `rfjet`, SPI cartridge  | `rfjet.zip`  | 39.7 MB | 64 MB |
+| `viprp1.mra` | `viprp1`, SPI cartridge | `viprp1.zip` | 21.7 MB | 32 MB |
+| `senkyu.mra` | `senkyu`, SPI cartridge | `senkyu.zip` | 20.7 MB | 32 MB |
+| `ejanhs.mra` | `ejanhs`, SPI cartridge | `ejanhs.zip` | 21.5 MB | 32 MB |
 
-The three plain cartridge MRAs ship the YMF271 sample flash pre-programmed, so
-the several-minute "techno music" reflash the real cartridge does on first boot
-is skipped. rdft's image is assembled by the MRA; rdft2's and rfjet's cannot be,
-because a chunk of each is compressed — the core decompresses that during the
-download (`rtl/spi_rom_decode.sv`).
+All seven run on hardware. `ejanhs` plays video and sound but **cannot be
+played**: it reads a mahjong panel through MAME's `ejanhs_encode` and this core
+wires the standard SPI joystick ports.
 
-The three `-update` MRAs are the other half of that: the flash ships BLANK and
-the cartridge's own sound ROMs come along as source material, so the game runs
-its own updater and programs its samples exactly as a fresh cartridge does. Two
-things to know before using one — the game HALTS on "PLEASE TURN THE POWER BACK
-ON" when it finishes, so reset the core afterwards, and **it does not persist
-yet**, so every boot runs the ritual again. `PLAN.md` section 17 is the whole
-story, including what the save file still needs.
+### The sample flash
 
-**rfjet boots to attract with sprites and sound, and it did so on the first
-load** — the only set here that has. Eleven captured scenes render 0 of 76,800
-pixels different from MAME, two of them heavier than anything rdft2 was tested
-at, and on the board its download is byte-exact (39,303,645 in, +121,581 for
-the sample codec's expansion) with all four SDRAM regions checksumming
-identical to the reference image. Sprite starvation was the open question at
-24 MB of sprites and the answer is 1–2 lines per frame out of 224 at ~14,000
-y-hits — less than rdfts starves at half the load.
+The SPI cartridge has no sample ROM. The YMF271 reads two flash chips the game
+programs itself at first boot, and every cartridge MRA above ships them blank
+along with the ROMs the game's updater reads. **OSD → Sample Flash** picks what
+fills them:
 
-**Then it was played, and its music had never been playing at all.**
-`spi_sound.sv` read the top half of the 256 KB Z80 region back as a constant
-zero — correct for a 128 KB program, and rfjet's is 240 KB, so banks 4 through 7
-were deleted. Bank 5 is where rfjet keeps its music: the driver spends 19,478 of
-41,657 bank selects there. Blanking exactly those reads inside MAME takes 60 s
-of attract from RMS 2171 to **RMS 0.0**, and MAME still writes the YMF at
-1081 registers/s while doing it — which is why the board's telemetry read
-"12 voices, 55,442 writes, healthy" the whole time. The region is bounded by
-what was actually written now (the 386's download high-water on a cartridge,
-the ROM part's size on SXX2E) rather than by a constant. `rdft`'s 256 KB
-program was latently affected too; `rdfts` and `rdft2` read as before.
-`PLAN.md` has the full hunt. **Fixed and then measured, not just listened to:**
-198 s of hardware attract against 420 s of MAME gives long-term spectrum
-r **0.9855**, per-second spectral median **0.9844** with **96%** above 0.8, and
-99.9% silence agreement — at or above what rdft2 scored. Envelope r is 0.9025,
-and the two 30 s passages that drag it down are the attract demo diverging
-rather than the synthesis: the worst of them correlates **0.9972** spectrally,
-so the same sounds are playing at different moments. `tools/compare_audio.py`
-is that measurement, written down.
+- **Pre-built** (default) — the core builds the image itself out of SDRAM in
+  about a third of a second. Same job table, same sources, same bytes as the
+  game's own updater: it reads the table out of the 386's program image and
+  walks it, so nothing about it is per-set except two addresses the MRA carries.
+  Verified byte-for-byte against the image MAME's own flash devices hold, on all
+  seven sets. Nothing to wait for and no save file.
+- **Ritual** — the game programs its own flash, as the real cartridge does. It
+  takes about six minutes, ends on "UPDATE COMPLETED. PLEASE TURN THE POWER BACK
+  ON" (reset the core then), and persists only if you **open the OSD once**
+  afterwards — MiSTer asks the core for its nvram only while that menu is up.
 
-**The gameplay hitch went with it.** rfjet also stalled a quarter to half a
-second occasionally during play; with the fix in, a full play session records a
-worst frame gap of 1054 units — one frame — and the two-frame stall latch never
-fires. Four high-water marks in `tools/slop sound` say so (`clear` re-arms
-them). Note what that does and does not establish: those readings are all from
-the *fixed* core, so they show neither the sound FIFO nor ch3 starvation is
-active now, not that either caused the original stall. The likely mechanism is
-the one none of them watch — the 386 waiting at 0x684 d1 for a reply the sound
-program never sent. `PLAN.md` T-O, left open at low priority.
-
-**rdft2 runs on hardware** — story intro, then the title screen with sprites,
-with music that matches MAME's. Its download is byte-exact: 35,752,108 bytes
-in, and out exactly +158,344 more, which is the sample codec's expansion to the
-byte. The 128 KB Z80 program the 386 pulls out of the `sound01` window has been
-read back off the board at both ends and matches `sound1.u0222[0x60000..]`.
-
-Two things had to land for it. The `sound01` window, which is the one thing
-rdft does not need — rdft keeps its copy of the Z80 program in `maincpu`,
-already loaded, while rdft2's 386 reads its own out of that window before
-releasing the Z80. And an edge detector on `ioctl_wr` in `rom_loader`, which
-turned out to be corrupting every set's download, rdfts included; `PLAN.md`
-section 10c is the hunt for that one and is worth reading before touching the
-loader.
+There used to be two MRAs per set for this, and for three of the seven sets
+only. `viprp1` could never have a pre-flashed one at all: its payload's second
+job reads the 386's own program image rather than any ROM file, which an MRA
+cannot express and the core can.
 
 SDRAM: **32 MB is enough for every SEI252 set, in either flash form** — rdfts,
 rdft, viprp1, senkyu and ejanhs all reach 29 MB of sprites and top out at 30 or
@@ -136,11 +96,11 @@ rdft, viprp1, senkyu and ejanhs all reach 29 MB of sprites and top out at 30 or
 its top at 43 MB.
 
 The PCM source ROM is the one region whose base is per-set: it follows that
-set's *own* sprites rather than sitting above the largest set's. It exists only
-in the self-flashing MRAs, and a single 41 MB base put all four SEI252
-cartridge sets over 32 MB in exactly the form that has to work everywhere.
-`rtl/spi_defs.vh` `SDR_PCMSRC_*`, and `build_sdram_image.py --upd` prints the
-map top it produces.
+set's *own* sprites rather than sitting above the largest set's. A single 41 MB
+base put all four SEI252 cartridge sets over 32 MB, which is what made the
+collapse to one MRA possible at all — the surviving shape is the one that
+carries these ROMs. `rtl/spi_defs.vh` `SDR_PCMSRC_*`, and
+`build_sdram_image.py --upd` prints the map top it produces.
 
 ## Building
 
@@ -156,6 +116,11 @@ map top it produces.
     make test       # Verilator unit tests
     make check-mra  # MRA vs MAME's driver vs the RTL loader table
     make verify     # all three of the above
+
+    # These need a ROM set, so they are not in `verify`:
+    make check-derive ROMS=~/Downloads/roms   # the sample flash, derived from
+                                              # an SDRAM image alone, vs MAME's
+    make check-snd01  ROMS=~/Downloads/roms   # the 386's sound01 window
 
 A compile that reports "successful" has not necessarily met timing — check the
 Setup Summary in `output_files/SeibuSPI.sta.rpt`, or run `make timing`, which

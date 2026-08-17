@@ -8,7 +8,7 @@
 <!-- or (at your option) any later version.                              -->
 
 <misterromdescription>
-    <name>Viper Phase 1 (New Version, SPI cartridge, self-flashing)</name>
+    <name>Viper Phase 1 (New Version, SPI cartridge)</name>
     <setname>viprp1</setname>
     <rbf>SeibuSPI</rbf>
     <mameversion>0277</mameversion>
@@ -21,34 +21,37 @@
     <category>Shooter</category>
 
     <!--
-      THE GAME FLASHES ITSELF, and for viprp1 that is the ONLY way this core can
-      run it. The sample flash ships BLANK and the cartridge's own PCM ROM comes
-      along as the material the game's updater reads, so on first boot it runs
-      the real "NOW UPDATING" ritual and programs its own samples.
+      THE SAMPLE FLASH. The SXX2C cartridge has no sample ROM: the YMF271 reads
+      two flash chips the game programs itself, and this MRA ships them BLANK
+      along with the ROMs the game's updater reads to fill them. What fills
+      them is an OSD option, "Sample Flash":
 
-      WHY THERE IS NO PRE-FLASHED viprp1.mra. The other cartridge sets let an
-      MRA assemble the finished image out of slices of their ROM files -- that
-      is what mra/rdft.mra and mra/rdft2.mra do. viprp1's payload is two
-      COMPRESSED jobs, and the second one reads the 386's own PROGRAM image,
-      interleaved across all four program ROMs, rather than any single file
+        Pre-built (default)  The core builds the image itself, out of SDRAM, in
+                             about a third of a second. Same job table, same
+                             sources, same bytes as the game's own updater --
+                             checked against the image MAME's flash devices
+                             hold, on all seven sets. Nothing to wait for and
+                             nothing to save.
+
+        Ritual               The game programs its own flash, the way the real
+                             cartridge does at first boot. It takes about six
+                             minutes, ends on "UPDATE COMPLETED. PLEASE TURN
+                             THE POWER BACK ON" -- reset the core then -- and
+                             it only persists if you OPEN THE OSD ONCE
+                             afterwards, because MiSTer asks the core for its
+                             nvram only while that menu is up.
+
+      Pre-built saves nothing and loads nothing, deliberately: the image is
+      rebuilt every boot, so there is no save file to go stale.
+
+      viprp1 IS THE SET THAT PROVES WHY THIS EXISTS. Every other cartridge set
+      could once ship a pre-flashed MRA, assembled out of slices of its ROM
+      files. viprp1 never could: its payload is two COMPRESSED jobs and the
+      second reads the 386's own PROGRAM image, interleaved across all four
+      program ROMs rather than living in any single file
       (tools/build_soundflash.py: "the only game whose second job reads the
       PROGRAM ROM"). An MRA concatenates file slices; it cannot express that.
-      The game reading it for itself is exactly what this variant does.
-
-      TWO THINGS TO KNOW BEFORE RUNNING IT.
-
-      * The update takes a few minutes, and at the end the game HALTS on
-        "UPDATE COMPLETED. PLEASE TURN THE POWER BACK ON." Reset the core (or
-        reload the MRA) and it plays.
-      * IT SAVES, BUT NOT BY ITSELF. When the ritual finishes, OPEN THE OSD
-        once: MiSTer asks the core for its nvram only while that menu is up
-        (Main_MiSTer's menu.cpp, MENU_GENERIC_MAIN2), and the core has been
-        waiting to hand it over since the flash went quiet. After that the save
-        file loads on every boot and the ritual never runs again.
-
-      The trigger is the game's own: the last four bytes of the 386 program are
-      stamped into flash[0..3] when it finishes, and a blank or mismatched stamp
-      is what makes the updater run. viprp1's blank carries region BE.
+      The core reading it out of SDRAM can, and does.
     -->
 
     <!--

@@ -8,49 +8,41 @@
 <!-- or (at your option) any later version.                              -->
 
 <misterromdescription>
-    <name>E-Jan High School (Japan, SPI cartridge, self-flashing)</name>
-    <setname>ejanhs</setname>
+    <name>Senkyu (Japan, SPI cartridge)</name>
+    <setname>senkyu</setname>
     <rbf>SeibuSPI</rbf>
     <mameversion>0277</mameversion>
-    <year>1996</year>
+    <year>1995</year>
     <manufacturer>Seibu Kaihatsu</manufacturer>
-    <players>1</players>
+    <players>2</players>
     <joystick>8</joystick>
     <rotation>horizontal</rotation>
     <region>Japan</region>
-    <category>Mahjong</category>
+    <category>Puzzle</category>
 
     <!--
-      CONTROLS DO NOT WORK. E-Jan High School is a mahjong game and reads its
-      panel through a custom encoding (MAME's ejanhs_encode packs the key
-      matrix into three-bit fields), which this core does not decode -- it
-      wires the standard SPI joystick ports every other set uses. The flash
-      ritual, the video and the sound all work; playing it does not. The MRA is
-      here because the set otherwise runs, and because the input work is a
-      separate job from the one this file is part of.
-    -->
+      THE SAMPLE FLASH. The SXX2C cartridge has no sample ROM: the YMF271 reads
+      two flash chips the game programs itself, and this MRA ships them BLANK
+      along with the ROMs the game's updater reads to fill them. What fills
+      them is an OSD option, "Sample Flash":
 
-    <!--
-      THE GAME FLASHES ITSELF. The sample flash ships BLANK and the cartridge's
-      own sound ROMs come along as the material the game's updater reads, so on
-      first boot it runs the real "NOW UPDATING" ritual and programs its own
-      samples.
+        Pre-built (default)  The core builds the image itself, out of SDRAM, in
+                             about a third of a second. Same job table, same
+                             sources, same bytes as the game's own updater --
+                             checked against the image MAME's flash devices
+                             hold, on all seven sets. Nothing to wait for and
+                             nothing to save.
 
-      TWO THINGS TO KNOW BEFORE RUNNING IT.
+        Ritual               The game programs its own flash, the way the real
+                             cartridge does at first boot. It takes about six
+                             minutes, ends on "UPDATE COMPLETED. PLEASE TURN
+                             THE POWER BACK ON" -- reset the core then -- and
+                             it only persists if you OPEN THE OSD ONCE
+                             afterwards, because MiSTer asks the core for its
+                             nvram only while that menu is up.
 
-      * The update takes a few minutes and ends on "UPDATE COMPLETED. PLEASE
-        TURN THE POWER BACK ON." Reset the core (or reload the MRA) and it
-        plays.
-      * IT SAVES, BUT NOT BY ITSELF. When the ritual finishes, OPEN THE OSD
-        once: MiSTer asks the core for its nvram only while that menu is up
-        (Main_MiSTer's menu.cpp, MENU_GENERIC_MAIN2). After that the save file
-        loads on every boot and the ritual never runs again.
-
-      A pre-flashed variant of this set IS possible -- both halves of its
-      payload are compressed slices of ROM files, unlike viprp1's, whose second
-      job reads the 386's own program image -- but it is not built. It would
-      need two CODEC_BPE_DPCM parts in one download, which nothing has
-      exercised yet.
+      Pre-built saves nothing and loads nothing, deliberately: the image is
+      rebuilt every boot, so there is no save file to go stale.
     -->
 
     <!--
@@ -94,7 +86,7 @@
         batlball 0x00302290, same game, same graphics, same everything
         else. In the RTL that would be a core rebuild per clone.
 
-          job table  0x003026ac
+          job table  0x00302324
           stamp      0x003ffffc   written to flash[0..3] LAST
           generation 0            A
 
@@ -102,41 +94,39 @@
         which read them out of the game's own program image; make
         check-mra holds this block against it.
       -->
-      <part>1B</part>
+      <part>19</part>
       <part>FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF</part>
-      <part>AC 26 30 00</part>
+      <part>24 23 30 00</part>
       <part>FC FF 3F 00</part>
       <part>00</part>
     </rom>
 
-    <rom index="0" address="0x30000000" zip="ejanhs.zip" md5="none">
+    <rom index="0" address="0x30000000" zip="senkyu.zip" md5="none">
         <!-- the empty lower half of the program region -->
         <part repeat="0x100000">00</part>
 
         <!-- 386 program: four 256 KB byte lanes at region offset 0x100000 -->
-        <part name="ejan3_1.211" crc="e626d3d2"/>
-        <part name="ejan3_2.212" crc="83c39da2"/>
-        <part name="ejan3_3.210" crc="46897b7d"/>
-        <part name="ejan3_4.29"  crc="b3187a2b"/>
+        <part name="fb_1.211" crc="20a3e5db"/>
+        <part name="fb_2.212" crc="38e90619"/>
+        <part name="fb_3.210" crc="226f0429"/>
+        <part name="fb_4.29"  crc="b46d66b7"/>
 
         <!-- text layer: a word plus a byte -->
-        <part name="ejan3_6.413" crc="837e012c"/>
-        <part name="ejan3_5.48"  crc="d62db7bf"/>
+        <part name="fb_6.413" crc="b57115c9"/>
+        <part name="fb_5.48"  crc="440a9ae3"/>
 
-        <!-- background tiles: 6 MB, the second group half the size -->
-        <part name="ej3_bg1d.415" crc="bcacabe0"/>
-        <part name="ej3_bg1p.410" crc="1fd0eb5e"/>
-        <part name="ej3_bg2d.416" crc="ea2acd69"/>
-        <part name="ej3_bg2p.49"  crc="a4a9cb0f"/>
+        <!-- background tiles: ONE D+P group, 3 MB -->
+        <part name="fb_bg-1d.415" crc="eae7a1fc"/>
+        <part name="fb_bg-1p.410" crc="b46e774e"/>
 
         <!-- sprites: 12 MB in three 4 MB plane-pair chunks, SEI252 -->
-        <part name="ej3_obj1.322" crc="852f180e"/>
-        <part name="ej3_obj2.324" crc="1116ad08"/>
-        <part name="ej3_obj3.323" crc="ccfe02b6"/>
+        <part name="fb_obj-1.322" crc="29f86f68"/>
+        <part name="fb_obj-2.324" crc="c9e3130b"/>
+        <part name="fb_obj-3.323" crc="f6c3bc49"/>
 
         <!-- MAME's sound01: the PCM source, then the second sound ROM -->
-        <part name="ej3_pcm1.215" crc="a92a3a82"/>
-        <part name="ejan3_7.216"  crc="c6fc6bcf"/>
+        <part name="fb_pcm-1.215" crc="1d83891c"/>
+        <part name="fb_7.216"     crc="874d7b59"/>
 
         <!--
           The sample flash, BLANK. flash0_blank_region01.u1053 is a real dump

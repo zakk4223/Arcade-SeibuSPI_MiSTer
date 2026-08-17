@@ -88,62 +88,20 @@ SETS = {
     # MAME's plain ROM_LOAD. Chunk k lands at sprites_base + 2k.
     "rdfts": dict(mra="rdfts.mra", table="rdfts", mod=0x00, skip=(),
                   spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "rdft":  dict(mra="rdft.mra",  table="rdft",  mod=0x01,
-                  # audiocpu is RAM the 386 fills through 0x688; sound01 is the
-                  # updater's window and is measurably untouched once the flash
-                  # is programmed; soundflash1 is the blank flash we replace.
-                  skip=("audiocpu", "sound01", "soundflash1"),
-                  spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    # rdft2 skips the same three, plus the PAL dumps, which are not ROM data.
-    # Its sound01 IS read, twice over, but never as the assembled window: the
-    # MRA carries two slices of sound1.u0222 directly -- the compressed sample
-    # tail, and the Z80 program at 0x60000 that the 386 fetches through the
-    # window. Both are length-limited <part>s, which the ROM-order check below
-    # skips as slices of a synthesised image.
-    "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x03,
-                  skip=("audiocpu", "sound01", "soundflash1", "pals"),
-                  # RISE10 sets carry MAME's sprite_reorder() as well as the
-                  # interleave, and the loader folds both into the destination.
-                  spr_mode="M_SPR_ILV_R", spr_chunk=0x600000,
-                  # The sample flash is DERIVED, so with --zip it can be rebuilt
-                  # from the MRA's own slices and compared against the image
-                  # MAME's flash devices end up holding. That is the only thing
-                  # tying these offsets and lengths to reality: an off-by-one in
-                  # either would otherwise load quietly shifted samples.
-                  flash=dict(parts=(14, 15), decoded=15, size=0x200000,
-                             sha256="c0da4614a8d07a7bce24b7712b756435f2c5f"
-                                    "d1ef74dc44333657afdecc6c67c")),
-    # rfjet is rdft2's board, generation and part shape with different numbers
-    # in every field, which is the reason to check it rather than eyeball it:
-    # 8 MB sprite chunks instead of 6, and a flash split at 0x189DD5 instead of
-    # 0x17C247. It shares rdft2's skip list for the same reasons.
-    "rfjet": dict(mra="rfjet.mra", table="rfjet", mod=0x05,
-                  skip=("audiocpu", "sound01", "soundflash1", "pals"),
-                  # RISE11 carries sprite_reorder() as well as the interleave,
-                  # exactly as RISE10 does.
-                  spr_mode="M_SPR_ILV_R", spr_chunk=0x800000,
-                  flash=dict(parts=(14, 15), decoded=15, size=0x200000,
-                             sha256="fb02c059e7ee1b0a26c97ccb5d6eb60eaaa1c"
-                                    "48a7e65c76c2d2628475cb4e621")),
-
-    # The authentic-flash MRAs (PLAN.md section 17). Same table, mod bit 4, and
-    # a different tail: the two sound01 ROMs whole and a BLANK flash, instead of
-    # a derived image. They therefore skip LESS than their pre-flashed
-    # counterparts -- sound01 and soundflash1 are carried now, and checked
-    # against ROM_START like any other part, which is the whole point of
-    # sending them in MAME's own region order.
-    #
-    # No `flash` entry: there is no derived image to rebuild and compare. What
-    # replaces that check is the core running the real updater and the result
-    # being compared against tools/build_soundflash.py's image on hardware.
-    "rdft-upd":  dict(mra="rdft-update.mra",  table="rdft",  mod=0x11,
-                      mame="rdft", skip=("audiocpu",),
+    # ONE MRA PER SET. The pre-flashed variants are gone: they could only be
+    # built for three of the seven, they needed a derived image and a fresh
+    # sha256 per clone, and the core now builds the same image itself from the
+    # ROMs this MRA already carries (PLAN.md 24, 26). What replaces the
+    # derived-image check that used to live here is `make check-derive`, which
+    # covers seven sets where this covered two.
+    "rdft":  dict(mra="rdft.mra",  table="rdft",  mod=0x11,
+                      skip=("audiocpu",),
                       special={"gun_dogs_pcm.u0217": ("pcmsrc_sei252", "M_LINEAR"),
                                "seibu_8.u0216":      ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "rdft2-upd": dict(mra="rdft2-update.mra", table="rdft2", mod=0x13,
-                      mame="rdft2", skip=("audiocpu", "pals"),
+    "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x13,
+                      skip=("audiocpu", "pals"),
                       special={"pcm.u0217":    ("pcmsrc_rdft2", "M_LINEAR"),
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
@@ -153,28 +111,28 @@ SETS = {
     # a pre-flashed one. It is also the first generation-A set here -- 1 MB of
     # PCM source on ONE byte lane -- and the first to use rdfts's text layout
     # on the cartridge board.
-    "viprp1-upd": dict(mra="viprp1-update.mra", table="viprp1", mod=0x17,
-                       mame="viprp1", skip=("audiocpu",),
+    "viprp1": dict(mra="viprp1.mra", table="viprp1", mod=0x17,
+                       skip=("audiocpu",),
                        special={"v_pcm.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "flash0_blank_regionbe.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     # The other two generation-A cartridges. Both have a second sound ROM,
     # which viprp1 does not, and both put their program in the upper half of
     # the region behind a megabyte of zero fill.
-    "senkyu-upd": dict(mra="senkyu-update.mra", table="senkyu", mod=0x19,
-                       mame="senkyu", skip=("audiocpu",),
+    "senkyu": dict(mra="senkyu.mra", table="senkyu", mod=0x19,
+                       skip=("audiocpu",),
                        special={"fb_pcm-1.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "fb_7.216":     ("snd01",  "M_LINEAR"),
                                 "flash0_blank_region01.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "ejanhs-upd": dict(mra="ejanhs-update.mra", table="ejanhs", mod=0x1B,
-                       mame="ejanhs", skip=("audiocpu",),
+    "ejanhs": dict(mra="ejanhs.mra", table="ejanhs", mod=0x1B,
+                       skip=("audiocpu",),
                        special={"ej3_pcm1.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "ejan3_7.216":  ("snd01",  "M_LINEAR"),
                                 "flash0_blank_region01.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "rfjet-upd": dict(mra="rfjet-update.mra", table="rfjet", mod=0x15,
-                      mame="rfjet", skip=("audiocpu", "pals"),
+    "rfjet": dict(mra="rfjet.mra", table="rfjet", mod=0x15,
+                      skip=("audiocpu", "pals"),
                       special={"pcm-d.u0227":  ("pcmsrc_rfjet", "M_LINEAR"),
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
