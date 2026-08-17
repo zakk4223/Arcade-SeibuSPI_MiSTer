@@ -61,7 +61,15 @@ module tb_ymf_top
 	output      [7:0] dbg_w_data,
 	output      [7:0] dbg_w_erases,
 	output            dbg_w_er_after,
-	output     [55:0] dbg_w_trace
+	output     [55:0] dbg_w_trace,
+	// The byte-level half of the watch (PLAN.md 19.14), added to
+	// spi_soundflash later than the six above and not brought out here with
+	// them -- which broke this testbench's BUILD under -Wall (PINMISSING) and
+	// so stopped `make test` running the YMF271 checks at all. Same reason as
+	// the rest: the instrument gets checked here, where the answer is known,
+	// before hardware is asked to believe it.
+	output      [7:0] dbg_w_din,
+	output            dbg_w_hit
 );
 
 	wire        ext_wr;
@@ -131,7 +139,9 @@ module tb_ymf_top
 		.dbg_w_data     (dbg_w_data),
 		.dbg_w_erases   (dbg_w_erases),
 		.dbg_w_er_after (dbg_w_er_after),
-		.dbg_w_trace    (dbg_w_trace)
+		.dbg_w_trace    (dbg_w_trace),
+		.dbg_w_din      (dbg_w_din),
+		.dbg_w_hit      (dbg_w_hit)
 	);
 
 	/* verilator lint_off UNUSEDSIGNAL */

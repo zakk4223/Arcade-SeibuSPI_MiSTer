@@ -7514,3 +7514,38 @@ of it: every ch3 master must be either inside one arbiter or held in reset while
 another owns the bus. A priority mux over a toggle handshake is not arbitration,
 and its failure is silent -- the starved master reports plausible numbers rather
 than stalling.
+
+### 21.6 `make test` had not been running the sound chip at all
+
+`obj_dir/Vtb_ymf_top` failed to BUILD, so `make test` aborted before the YMF271
+and nvram testbenches and had been doing so since `spi_soundflash` gained the
+byte-level half of the watch (19.14). Two output ports, `dbg_w_din` and
+`dbg_w_hit`, were added to the module and never brought out through
+`sim/tb_ymf_top.sv`, and Verilator's `-Wall` makes PINMISSING an error.
+
+Unconnected outputs are harmless in hardware, which is why Quartus never
+complained and why this survived: the only thing it broke was the test suite,
+and a test suite that fails to build looks the same from a distance as one that
+is merely slow.
+
+**What was actually lost:** twenty-odd checks, including every FM algorithm, the
+LFO, the flash command engine, both replay runs and the whole nvram suite. They
+all pass, so nothing was hiding behind it -- but nothing was watching either,
+across every change since.
+
+The two ports are now brought out and CHECKED, which is what the port block in
+that file says they are for. `dbg_w_hit` is a one-cycle pulse, so the C++ counts
+it in `tick()` rather than sampling it at the end, and `dbg_w_din` is compared
+against `REPLAY_EXPECT[0x29FE - REPLAY_BASE]` rather than a literal copied out
+of these notes -- the watched byte is inside the replayed page, so the reference
+the replay already checks against is the right authority for it too.
+
+It reports `byte watch fired once with din=FE`, which is MAME's value at 0x29FE
+and confirms from a third direction what 19.14 concluded: `spi_soundflash` was
+handed the correct datum, so the 0xFF came from below it -- the SDRAM module,
+per 19.18.
+
+**The assertion was checked for the ability to fail**, by moving WATCH_BYTE one
+byte and confirming it reports `want 1 and 00`. A check that cannot fail is
+decoration, and this file has been burned by one before (the stale SUM_SPRITES
+constant, 21.2's ancestor).

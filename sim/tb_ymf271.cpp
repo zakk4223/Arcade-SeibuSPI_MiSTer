@@ -26,6 +26,12 @@
 #include "Vtb_ymf_top.h"
 #include "flash_replay.h"
 #include "verilated.h"
+
+// The watched byte, and it must equal spi_soundflash.sv's WATCH parameter.
+// It is inside the replayed page (REPLAY_BASE 0x2900, 256 bytes), which is
+// what lets the byte watch be checked against REPLAY_EXPECT rather than
+// against a literal copied out of PLAN.md.
+static const uint32_t WATCH_BYTE = 0x29FE;
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -124,11 +130,18 @@ static bool     tick_now = false;
 // test that writes registers between samples has to know how many it missed.
 static uint64_t sample_ticks = 0;
 
+// dbg_w_hit is a ONE-CYCLE pulse -- spi_soundflash defaults it low every clock
+// -- so sampling it after the run always reads zero. Count it as it goes past.
+// dbg_w_din holds, being written only on a hit, so that one can be read at the
+// end.
+static int dbg_w_hits = 0;
+
 static void tick() {
     dut->clk = 0; dut->eval();
     sdram_tick();
     flash_tick();
     dut->clk = 1; dut->eval();
+    if (dut->dbg_w_hit) dbg_w_hits++;
 
     uint32_t nxt = tick_acc + RATE;
     tick_now = (nxt >= CLK_HZ);
@@ -328,6 +341,7 @@ static void reset_dut() {
     sdr_req_prev = 0; sdr_busy = false;
     dut->fl_ack = 0;
     fl_req_prev = 0; fl_busy = false;
+    dbg_w_hits = 0;
     run(20);
     dut->reset = 0;
     run(20);
@@ -1514,9 +1528,23 @@ static void test_flash_replay() {
             printf("FAIL: watch trace %014llX does not walk 29FC,29FC,29FE,29FE\n",
                    (unsigned long long)dut->dbg_w_trace);
             errors++;
+        } else if (dbg_w_hits != 1 ||
+                   dut->dbg_w_din != REPLAY_EXPECT[WATCH_BYTE - REPLAY_BASE]) {
+            // The byte-level watch, which is the half that answers 19.14's
+            // question: was this module HANDED the wrong datum, or did it make
+            // one? It must fire exactly once for 0x29FE -- the halfword is
+            // programmed twice, one lane each, and only the low one is this
+            // byte -- carrying what MAME holds there, 0xFE. If this check ever
+            // fails while the replay above passes, the instrument is lying and
+            // nothing it reported on hardware means anything.
+            printf("FAIL: byte watch fired %d times with din=%02X; "
+                   "want 1 and %02X\n", dbg_w_hits, dut->dbg_w_din,
+                   REPLAY_EXPECT[WATCH_BYTE - REPLAY_BASE]);
+            errors++;
         } else {
             printf("watch: 2 writes to the watched halfword, last be=2 data=FF, "
-                   "0 erases, trace walks its neighbours\n");
+                   "0 erases, trace walks its neighbours; byte watch fired once "
+                   "with din=%02X\n", dut->dbg_w_din);
         }
     }
 
