@@ -8267,3 +8267,24 @@ instead of 34 M, still 0.33 s.
 still reads as a miss and the FSM fetches the same address again. Harmless, and
 left alone rather than chased with per-window carry logic. Written down because
 the obvious reading of the read count is that something is wrong.
+
+### 28.5 The final number: -0.019 ns, and the endpoint is sdram.sv's alone
+
+The tree as committed -- arbitration hoist reverted, the walker's esi compare
+registered, DRIV trimmed to 72 bits -- fits at:
+
+    clk_ram   -0.019   TNS -0.019      state.STATE_RW1 -> command[1]
+    others    +0.119 and up, TNS 0.000 everywhere
+    hold      +0.244 worst, TNS 0.000
+
+**One endpoint, 19 picoseconds, and `spi_flash_derive` / the DRIV probe / the
+config registers appear ZERO times in the worst 25.** Everything added for the
+single-MRA work is off the critical path; what is left is the sdram.sv endpoint
+19.16 first flagged.
+
+Worth noting which signal reaches `command[1]`: it has been `ch1_rq`, `ch4_rq`,
+`ch5_rq`, `refresh_count[13]` and now `state.STATE_RW1` across the fits in this
+session. That is the signature of a convergence point that is routing-limited
+rather than one bad path -- and the reason 28.3's flattening made it worse, and
+the reason the next attempt should be about where `command` is placed and how its
+inputs are gathered, not about which of them is "the" problem.

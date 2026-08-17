@@ -24,8 +24,12 @@ Five of six steps are committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26.
 
 ## THE ONE THING BLOCKING A RELEASE
 
-**No fit meets timing.** `clk_ram` sits at -0.020 to -0.522 depending on the
-build, on `sdram|ch*_rq -> sdram|command[1]`.
+**No fit meets timing.** The best is **-0.019 ns, TNS -0.019** -- ONE endpoint,
+19 picoseconds, `sdram|state.STATE_RW1 -> sdram|command[1]`. That is the tree as
+committed (arbitration hoist reverted, esi compare registered), and **none of the
+derivation, its telemetry or the config registers appear in the worst 25**. The
+failing endpoint is sdram.sv's own, every time, though which signal reaches
+`command[1]` moves between fits (`ch1_rq`, `ch4_rq`, `ch5_rq`, `state.STATE_RW1`).
 
 Read `PLAN.md` 26.4 and 28.3 before touching this. The short version:
 
@@ -39,6 +43,9 @@ Read `PLAN.md` 26.4 and 28.3 before touching this. The short version:
   level. That is recorded in `sdram.sv` as tried-and-rejected. Do not repeat it.
 * A seed sweep was tried: 12 -> -0.256, 13 -> -0.061, 14 -> -0.239,
   15 -> -0.099. Seeds move it without resolving it. Do not repeat that either.
+  (Those were measured with the 136-bit DRIV probe, before it was trimmed to 72;
+  a sweep on the current tree might land differently, but 19 ps of margin is not
+  worth six fits to chase and it would not be a fix.)
 
 What has NOT been tried, in the order I would try it:
 
