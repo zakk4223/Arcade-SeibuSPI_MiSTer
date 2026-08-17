@@ -8176,3 +8176,94 @@ of the derivation or its telemetry in the worst 25, and 19.16's +0.018 on the
 sibling path says the design has been balanced on this endpoint all along. The
 RTL is right; this fit is not shippable. Order of work: repair tb_sdram, then
 27.1, then re-fit.
+
+## 28. Repairing tb_sdram, and what it then said about the arbitration path
+
+`make -C sim run-sdram` is the only test that instantiates sdram.sv, and 27
+stopped because it could not run. It runs now, and it earned its keep
+immediately by rejecting the fix it was built to allow.
+
+### 28.1 Three faults, stacked
+
+They presented as one intractable read problem. They were not related.
+
+**It had stopped BUILDING** -- eighteen pins sdram.sv and rom_loader grew since
+it was last touched, plus `set_id` still 2 bits against 3. Third testbench this
+session dead exactly that way (21.6, 22.3).
+
+**sdram.sv drove DQ as a clocked `inout` defaulting to `16'bZ`.** Verilator
+resolves that as a strong all-ones driver which wins the net, so
+sim/sdram_model.sv's read data never reached `dq_reg` and every readback came
+back 0xFF -- on RTL nobody had changed. **Proved rather than guessed:** making
+the model drive 0x0000 instead of Z when idle changed nothing, so it was this
+side winning the net, not the model losing it.
+
+The fix is the canonical form -- a continuous assign off a registered value and
+a registered enable:
+
+    reg [15:0] dq_drv;
+    reg        dq_oe;
+    assign SDRAM_DQ = dq_oe ? dq_drv : 16'bZ;
+
+which is the same two flops the synthesiser inferred from the old code. Note the
+declarations and the assign must sit at MODULE level near the DQM assign: the
+region around line 240 that looks like a declaration block is inside the
+procedural block, which is why an `assign` there is a syntax error and a `wire`
+is illegal.
+
+**sdram_model.sv ignored the mode register** -- "refresh, mode set and NOP need
+no modelling here" -- and burst every WRITE four words deep. sdram.sv programs
+`NO_WRITE_BURST = 1`, single-location writes, so each byte write scribbled the
+bus value over the THREE words after it. It now latches CMD_MODE and honours
+both the burst-length code and bit 9.
+
+And its memory started at 0, where unwritten SDRAM and the reference image are
+0xFF: 7,012,352 bytes "differed" that nothing writes -- the Z80 window the 386
+fills at boot, and the half of the tile region a set does not use.
+
+**Result: 0 of 23,592,960 bytes differ.** Negative-checked by breaking the
+model's high-byte mask: 2,152,236 differ.
+
+### 28.2 One slip worth recording
+
+`git checkout sim/sdram_model.sv`, used to undo a negative check, restored the
+file from git and threw the repairs away with it. Caught immediately because the
+next run failed, and redone. Undo a deliberate perturbation from a copy you made
+yourself, not from git, when the file also holds uncommitted work.
+
+### 28.3 The arbitration fix was correct and made timing WORSE
+
+With the net green, 27.1 was applied: hoist `command <= CMD_ACTIVE` out of the
+five channel arms so the endpoint sees a five-input OR instead of the seven-deep
+priority cascade. The round trip passed -- 0 of 23,592,960 bytes -- so the
+transformation is right.
+
+Timing went from **-0.020 to -0.522** on `ch4_rq -> command[1]`, the very path it
+targeted.
+
+**`ch*_rq -> command[1]` is ROUTING dominated, not logic dominated.** The five rq
+flags sit near their own channel logic; a flat OR forces all five to converge at
+one gate in one level, where the cascade lets the fitter spread their arrival
+across levels. Flattening a cascade helps only when the depth is the cost, and
+here it is not. Reverted, with the reason left in sdram.sv so it is not tried
+again.
+
+What is still worth trying is in RESUME.md: a registered gather per side of the
+die, `command` duplicated or registered closer to the pins, and constraining the
+SDRAM interface at all (19.16 notes it is unconstrained).
+
+### 28.4 One path that WAS mine
+
+`spi_flash_derive|esi[24] -> state.S_RD_REQ`, -0.319: `esi` -> the window's base
+adder -> a 26-bit compare -> the state transition. The compare is registered now
+and gated on an `esi_settled` bit, because a registered compare used the cycle
+after esi moves is the stale-group bug 24.1 already paid for once.
+
+All seven sets still reach their reference hashes, at ~9% more cycles -- 37 M
+instead of 34 M, still 0.33 s.
+
+**Reads doubled, 242k to 485k on rdft, and that is not the settled gate.** It is
+`have_grp` lagging a cycle behind S_RD_ACK, so the cycle after a group lands
+still reads as a miss and the FSM fetches the same address again. Harmless, and
+left alone rather than chased with per-window carry logic. Written down because
+the obvious reading of the read count is that something is wrong.

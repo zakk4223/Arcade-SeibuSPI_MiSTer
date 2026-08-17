@@ -10,28 +10,30 @@
 //  and until now nothing in sim/ covered it.
 //
 //  ---------------------------------------------------------------------------
-//  BROKEN, 2026-08-17. IT DOES NOT PASS ON UNMODIFIED RTL.
+//  REPAIRED 2026-08-17. It had rotted three ways at once (PLAN.md 28):
 //  ---------------------------------------------------------------------------
-//  It had stopped BUILDING -- eighteen pins sdram.sv and rom_loader grew since
-//  it was last touched, plus set_id still 2 bits against 3 (the same rot that
-//  killed tb_ymf_top and tb_boot_top, PLAN.md 21.6, 22.3). Those are fixed and
-//  it builds again, but it now reports 15,906,965 of 23,592,960 bytes differing
-//  with every readback coming back 0xFF, on RTL nobody has changed.
+//    * it had stopped BUILDING -- eighteen pins sdram.sv and rom_loader grew,
+//      plus set_id still 2 bits against 3, the same rot that killed tb_ymf_top
+//      and tb_boot_top (21.6, 22.3)
+//    * sdram.sv drove its DQ as a clocked `inout` defaulting to 16'bZ, which
+//      Verilator resolved as a strong all-ones driver that won the net, so the
+//      model's read data never arrived and every readback came back 0xFF
+//    * sdram_model.sv ignored the mode register and burst every WRITE four
+//      words deep, where sdram.sv programs single-location writes -- so each
+//      byte write scribbled over the three words after it
 //
-//  What is known: the writes happen (23,396,352 write commands, exactly the
-//  download) and the reads happen (2,949,120, exactly the 64-bit readback), so
-//  the two sides disagree about DATA, not about whether they ran. Candidates,
-//  in the order worth trying: sdram_model.sv's CAS pipeline against sdram.sv's
-//  dq_reg timing; the model being ONE 32 MB chip where the design drives two
-//  across 64 MB; and SDR_SIZE below.
-//
-//  THIS MATTERS MORE THAN IT LOOKS. It is the only test that would catch
-//  sdram.sv corrupting data, which is the failure that cost PLAN.md 19.11-19.18
-//  six instruments and five builds to find -- and it was a weak SDRAM module in
-//  the end, not the RTL. Until this passes, changes to sdram.sv rest on
-//  inspection alone, and 26.4's arbitration fix is blocked behind it.
+//  It now passes with 0 of 23,592,960 bytes differing, and it is the only test
+//  that would catch sdram.sv corrupting data -- the failure that cost
+//  19.11-19.18 six instruments and five builds to localise.
 //
 //  usage: Vtb_sdram_top <sdram.bin> [<rom_concat.bin>]
+//
+//  RDFTS ONLY. tb_sdram_top.sv hardcodes set_id = 0 and set_upd = 0, so the
+//  loader walks the rdfts part table; hand it another set's stream and every
+//  part lands in the wrong place and 21.7 million bytes 'differ'. That is not a
+//  limitation worth fixing for what this tests -- sdram.sv does not know which
+//  set is loading, and 23 MB of real image through the real controller exercises
+//  it completely.
 //
 //  Both files are required: the concatenated part image is what MiSTer streams
 //  over ioctl, and the reference is what must end up in SDRAM afterwards.

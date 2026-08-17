@@ -56,6 +56,21 @@ module sdram_model
 	// Command tally, printed by the testbench via a hierarchical reference.
 
 
+	// The mode register, latched at CMD_LOAD_MODE. It used to be ignored --
+	// "refresh, mode set and NOP need no modelling here" -- and that was the bug
+	// that made this whole testbench useless: sdram.sv programs
+	// NO_WRITE_BURST = 1, single-location writes, and this model burst every
+	// write four words deep. Each byte write therefore scribbled the bus value
+	// over the THREE words after it, so the readback disagreed with the
+	// reference nearly everywhere and it looked like a READ fault (PLAN.md 28).
+	//
+	// mode_reg[2:0] is the burst-length code, mode_reg[9] disables write bursts.
+	/* verilator lint_off UNUSEDSIGNAL */
+	reg [12:0] mode_reg;
+	/* verilator lint_on UNUSEDSIGNAL */
+	wire       no_wr_burst = mode_reg[9];
+	wire [3:0] burst_len   = 4'd1 << mode_reg[2:0];   // 1, 2, 4 or 8
+
 	// Burst state
 	reg        burst_act;
 	reg  [2:0] burst_left;
@@ -82,6 +97,15 @@ module sdram_model
 		burst_act = 1'b0;
 		dq_oe = 1'b0;
 		for (i = 0; i <= CAS_LATENCY; i = i + 1) rd_val[i] = 1'b0;
+		// Legal, not accurate: the chip's power-on mode is undefined and the
+		// controller loads the register before it issues anything.
+		mode_reg = 13'b0000000000010;
+		// Unwritten SDRAM reads 0xFF, which is what build_sdram_image.py fills
+		// the reference with -- and there is a lot of it: the loader never writes
+		// the Z80 window (the 386 fills that at boot) nor the half of the tile
+		// region a set does not use. At 0 that was 7,012,352 bytes 'differing'
+		// that nothing writes.
+		for (i = 0; i < 16777216; i = i + 1) mem[i] = 16'hFFFF;
 	end
 
 	always @(posedge clk) begin
@@ -126,8 +150,8 @@ module sdram_model
 						if (!act_val[ba]) $display("sdram_model: READ from unopened bank %0d", ba);
 						rd_data[0] <= mem[addr_of(ba, act_row[ba], a[8:0])];
 						rd_val[0]  <= 1'b1;
-						burst_act  <= 1'b1;
-						burst_left <= 3'd3;          // burst of 4, one already issued
+						burst_act  <= (burst_len > 4'd1);
+						burst_left <= burst_len[2:0] - 3'd1;   // one already issued
 						burst_ba   <= ba;
 						burst_col  <= a[8:0];
 						burst_rd   <= 1'b1;
@@ -139,8 +163,10 @@ module sdram_model
 						if (!act_val[ba]) $display("sdram_model: WRITE to unopened bank %0d", ba);
 						if (!dqml) mem[addr_of(ba, act_row[ba], a[8:0])][ 7:0] <= dq[ 7:0];
 						if (!dqmh) mem[addr_of(ba, act_row[ba], a[8:0])][15:8] <= dq[15:8];
-						burst_act  <= 1'b1;
-						burst_left <= 3'd3;
+						// Single-location write when the mode register says so,
+						// which is exactly what sdram.sv programs.
+						burst_act  <= !no_wr_burst && (burst_len > 4'd1);
+						burst_left <= burst_len[2:0] - 3'd1;
 						burst_ba   <= ba;
 						burst_col  <= a[8:0];
 						burst_rd   <= 1'b0;
@@ -153,7 +179,9 @@ module sdram_model
 						burst_act <= 1'b0;
 					end
 
-					default: ;   // refresh, mode set and NOP need no modelling here
+					CMD_MODE: mode_reg <= a;
+
+					default: ;   // refresh and NOP need no modelling here
 				endcase
 			end
 

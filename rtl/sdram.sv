@@ -95,7 +95,7 @@ module sdram
     output reg        dbg_s_e1_ac,
     output reg [14:0] dbg_s_e1_after,
 
-    inout  reg [15:0] SDRAM_DQ,    // 16 bit bidirectional data bus
+    inout      [15:0] SDRAM_DQ,    // 16 bit bidirectional data bus
     output reg [12:0] SDRAM_A,     // 13 bit multiplexed address bus
     output            SDRAM_DQML,  // two byte masks
     output            SDRAM_DQMH,  //
@@ -142,6 +142,21 @@ assign SDRAM_nCAS = command[1];
 assign SDRAM_nWE  = command[0];
 assign SDRAM_CKE  = 1;
 assign {SDRAM_DQMH,SDRAM_DQML} = SDRAM_A[12:11];
+
+// THE DQ OUTPUT: a continuous assign off a registered value and a registered
+// enable, rather than a registered `inout` defaulting to 16'bZ.
+//
+// The two are the same hardware -- a flop for the data and a flop for the output
+// enable, which is what the synthesiser inferred from the old form anyway -- but
+// only this one SIMULATES. Verilator resolved the clocked `SDRAM_DQ <= 16'bZ` as
+// a strong all-ones driver that won the net, so sim/sdram_model.sv's read data
+// never reached dq_reg and every readback in tb_sdram came back 0xFF, on RTL
+// nobody had changed. Proved rather than guessed: making the model drive 0x0000
+// instead of Z when idle changed nothing, so it was this side winning the net,
+// not the model losing it (PLAN.md 28).
+reg [15:0] dq_drv;
+reg        dq_oe;
+assign SDRAM_DQ = dq_oe ? dq_drv : 16'bZ;
 
 
 // Burst length = 4
@@ -323,7 +338,9 @@ always @(posedge clk) begin
     if(data_ready_delay5[0]) ch5_dout[63:48] <= dq_reg_d;
     if(data_ready_delay5[0]) ch5_ack <= ch5_req;
 
-    SDRAM_DQ <= 16'bZ;
+    // Default: not driving. STATE_RW1 overrides it for a write, exactly as the
+    // old `SDRAM_DQ <= 16'bZ` default did.
+    dq_oe <= 1'b0;
 
     // The watch window. Ahead of the case statement so that a new CMD_WRITE
     // arming it beats this cycle's decrement. `w_run` counts 5 down to 1, so
@@ -415,6 +432,17 @@ always @(posedge clk) begin
         end
 
         STATE_IDLE: begin
+            // TRIED AND REJECTED, 2026-08-17: hoisting `command <= CMD_ACTIVE` out
+            // of the five channel arms below, so this endpoint saw a five-input
+            // OR instead of the priority cascade. It is a correct
+            // transformation -- the round-trip test passed, 0 of 23,592,960
+            // bytes -- and it made timing WORSE, from -0.020 to -0.522 on this
+            // very path. The reason is worth keeping: `ch*_rq -> command[1]` is
+            // ROUTING dominated, not logic dominated. The five rq flags sit near
+            // their own channel logic, and a flat OR forces all five to converge
+            // at one gate in one level, where the cascade lets the fitter spread
+            // their arrival across levels. Flattening a cascade helps only when
+            // the depth is the cost. PLAN.md 28.3.
             if (refresh_due) begin // emergency refresh, mainly for downloading rom/paused core
                 state         <= STATE_RFSH;
                 command       <= CMD_AUTO_REFRESH;
@@ -491,7 +519,8 @@ always @(posedge clk) begin
             SDRAM_A <= cas_addr;
             if(saved_wr) begin
                 command  <= CMD_WRITE;
-                SDRAM_DQ <= saved_data;
+                dq_drv   <= saved_data;
+                dq_oe    <= 1'b1;
                 if (w_taken) begin
                     dbg_s_writes <= dbg_s_writes + 8'd1;
                     w_taken      <= 1'b0;

@@ -360,7 +360,30 @@ module spi_flash_derive
 	// by a range of esi: how many 386 dwords one 64-bit group covers depends on
 	// the window -- eight for sound1, four for a two-lane PCM source, two for
 	// the program -- so only the address the window computed is safe to compare.
-	wire cache_hit = have_grp && (grp_held == w_grp_addr);
+	//
+	// REGISTERED, and gated on esi having settled. Combinationally this is
+	// `esi -> the window's base adder -> a 26-bit compare -> the state
+	// transition`, and it closed clk_ram at -0.319 ns on
+	// `esi[24] -> state.S_RD_REQ`. Registered, the compare ends at a flop and
+	// the FSM reads the flop.
+	//
+	// `esi_settled` is what makes that safe. hit_r is computed from whatever esi
+	// held last cycle, so using it the cycle after esi changes would be the
+	// stale-group bug all over again -- the same one `have_grp` dropping during a
+	// read was added to prevent. One bit, cleared whenever esi is written.
+	reg  hit_r;
+	reg  esi_settled;
+	wire cache_hit = hit_r && esi_settled;
+	// A miss is "settled AND not a hit", so the unsettled cycle after esi moves
+	// is a WAIT rather than a miss.
+	//
+	// It does not recover the reads registering this cost: rdft went from 242k
+	// to 485k and stayed there. Those come from `have_grp` lagging a cycle behind
+	// S_RD_ACK, so the cycle after a group lands still reads as a miss and the
+	// FSM fetches it again. Harmless -- same address, same data -- and the walk
+	// is 0.33 s either way, so it is left alone rather than chased with more
+	// per-window logic. Written down because the obvious reading of the read
+	// count is that something is wrong, and it is not.
 
 	assign dbg_state = state;
 	assign dbg_esi   = esi;
@@ -372,7 +395,11 @@ module spi_flash_derive
 	always @(posedge clk) begin
 		dec_start <= 1'b0;
 
+		hit_r       <= have_grp && (grp_held == w_grp_addr);
+		esi_settled <= 1'b1;
+
 		if (reset) begin
+			esi_settled <= 1'b0;
 			state       <= S_IDLE;
 			done        <= 1'b0;
 			sdr_req     <= 1'b0;
@@ -413,6 +440,7 @@ module spi_flash_derive
 			S_IDLE: if (start) begin
 				job         <= job_table;
 				esi         <= job_table;
+				esi_settled <= 1'b0;
 				pos         <= FLASH_START;
 				bytes_out   <= 22'd0;
 				jobs_done   <= 8'd0;
@@ -431,6 +459,7 @@ module spi_flash_derive
 
 			S_J0: begin
 				esi      <= job;
+				esi_settled <= 1'b0;
 				jw       <= 2'd0;
 				jb       <= 2'd0;
 				sbyte_v  <= 1'b0;
@@ -442,11 +471,12 @@ module spi_flash_derive
 			S_JOBB: if (sbyte_v) begin
 				jacc    <= {sbyte_r, jacc[31:8]};
 				esi     <= esi + 32'd1;
+				esi_settled <= 1'b0;
 				jb      <= jb + 2'd1;
 				sbyte_v <= 1'b0;
 				if (jb == 2'd3) state <= S_JOBD;
 			end
-			else if (!cache_hit) begin
+			else if (esi_settled && !hit_r) begin
 				ret_r <= S_JOBB;
 				state <= S_RD_REQ;
 			end
@@ -462,6 +492,7 @@ module spi_flash_derive
 					// game would mistake for a finished one.
 					if (j_src == 32'hFFFF_FFFF) begin
 						esi      <= stamp_addr;
+						esi_settled <= 1'b0;
 						stamping <= 1'b1;
 						pos      <= 22'd0;
 						stamp_i  <= 3'd0;
@@ -487,6 +518,7 @@ module spi_flash_derive
 				dec_codec <= vb ? CODEC_RAW : CODEC_BPE_DPCM;
 				dec_start <= 1'b1;
 				esi       <= j_src;
+				esi_settled <= 1'b0;
 				produced  <= 32'd0;
 				have_byte <= 1'b0;
 				sbyte_v   <= 1'b0;
@@ -516,9 +548,10 @@ module spi_flash_derive
 						fbyte     <= sbyte_r;
 						have_byte <= 1'b1;
 						esi       <= esi_next;
+						esi_settled <= 1'b0;
 						sbyte_v   <= 1'b0;
 					end
-					else if (!cache_hit) begin
+					else if (esi_settled && !hit_r) begin
 						ret_r <= S_RUN;
 						state <= S_RD_REQ;
 					end
@@ -539,12 +572,13 @@ module spi_flash_derive
 			else if (sbyte_v) begin
 				wbyte   <= sbyte_r;
 				esi     <= esi + 32'd1;
+				esi_settled <= 1'b0;
 				stamp_i <= stamp_i + 3'd1;
 				sbyte_v <= 1'b0;
 				ret_w   <= S_STAMPB;
 				state   <= S_WR_REQ;
 			end
-			else if (!cache_hit) begin
+			else if (esi_settled && !hit_r) begin
 				ret_r <= S_STAMPB;
 				state <= S_RD_REQ;
 			end
