@@ -7656,3 +7656,94 @@ MRA config opcodes for the per-set job-table and stamp addresses, the OSD option
 and its menumask gating, and last the MRA collapse -- with `tb_flash_derive`
 replacing the derived-image sha256 that `check_mra.py` loses when no MRA carries
 a derived image any more.
+
+## 23. The flash is derivable from the SDRAM image alone -- all seven sets
+
+The single-MRA plan's whole premise is that the core can build the sample-flash
+image itself, at reset, from what the download already put in SDRAM -- instead
+of an MRA assembling it from ROM slices or the game spending six minutes
+programming it. That premise was never tested. It is now, and it holds.
+
+### 23.1 The seam
+
+`build_soundflash.build()` read the ROM set for exactly two things: the 386's
+program image and MAME's 10 MB sound01 region. Everything else -- the job table,
+the copy lengths, the source addresses, the fetch modes, the region stamp --
+already comes out of the program image. So it split into `build_from(prg,
+region, g)` with two front ends:
+
+    from a zip     load_prg() + load_sound01()          the existing route
+    from SDRAM     a plain slice + spi_snd_window's decode   the new one
+
+The program image is a PLAIN SLICE: rom_loader scatters the four byte-lane ROMs
+into 386 order exactly as MAME's region does, so no decode is needed. That is
+why viprp1's second job -- the one that reads the PROGRAM ROM, and the reason no
+MRA can assemble viprp1 a pre-flashed image at all -- costs nothing on this
+route. The region is the part that needs section 22's decode.
+
+### 23.2 The result
+
+`tools/check_flash_derive.py`, `make check-derive ROMS=...`. Every set derives
+byte-identically by both routes, and every one equals the reference sha256
+recorded in `build_soundflash.GAMES`:
+
+| set | gen | what it covers |
+|---|---|---|
+| rdft     | B0 | copy-only, no decoder |
+| rdft2    | B1 | copy + BPE, second sound ROM |
+| rfjet    | B1 | same shape, every number different |
+| viprp1   | A  | decode-only, and a job sourced from the PROGRAM image |
+| senkyu   | A  | gen A WITH a second sound ROM, which viprp1 does not have |
+| ejanhs   | A  | the same, largest payload of the seven |
+| batlball | A  | a CLONE: same graphics, different program, different stamp |
+
+The batlball row is the one that matters for what comes next. A clone differs
+only in its program ROMs -- and therefore in its job-table address (senkyu
+0x00302324, batlball 0x00302290) and its region stamp. Deriving it correctly
+from its own image is the evidence that per-set constants belong in the MRA
+rather than the RTL, which is the step after the walker.
+
+Two sets had to be added to `build_sdram_image.py` to get there -- senkyu and
+ejanhs, with a zero-fill part type for the megabyte MAME leaves 00 below their
+upper-half programs -- because without them gen A was represented only by
+viprp1, which has no second sound ROM and so never opens that window.
+batlball's table is DERIVED from senkyu's rather than copied, so "only the
+program differs" is structural.
+
+### 23.3 It was checked for the ability to fail
+
+A test that reads an image and reproduces a known hash is exactly the kind that
+turns out to be reading something else. Three corruptions of rdft2's image:
+
+| corrupted | result |
+|---|---|
+| PCM source, one bit at pcmsrc+0x1234 | 1 of 2,097,152 bytes differ |
+| region stamp, prg 0x1FFFFC | 1 byte, at flash[0] |
+| sound1 +0x1000, inside the compressed tail | **464,705** bytes differ |
+
+The third is the BPE decoder amplifying one flipped bit, which is what a
+compressed stream should do and a useful reminder of what a single bad SDRAM
+read costs here.
+
+A fourth corruption -- sound1 +0x60000 -- changed **nothing**, and that is
+correct rather than a hole: rdft2's compressed tail is the first 312,933 bytes
+of that ROM, and 0x60000 is past it, in the Z80 program. The test is sensitive
+exactly where the payload comes from. Worth knowing before someone reads a PASS
+after touching that region.
+
+### 23.4 What this replaces, and what is still missing
+
+When the MRAs collapse, `check_mra.py` loses its derived-image check: it
+currently rebuilds each pre-flashed set's image from the MRA's own slices and
+compares a sha256, and no MRA will carry a derived image any more. `make
+check-derive` is what takes over, and it covers seven sets where that covered
+two.
+
+Still missing, and it is the next thing: the RTL walker. This file is its
+specification and its acceptance test -- the walker has to reach these same
+seven hashes from these same seven images.
+
+Also fixed here, both paper cuts found by using the thing: `make check-mra
+ZIP=...` did not quote the path, so any rompath with a bracket in it failed with
+a shell syntax error, and it had no SET passthrough, so a single-game zip
+reported every other set's parts missing.

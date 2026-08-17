@@ -131,6 +131,55 @@ PARTS_VIPRP1 = [
     ("sprites", 0xe9fb9062, 0x400000, "SPR_ILV", 4),
 ]
 
+# senkyu and ejanhs: the other two generation-A cartridges, and the only ones
+# whose program sits in the UPPER half of the region behind a megabyte of zero
+# fill. They are here for the flash derivation (tools/check_flash_derive.py):
+# viprp1 is generation A too but has NO second sound ROM, so without these the
+# gen-A-plus-sound1-window path is never exercised end to end. Authentic-flash
+# only, like viprp1 -- no pre-flashed variant is built for either.
+PARTS_SENKYU = [
+    ("prg",     None,      0x100000, "LINEAR",  0),
+    ("prg",     0x20a3e5db, 0x40000, "W32_B0",  0x100000),
+    ("prg",     0x38e90619, 0x40000, "W32_B1",  0x100000),
+    ("prg",     0x226f0429, 0x40000, "W32_B2",  0x100000),
+    ("prg",     0xb46d66b7, 0x40000, "W32_B3",  0x100000),
+    ("chars",   0xb57115c9, 0x20000, "W24_W01", 0),
+    ("chars",   0x440a9ae3, 0x10000, "W24_B2",  0),
+    # One bg group where every other set has two.
+    ("tiles",   0xeae7a1fc, 0x200000, "W24_W01", 0),
+    ("tiles",   0xb46e774e, 0x100000, "W24_B2",  0),
+    ("sprites", 0x29f86f68, 0x400000, "SPR_ILV", 0),
+    ("sprites", 0xc9e3130b, 0x400000, "SPR_ILV", 2),
+    ("sprites", 0xf6c3bc49, 0x400000, "SPR_ILV", 4),
+]
+
+PARTS_EJANHS = [
+    ("prg",     None,      0x100000, "LINEAR",  0),
+    ("prg",     0xe626d3d2, 0x40000, "W32_B0",  0x100000),
+    ("prg",     0x83c39da2, 0x40000, "W32_B1",  0x100000),
+    ("prg",     0x46897b7d, 0x40000, "W32_B2",  0x100000),
+    ("prg",     0xb3187a2b, 0x40000, "W32_B3",  0x100000),
+    ("chars",   0x837e012c, 0x20000, "W24_W01", 0),
+    ("chars",   0xd62db7bf, 0x10000, "W24_B2",  0),
+    ("tiles",   0xbcacabe0, 0x200000, "W24_W01", 0),
+    ("tiles",   0x1fd0eb5e, 0x100000, "W24_B2",  0),
+    ("tiles",   0xea2acd69, 0x100000, "W24_W01", 0x300000),
+    ("tiles",   0xa4a9cb0f,  0x80000, "W24_B2",  0x300000),
+    ("sprites", 0x852f180e, 0x400000, "SPR_ILV", 0),
+    ("sprites", 0x1116ad08, 0x400000, "SPR_ILV", 2),
+    ("sprites", 0xccfe02b6, 0x400000, "SPR_ILV", 4),
+]
+
+# batlball is senkyu with four different program ROMs and a different region
+# byte in the blank flash -- nothing else changes, which is what a clone IS on
+# this board. Derived from senkyu's table rather than copied, so the claim
+# "only the program differs" is structural and cannot drift.
+PARTS_BATLBALL = ([("prg", None, 0x100000, "LINEAR", 0)]
+                  + [("prg", crc, 0x40000, mode, 0x100000) for crc, mode in
+                     ((0xd4e48f89, "W32_B0"), (0x3077720b, "W32_B1"),
+                      (0x520d31e1, "W32_B2"), (0x22419b78, "W32_B3"))]
+                  + [p for p in PARTS_SENKYU if p[0] != "prg"])
+
 # rdft2. Order and modes are rom_loader.sv's rdft2 table, which check_mra.py
 # holds against MAME's ROM_START(rdft2).
 PARTS_RDFT2 = [
@@ -199,6 +248,7 @@ PARTS_RFJET = [
 # rom_loader.sv's authentic tail is these three parts in this order.
 BLANK_FLASH = 0xe2adaff5        # flash0_blank_region80.u1053, 1 MB
 BLANK_VIPRP1 = 0xa4c181d0       # flash0_blank_regionbe.u1053, viprp1's region
+BLANK_REGION01 = 0x7ae7ab76     # flash0_blank_region01.u1053, senkyu/ejanhs
 SETS = {
     "rdfts": dict(parts=PARTS_RDFTS, probe=0xe278dddd, flash=False),
     "rdft":  dict(parts=PARTS_RDFT,  probe=0xadcb5dbc, flash=True,
@@ -228,6 +278,22 @@ SETS = {
                    pcmsrc=PCMSRC_SEI252,
                    upd=(0xe3111b60, None), upd_pcm_size=0x100000,
                    upd_blank=BLANK_VIPRP1),
+    # Generation A WITH a second sound ROM, which viprp1 is not. Their PCM
+    # source is 1 MB on one lane, same as viprp1's, and MAME loads it 512 KB at
+    # a time with a ROM_CONTINUE to 0x400000 -- the bank skip build_soundflash's
+    # bank() and spi_snd_window both already handle.
+    "senkyu": dict(parts=PARTS_SENKYU, probe=0x20a3e5db, flash=False,
+                   pcmsrc=PCMSRC_SEI252,
+                   upd=(0x1d83891c, 0x874d7b59), upd_pcm_size=0x100000,
+                   upd_blank=BLANK_REGION01),
+    "batlball": dict(parts=PARTS_BATLBALL, probe=0xd4e48f89, flash=False,
+                     pcmsrc=PCMSRC_SEI252,
+                     upd=(0x1d83891c, 0x874d7b59), upd_pcm_size=0x100000,
+                     upd_blank=BLANK_FLASH),
+    "ejanhs": dict(parts=PARTS_EJANHS, probe=0xe626d3d2, flash=False,
+                   pcmsrc=PCMSRC_SEI252,
+                   upd=(0xa92a3a82, 0xc6fc6bcf), upd_pcm_size=0x100000,
+                   upd_blank=BLANK_REGION01),
 }
 
 
@@ -359,14 +425,23 @@ def main():
         sl = part[6] if len(part) > 6 else None
         if want_regions and region not in want_regions:
             continue
-        name = by_crc.get(crc)
-        if name is None:
-            raise SystemExit("missing ROM crc %08x for region %s" % (crc, region))
-        data = zf.read(name)
-        # The CRC covers the whole file whether or not this part is a slice of
-        # it, so check it before cutting.
-        if binascii.crc32(data) & 0xFFFFFFFF != crc:
-            raise SystemExit("%s failed CRC check" % name)
+        if crc is None:
+            # Not a file: a run of zeroes MAME's region has and no ROM supplies.
+            # senkyu and ejanhs put their program in the UPPER half of a 2 MB
+            # region, and MAME's ROM_REGION32_LE leaves the lower half 00 --
+            # which an image starting life as 0xFF would otherwise get wrong,
+            # and the derivation reads the whole program image.
+            name, data = "zero fill", bytes(size)
+        else:
+            name = by_crc.get(crc)
+            if name is None:
+                raise SystemExit("missing ROM crc %08x for region %s"
+                                 % (crc, region))
+            data = zf.read(name)
+            # The CRC covers the whole file whether or not this part is a slice
+            # of it, so check it before cutting.
+            if binascii.crc32(data) & 0xFFFFFFFF != crc:
+                raise SystemExit("%s failed CRC check" % name)
         if sl is not None:
             data = data[sl:sl + size]
         if len(data) != size:

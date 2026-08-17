@@ -251,10 +251,25 @@ def expand(fetch, out):
 
 
 def build(zf, setname, decoded_out=None, quiet=False):
+    """The updater's output, from a ROM set."""
     g = GAMES[setname]
+    return build_from(load_prg(zf, setname, g["prg"]),
+                      load_sound01(zf, setname, g["sound01"]),
+                      g, decoded_out=decoded_out, quiet=quiet)
+
+
+def build_from(prg, region, g, decoded_out=None, quiet=False):
+    """The updater's output, from the two things it actually reads.
+
+    Split out from build() because the ROM SET is not the only place those two
+    come from: the core has both of them in SDRAM after a download -- the
+    program image plainly, the region through spi_snd_window's decode -- which
+    is what lets the flash be derived in hardware instead of assembled by an
+    MRA. tools/check_flash_derive.py is that path, and it has to reach the same
+    bytes through this same walk, or the two would be different definitions of
+    what the updater does.
+    """
     decoded = bytearray()
-    prg = load_prg(zf, setname, g["prg"])
-    region = load_sound01(zf, setname, g["sound01"])
 
     def prg_dword(addr):
         o = addr - PRG_BASE

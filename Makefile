@@ -41,9 +41,12 @@ test:
 # the part INDEX -- so a reordered or dropped part loads to the wrong address
 # with no error anywhere. This checks the MRA, the RTL table and MAME's driver
 # all agree. Pass ZIP=... to also confirm the parts resolve out of an archive.
-#   make check-mra ZIP=~/Downloads/rdft.zip
+# With ZIP, pass SET too: --zip alone holds EVERY set against that one archive,
+# so a single-game zip reports every other set's parts missing.
+#   make check-mra
+#   make check-mra ZIP=~/Downloads/rdft2.zip SET=rdft2
 check-mra:
-	@python3 tools/check_mra.py $(if $(ZIP),--zip $(ZIP))
+	@python3 tools/check_mra.py $(if $(ZIP),--zip "$(ZIP)") $(if $(SET),--set $(SET))
 
 # The 386's sound01 window, which the authentic-flash MRAs need and which fails
 # SILENTLY when it is wrong -- an undecoded window reads as zero and the game's
@@ -55,6 +58,17 @@ check-mra:
 check-snd01:
 	@python3 tools/check_snd01_window.py \
 	    $(if $(ROMS),--all "$(ROMS)",$(if $(ZIP),"$(ZIP)",--help))
+
+# The sample flash, derived from an SDRAM IMAGE alone, checked against the same
+# image derived from the ROM set. This is the premise the single-MRA plan rests
+# on -- the core deriving its own flash at reset instead of an MRA assembling it
+# or the game spending six minutes programming it -- and the acceptance test the
+# RTL walker will have to pass. Needs ROMs, so it cannot be part of `verify`.
+#   make check-derive ROMS=~/Downloads/roms
+#   make check-derive ZIP=~/Downloads/rdft2.zip IMAGE=/tmp/rdft2-upd.bin
+check-derive:
+	@python3 tools/check_flash_derive.py \
+	    $(if $(ROMS),--all "$(ROMS)",$(if $(ZIP),"$(ZIP)" "$(IMAGE)" $(if $(SET),--set $(SET)),--help))
 
 # Everything that can be checked without a Quartus run or a MiSTer.
 verify: lint check-mra test
