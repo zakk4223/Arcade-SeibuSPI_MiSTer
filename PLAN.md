@@ -7207,3 +7207,49 @@ the same risk and that the implication was "far wider than one byte"; the
 the build rather than of the address was wrong for the same reason. What stands
 from 19.12-19.15 is the chain itself, every link of which was measured: memory
 holds FE, the read returns FF, and the 386 pushes what it read.
+
+### 19.18  It was the SDRAM module
+
+The module was swapped for a newer one. Same core -- the uninstrumented control
+build from 19.16, byte for byte -- same MRA, same save file, same test:
+
+```
+                            old module      new module
+0x29029F8, 180 reads        32 corrupt      0 corrupt
+128-line scan, 5,120 reads   3 corrupt      0 corrupt
+mixed regions, 1,200 reads   0 corrupt      0 corrupt
+```
+
+and end to end, three complete rituals, each checked against the reference
+image across 401 lines spread over the whole 2 MB rather than the one byte that
+started this:
+
+```
+ritual 1:  byte correct,  401/401 sampled lines match
+ritual 2:  byte correct,  401/401 sampled lines match
+ritual 3:  byte correct,  401/401 sampled lines match
+```
+
+Against 7 failures in 10 rituals on the old module. **The core was never wrong.**
+
+What the whole chain was, in the end: one weak location in one SDRAM module
+misread about one time in eight, in a single bit, always the last beat of its
+burst -- and every layer above it did its job faithfully. The 386 pushed what it
+read, the FIFO handed over what it was given, the Z80 wrote what it was handed,
+spi_soundflash programmed what it was told, sdram.sv stored it, and the save
+file recorded it. Six instruments to find that out, and each one was right about
+its own layer; what took the time was that the fault was underneath the bottom
+of the stack I was measuring.
+
+**The lesson worth keeping** is 19.17's, not 19.15's: the JTAG peek is a memory
+integrity tester. The ROM regions are read-only, so a location that returns two
+different values has proved its own corruption -- no reference image, no written
+pattern, no extra RTL. A hundred reads of one address takes ten seconds and
+gives a RATE. That should have been the FIRST measurement after 19.11 showed the
+write reaching memory intact, and it would have replaced five builds.
+
+**Still open, and unrelated to any of this:** the shipping build closes at
++0.018 ns (19.16), on `sdram|ch5_rq -> SDRAM_A[11]`. That is a real margin
+problem in its own right and wants a seed sweep before any release. The SDRAM
+interface also remains unconstrained (19.16), exactly as it is in the Irem and
+IGS cores, so nothing checks it either way.
