@@ -254,7 +254,7 @@ module rom_loader
 			// blank it programs. 15 and 16 are unreachable pre-flashed --
 			// nparts stops the walk at 15.
 			5'd14: if (set_upd)
-			       begin part_base = SDR_PCMSRC_BASE;                    part_size = 26'h020_0000; part_mode = M_LINEAR; end // gun_dogs_pcm.u0217
+			       begin part_base = SDR_PCMSRC_SEI252;                    part_size = 26'h020_0000; part_mode = M_LINEAR; end // gun_dogs_pcm.u0217
 			  else begin part_base = SDR_PCM_BASE;                       part_size = 26'h020_0000; part_mode = M_LINEAR; end // pre-programmed flash image
 			5'd15: begin part_base = SDR_SND01_BASE;                     part_size = 26'h008_0000; part_mode = M_LINEAR; end // seibu_8.u0216
 			default:begin part_base = SDR_PCM_BASE;                      part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region80.u1053 + 1 MB of FF
@@ -303,7 +303,7 @@ module rom_loader
 		// it is there for the Z80 program, authentic it is also the updater's
 		// second source -- so only its position in the list moves.
 		5'd14: if (set_upd)
-		       begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm.u0217
+		       begin part_base = SDR_PCMSRC_RDFT2;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm.u0217
 		  else begin part_base = SDR_PCM_BASE;                      part_size = 26'h017_C247; part_mode = M_LINEAR; end // flash head: region stamp + pcm.u0217
 		5'd15: if (set_upd)
 		       begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222
@@ -358,7 +358,7 @@ module rom_loader
 		// 2 MB on every cartridge set. It is only the DERIVED images that
 		// differ per game, which is the argument for this path in one line.
 		5'd14: if (set_upd)
-		       begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm-d.u0227
+		       begin part_base = SDR_PCMSRC_RFJET;                   part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm-d.u0227
 		  else begin part_base = SDR_PCM_BASE;                      part_size = 26'h018_9DD5; part_mode = M_LINEAR; end // flash head: region stamp + pcm-d.u0227
 		5'd15: if (set_upd)
 		       begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0222
@@ -396,7 +396,7 @@ module rom_loader
 		5'd10: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-1.322
 		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-2.324
 		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // v_obj-3.323
-		5'd13: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // v_pcm.215
+		5'd13: begin part_base = SDR_PCMSRC_SEI252;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // v_pcm.215
 		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_regionbe.u1053 + 1 MB of FF
 		endcase
 
@@ -420,7 +420,7 @@ module rom_loader
 		5'd9 : begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // fb_obj-1.322
 		5'd10: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // fb_obj-2.324
 		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // fb_obj-3.323
-		5'd12: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // fb_pcm-1.215
+		5'd12: begin part_base = SDR_PCMSRC_SEI252;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // fb_pcm-1.215
 		5'd13: begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // fb_7.216
 		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region01.u1053 + 1 MB of FF
 		endcase
@@ -447,7 +447,7 @@ module rom_loader
 		5'd11: begin part_base = SDR_SPRITES_BASE + 26'd0;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // ej3_obj1.322
 		5'd12: begin part_base = SDR_SPRITES_BASE + 26'd2;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // ej3_obj2.324
 		5'd13: begin part_base = SDR_SPRITES_BASE + 26'd4;          part_size = 26'h040_0000; part_mode = M_SPR_ILV; end // ej3_obj3.323
-		5'd14: begin part_base = SDR_PCMSRC_BASE;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // ej3_pcm1.215
+		5'd14: begin part_base = SDR_PCMSRC_SEI252;                   part_size = 26'h010_0000; part_mode = M_LINEAR; end // ej3_pcm1.215
 		5'd15: begin part_base = SDR_SND01_BASE;                    part_size = 26'h008_0000; part_mode = M_LINEAR; end // ejan3_7.216
 		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region01.u1053 + 1 MB of FF
 		endcase

@@ -74,7 +74,9 @@
         0x0280000  2 MB   YMF271 sample flash, blank at boot
         0x0500000  6 MB   background tiles
         0x1100000  12 MB  sprites, three 4 MB plane-pair chunks
-        0x2900000  1 MB   the PCM source ROM, read through the sound01 window
+        0x1D00000  1 MB   the PCM source ROM, read through the sound01 window
+                          -- PER-SET, immediately above this set's own sprites,
+                          which is what keeps the map inside 32 MB (30 MB top)
     -->
 
     <!--

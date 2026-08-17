@@ -7253,3 +7253,83 @@ write reaching memory intact, and it would have replaced five builds.
 problem in its own right and wants a seed sweep before any release. The SDRAM
 interface also remains unconstrained (19.16), exactly as it is in the Irem and
 IGS cores, so nothing checks it either way.
+
+## 20. The PCM source base is per-set, so a 32 MB module keeps the SEI252 sets
+
+### 20.1 Why it moved
+
+`SDR_PCMSRC_BASE` was one constant, 0x2900000, chosen because it is the top of
+rfjet's sprite region -- the highest address any set reaches. That is the same
+"one map, sized for the worst case in the family" rule every other region
+follows, and for every other region it costs nothing but address space.
+
+For this one it cost a board. The region exists ONLY in the self-flashing MRAs
+(section 17), and a 41 MB base puts the top of the image at 43 MB for every set
+that loads it. So:
+
+| set    | sprites end | pre-flashed top | self-flashing top, old | new |
+|--------|-------------|-----------------|------------------------|-----|
+| rdft   | 29 MB       | 29 MB           | 43 MB                  | 31 MB |
+| viprp1 | 29 MB       | -- (none)       | 43 MB                  | 30 MB |
+| senkyu | 29 MB       | -- (not built)  | 43 MB                  | 30 MB |
+| ejanhs | 29 MB       | -- (not built)  | 43 MB                  | 30 MB |
+| rdft2  | 35 MB       | 35 MB           | 43 MB                  | 37 MB |
+| rfjet  | 41 MB       | 41 MB           | 43 MB                  | 43 MB |
+
+Read the rdft row: its pre-flashed form fits a 32 MB module and its
+self-flashing form did not. That is backwards. The self-flashing MRA is the one
+that works for every set -- viprp1 has no other form, senkyu's and ejanhs's were
+never built -- and it is the one a single-MRA-per-set core would have to ship
+(section 21). Having it be the variant a 32 MB board cannot run made the
+smaller board a rdfts-and-nothing-else proposition.
+
+So the base now follows the set's OWN sprites: `SDR_SPRITES_BASE + 3 *
+SPR_CHUNK_SIZE*`, which is exactly where that set's sprite data ends. Three
+constants, `SDR_PCMSRC_SEI252 / _RDFT2 / _RFJET`, and rfjet's is the old value
+unchanged.
+
+### 20.2 What had to move with it
+
+Six places, and the reason to list them is that four are outside the RTL:
+
+* `rom_loader.sv` -- six table arms, each naming its set's constant. No new
+  mux: every arm was already a per-set case, so the base is still a constant
+  where it is used.
+* `spi_cpu.sv` -- `pcm_grp_addr`'s base becomes a port, `pcmsrc_base`, because
+  the 386's source window has to read where the loader wrote. This is the one
+  place that gains real logic: an adder operand that used to be constant-folded.
+  It is on clk_cpu at 28.6 MHz and feeds a registered `sdr_addr`, so it is free.
+* `spi_top.sv` -- the mux, on the same `set_id` arms as `spr_chunk`. Deliberately
+  adjacent to it, and commented both ways: the two are the same fact.
+* `tools/build_sdram_image.py`, `tools/check_mra.py`,
+  `tools/check_snd01_window.py`, `sim/tb_rom_loader.cpp` -- the map's four other
+  copies. check_mra names the three regions rather than threading a per-set
+  value, so a set picks its base by naming it and `expected_base()` is unchanged.
+
+### 20.3 What was checked
+
+* `tb_rom_loader` passes all eleven tables, including all six authentic-flash
+  ones. It is an independent placement model, so it catches a base that moved in
+  the RTL and not in the table -- but NOT one that moved wrongly in both, since
+  both now derive it the same way.
+* `check_snd01_window --image` is the check that does catch that: it rebuilds
+  the 386's view of the window from the built image and compares it against
+  `build_soundflash.py`'s region model, which knows nothing about SDRAM at all.
+  rdft 1,543,202 populated dwords, rdft2 1,513,814, rfjet 1,533,242, viprp1
+  1,030,950 -- all matching. That is the loader and the CPU decode agreeing
+  through a third party.
+* The byte immediately below each new base is real sprite data, not fill
+  (0x26 / 0xa3 / 0xc1 / 0x55), so the region abuts the sprites with no gap and
+  no overlap.
+* Pre-flashed images are byte-identical to what the tool produced before:
+  same sha256 on rdft, built from the tree at HEAD and with the change applied.
+  Nothing that was working moved.
+* `make check-mra` passes on all ten MRAs.
+
+### 20.4 Not fixed here
+
+`make test` does not complete: `obj_dir/Vtb_ymf_top` fails to build on a port
+mismatch, `spi_soundflash.sv`'s `dbg_w_hit` against `tb_ymf_top.sv`. It fails
+identically at HEAD with this change stashed, so it is pre-existing and
+unrelated -- but it means `make test` has not been green for however long that
+has been true, and the YMF271 testbench has not been running.

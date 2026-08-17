@@ -89,6 +89,12 @@ module spi_cpu
 	// byte lane where generation B puts 2 MB on two. The windows are the same
 	// either way; only how much of a dword the ROM occupies changes.
 	input             pcmsrc_1lane,
+	// Where that ROM was loaded. PER-SET, unlike every other region base: it
+	// sits directly above the set's own sprites so the SEI252 families still
+	// fit a 32 MB module in their authentic-flash form. spi_top.sv picks it
+	// from the same set_id that picks the sprite chunk size; the three values
+	// are SDR_PCMSRC_* in spi_defs.vh.
+	input      [25:0] pcmsrc_base,
 
 	// SDRAM channel 1 - PRG ROM
 	output reg [25:0] sdr_addr,
@@ -165,7 +171,9 @@ module spi_cpu
 
 	// The 386 dword whose PCM pair carries source byte 0x29FE: 386 address
 	// 0x0A053FC, which is dword 0x02814FF. Its pair sits at bytes 6-7 of the
-	// line at SDR_PCMSRC_BASE + 0x29F8 (PLAN.md 19.15).
+	// line at pcmsrc_base + 0x29F8 (PLAN.md 19.15). The set's base moved when
+	// pcmsrc became per-set; the offset within the region did not, which is all
+	// this watch is stated in terms of.
 	localparam [29:0] WATCH_DW = 30'h02814FF;
 
 	// ------------------------------------------------------------------
@@ -453,7 +461,7 @@ module spi_cpu
 	// index undoubled, a group is eight dwords, and the byte sits at
 	// idx[2:0] = cur_dw[2:0]. That is the sound1 arithmetic with the skip bit
 	// on top, which is why it costs a mux and not a second decode.
-	wire [25:0] pcm_grp_addr = SDR_PCMSRC_BASE
+	wire [25:0] pcm_grp_addr = pcmsrc_base
 	                         + (pcmsrc_1lane
 	                            ? {6'd0, cur_dw[20], cur_dw[18:3], 3'b000}
 	                            : {5'd0, cur_dw[20], cur_dw[18:2], 3'b000});

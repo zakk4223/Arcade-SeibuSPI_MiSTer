@@ -296,6 +296,18 @@ module spi_top
 	// Back to clk_cpu: spi_io clears its pending flag when this matches.
 	wire z80dl_ack = z80dl_sdr_ack;
 
+	// Where the loader put the PCM source ROM. The only per-set region base in
+	// the map: it follows the set's OWN sprites so an authentic-flash SEI252
+	// set still fits a 32 MB module (spi_defs.vh). Selected by the same set_id
+	// arms as spr_chunk below, and it has to stay that way -- the two are the
+	// same fact about the set, and rom_loader.sv's table is the third copy.
+	reg [25:0] pcmsrc_base;
+	always @* case (set_id)
+		SET_RDFT2: pcmsrc_base = SDR_PCMSRC_RDFT2;
+		SET_RFJET: pcmsrc_base = SDR_PCMSRC_RFJET;
+		default:   pcmsrc_base = SDR_PCMSRC_SEI252;
+	endcase
+
 	spi_cpu cpu
 	(
 		// The sel_pcm watch (PLAN.md 19.15).
@@ -328,6 +340,7 @@ module spi_top
 		// Generation A puts the PCM source on one byte lane instead of two.
 		.pcmsrc_1lane ((set_id == SET_VIPRP1) || (set_id == SET_SENKYU)
 		               || (set_id == SET_EJANHS)),
+		.pcmsrc_base (pcmsrc_base),
 		.clk       (clk_cpu),
 		.reset     (cpu_reset),
 		.cpu_en    (~cpu_freeze),
@@ -712,6 +725,10 @@ module spi_top
 	//   rdfts / rdft   SEI252, 4 MB chunks
 	//   rdft2          RISE10, 6 MB
 	//   rfjet          RISE11, 8 MB
+	//
+	// pcmsrc_base above is selected on exactly these arms, because the PCM
+	// source is loaded immediately after the sprites -- change one and the
+	// other has to move with it.
 	wire        spr_rise10 = (set_id == SET_RDFT2);
 	wire        spr_rise11 = (set_id == SET_RFJET);
 	reg  [25:0] spr_chunk;

@@ -36,7 +36,14 @@ static const uint32_t PCM_BASE     = 0x0280000;
 static const uint32_t SND01_BASE   = 0x0480000;
 static const uint32_t TILES_BASE   = 0x0500000;
 static const uint32_t SPRITES_BASE = 0x1100000;
-static const uint32_t PCMSRC_BASE  = 0x2900000;
+// The PCM source ROM's base is PER-SET: it follows that set's OWN sprites, so
+// the SEI252 families' authentic-flash image tops out at 30-31 MB and still
+// fits a 32 MB module, where a single 41 MB base put them over it. Must match
+// SDR_PCMSRC_* in rtl/spi_defs.vh. Getting one of these wrong is exactly the
+// failure this testbench exists for: the part still loads, just 12 MB away.
+static const uint32_t PCMSRC_SEI252 = SPRITES_BASE + 3 * 0x400000;  // 0x1D00000
+static const uint32_t PCMSRC_RDFT2  = SPRITES_BASE + 3 * 0x600000;  // 0x2300000
+static const uint32_t PCMSRC_RFJET  = SPRITES_BASE + 3 * 0x800000;  // 0x2900000
 static const uint32_t SDR_SIZE     = 0x2B00000;
 
 enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
@@ -153,10 +160,10 @@ static const Part parts_rfjet[] = {
 // the DERIVED images differ per game. The order is MAME's own region order,
 // sound01 then soundflash1, because that is what an MRA has to send.
 static std::vector<Part> upd_table(const Part *pre, const char *pcm_rom,
-                                   const char *snd_rom)
+                                   const char *snd_rom, uint32_t pcmsrc_base)
 {
     std::vector<Part> v(pre, pre + 14);
-    v.push_back({ pcm_rom,        PCMSRC_BASE, 0x200000, LINEAR });
+    v.push_back({ pcm_rom,        pcmsrc_base, 0x200000, LINEAR });
     v.push_back({ snd_rom,        SND01_BASE,  0x080000, LINEAR });
     v.push_back({ "blank flash",  PCM_BASE,    0x200000, LINEAR });
     return v;
@@ -180,7 +187,7 @@ static const Part parts_viprp1[] = {
     { "v_obj-1.322",                 SPRITES_BASE + 0,        0x400000, SPR_ILV },
     { "v_obj-2.324",                 SPRITES_BASE + 2,        0x400000, SPR_ILV },
     { "v_obj-3.323",                 SPRITES_BASE + 4,        0x400000, SPR_ILV },
-    { "v_pcm.215",                   PCMSRC_BASE,             0x100000, LINEAR  },
+    { "v_pcm.215",                   PCMSRC_SEI252,           0x100000, LINEAR  },
     { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
 };
 
@@ -203,7 +210,7 @@ static const Part parts_senkyu[] = {
     { "fb_obj-1.322",                SPRITES_BASE + 0,        0x400000, SPR_ILV },
     { "fb_obj-2.324",                SPRITES_BASE + 2,        0x400000, SPR_ILV },
     { "fb_obj-3.323",                SPRITES_BASE + 4,        0x400000, SPR_ILV },
-    { "fb_pcm-1.215",                PCMSRC_BASE,             0x100000, LINEAR  },
+    { "fb_pcm-1.215",                PCMSRC_SEI252,           0x100000, LINEAR  },
     { "fb_7.216",                    SND01_BASE,              0x080000, LINEAR  },
     { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
 };
@@ -223,7 +230,7 @@ static const Part parts_ejanhs[] = {
     { "ej3_obj1.322",                SPRITES_BASE + 0,        0x400000, SPR_ILV },
     { "ej3_obj2.324",                SPRITES_BASE + 2,        0x400000, SPR_ILV },
     { "ej3_obj3.323",                SPRITES_BASE + 4,        0x400000, SPR_ILV },
-    { "ej3_pcm1.215",                PCMSRC_BASE,             0x100000, LINEAR  },
+    { "ej3_pcm1.215",                PCMSRC_SEI252,           0x100000, LINEAR  },
     { "ejan3_7.216",                 SND01_BASE,              0x080000, LINEAR  },
     { "blank flash",                 PCM_BASE,                0x200000, LINEAR  },
 };
@@ -611,17 +618,17 @@ int main(int argc, char **argv)
     if (rc) return rc;
 
     // The three authentic-flash tables. What is actually new here is small --
-    // a 2 MB part landing at PCMSRC_BASE, which is the top of a 43 MB map and
-    // the highest address the loader has ever been asked to write -- but the
+    // a 2 MB part landing at that set's PCMSRC base, the highest address the
+    // loader is ever asked to write and now a DIFFERENT one per set -- but the
     // reason to run all three is the reason the pre-flashed ones are all run:
     // the tables are nearly identical, so a value carried across from the
     // wrong one still produces a plausible-looking image.
     std::vector<Part> upd_rdft  = upd_table(parts_sxx2c, "gun_dogs_pcm.u0217",
-                                            "seibu_8.u0216");
+                                            "seibu_8.u0216", PCMSRC_SEI252);
     std::vector<Part> upd_rdft2 = upd_table(parts_rdft2, "pcm.u0217",
-                                            "sound1.u0222");
+                                            "sound1.u0222", PCMSRC_RDFT2);
     std::vector<Part> upd_rfjet = upd_table(parts_rfjet, "pcm-d.u0227",
-                                            "sound1.u0222");
+                                            "sound1.u0222", PCMSRC_RFJET);
     rc = run_set(upd_rdft.data(), (int)upd_rdft.size(),
                  1, "rdft, authentic flash (SXX2C)", -1, 1, 1);
     if (rc) return rc;
@@ -632,8 +639,9 @@ int main(int argc, char **argv)
                  3, "rfjet, authentic flash (SXX2C)", -1, 1, 1);
     if (rc) return rc;
     // viprp1, the fifth set: a half-size bg group at the same base as rdft's
-    // full-size one, and a 1 MB part landing at PCMSRC where the others put
-    // 2 MB. Both are the kind of number that gets carried across by eye.
+    // full-size one, and a 1 MB part landing at PCMSRC_SEI252 where rdft2 and
+    // rfjet put 2 MB at bases 6 and 12 MB higher. Both are the kind of number
+    // that gets carried across by eye.
     rc = run_set(parts_viprp1, (int)(sizeof(parts_viprp1) / sizeof(parts_viprp1[0])),
                  4, "viprp1, authentic flash (SXX2C, gen A)", -1, 1, 1);
     if (rc) return rc;

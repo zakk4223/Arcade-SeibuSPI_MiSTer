@@ -50,7 +50,20 @@ from build_soundflash import GAMES, S01_BASE, S01_SIZE, detect, load_sound01, zr
 
 # Must match rtl/spi_defs.vh. The bases matter only for --image; without it the
 # two packed ROMs come straight out of the zip and are indexed from zero.
-PCMSRC_BASE = 0x2900000
+#
+# PCMSRC's base is PER-SET -- it follows that set's own sprites so the SEI252
+# families still fit a 32 MB module -- so an image can only be indexed once the
+# set is known. Everything else in the map is common to every set.
+SPRITES_BASE = 0x1100000
+PCMSRC_BASE = {
+    "senkyu":   SPRITES_BASE + 3 * 0x400000,
+    "batlball": SPRITES_BASE + 3 * 0x400000,
+    "ejanhs":   SPRITES_BASE + 3 * 0x400000,
+    "viprp1":   SPRITES_BASE + 3 * 0x400000,
+    "rdft":     SPRITES_BASE + 3 * 0x400000,
+    "rdft2":    SPRITES_BASE + 3 * 0x600000,
+    "rfjet":    SPRITES_BASE + 3 * 0x800000,
+}
 PCMSRC_SIZE = 0x200000
 SND01_BASE = 0x0480000
 SND01_SIZE = 0x080000
@@ -77,13 +90,13 @@ def rtl_dword(addr, pcm, snd, pcmsrc_en=True, snd01_en=True, one_lane=False):
         return snd[grp + (cur_dw & 7)]
 
     if sel_pcm and one_lane:
-        # Generation A. pcm_grp_addr = SDR_PCMSRC_BASE +
+        # Generation A. pcm_grp_addr = pcmsrc_base +
         #   {cur_dw[20], cur_dw[18:3], 3'b000}, byte at cur_dw[2:0]
         grp = ((((cur_dw >> 20) & 1) << 16) | ((cur_dw >> 3) & 0xFFFF)) << 3
         return pcm[grp + (cur_dw & 7)]
 
     if sel_pcm:
-        # pcm_grp_addr = SDR_PCMSRC_BASE + {cur_dw[20], cur_dw[18:2], 3'b000}
+        # pcm_grp_addr = pcmsrc_base + {cur_dw[20], cur_dw[18:2], 3'b000}
         # pcm_pair     = rom_data[{cur_dw[1:0], 4'b0000} +: 16]
         grp = ((((cur_dw >> 20) & 1) << 17) | ((cur_dw >> 2) & 0x1FFFF)) << 3
         off = (cur_dw & 3) << 1
@@ -94,7 +107,7 @@ def rtl_dword(addr, pcm, snd, pcmsrc_en=True, snd01_en=True, one_lane=False):
 
 
 def packed_roms(zf, setname):
-    """What the loader puts at SDR_PCMSRC_BASE and SDR_SND01_BASE: raw ROMs.
+    """What the loader puts at the set's PCMSRC base and SDR_SND01_BASE.
 
     Which ROM is which comes from the same table build_soundflash.py drives the
     region from -- two byte lanes per dword is the PCM source, one is the second
@@ -122,21 +135,23 @@ def packed_roms(zf, setname):
     return pcm, snd
 
 
-def packed_from_image(path):
+def packed_from_image(path, setname):
     """The same two ROMs, read out of a built SDRAM image at their map bases."""
     img = open(path, "rb").read()
-    need = PCMSRC_BASE + PCMSRC_SIZE
+    base = PCMSRC_BASE[setname]
+    need = base + PCMSRC_SIZE
     if len(img) < need:
-        raise SystemExit("%s is %d bytes; an authentic image is %d. A "
+        raise SystemExit("%s is %d bytes; %s's authentic image is %d. A "
                          "pre-flashed one has nothing at PCMSRC."
-                         % (path, len(img), need))
-    return (img[PCMSRC_BASE:PCMSRC_BASE + PCMSRC_SIZE],
+                         % (path, len(img), setname, need))
+    return (img[base:base + PCMSRC_SIZE],
             img[SND01_BASE:SND01_BASE + SND01_SIZE])
 
 
 def check(zf, setname, image=None):
     region = load_sound01(zf, setname, GAMES[setname]["sound01"])
-    pcm, snd = packed_from_image(image) if image else packed_roms(zf, setname)
+    pcm, snd = (packed_from_image(image, setname) if image
+                else packed_roms(zf, setname))
     one_lane = GAMES[setname]["sound01"][0][2] == 1
     # snd01_en in spi_top.sv means "this set has a second sound ROM", not "this
     # is an authentic MRA": a set without one must leave the window undecoded so

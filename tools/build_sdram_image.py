@@ -48,13 +48,21 @@ BASE = {
     "snd01":   0x0480000,
     "tiles":   0x0500000,
     "sprites": 0x1100000,
-    "pcmsrc":  0x2900000,
 }
-# 41 MB normally; 43 with --upd, which is the only mode that writes `pcmsrc`.
-# Kept conditional so a pre-flashed image stays byte-identical to what every
-# earlier run produced.
+# `pcmsrc` is NOT in BASE, because it is the one region whose base depends on
+# the set: it follows that set's OWN sprites rather than sitting above the
+# largest set's, so an authentic-flash SEI252 game still fits a 32 MB module.
+# SETS carries the value per set and it is spliced into a per-run copy of BASE.
+# These three must match SDR_PCMSRC_* in rtl/spi_defs.vh.
+PCMSRC_SEI252 = BASE["sprites"] + 3 * 0x400000   # 0x1D00000, 29 MB
+PCMSRC_RDFT2  = BASE["sprites"] + 3 * 0x600000   # 0x2300000, 35 MB
+PCMSRC_RFJET  = BASE["sprites"] + 3 * 0x800000   # 0x2900000, 41 MB
+
+# A pre-flashed image stops at the top of the sprite region, which is the same
+# 41 MB for every set -- kept flat so those images stay byte-identical to what
+# every earlier run produced. An authentic-flash image ends just above its own
+# pcmsrc, which is why --upd's size is computed per set rather than fixed.
 SDRAM_SIZE = 0x2900000
-SDRAM_SIZE_UPD = 0x2B00000
 
 # (region, crc32, size, mode, offset-within-region[, source-index bias[, slice]])
 # Mode names match the scatter modes in rtl/rom_loader.sv. `slice` is a byte
@@ -194,6 +202,7 @@ BLANK_VIPRP1 = 0xa4c181d0       # flash0_blank_regionbe.u1053, viprp1's region
 SETS = {
     "rdfts": dict(parts=PARTS_RDFTS, probe=0xe278dddd, flash=False),
     "rdft":  dict(parts=PARTS_RDFT,  probe=0xadcb5dbc, flash=True,
+                  pcmsrc=PCMSRC_SEI252,
                   # rdft's image is a plain concatenation rather than a decoded
                   # one, so its stream carries a trailing FF fill the other two
                   # do not: 4 + 0x1A13B2 + 0x3828D + 0x269BD = 0x200000.
@@ -202,10 +211,12 @@ SETS = {
                   flash_fill=0x269BD,
                   upd=(0x31253ad7, 0xf88cb6e4)),
     "rdft2": dict(parts=PARTS_RDFT2, probe=0x3cb3fdca, flash=True,
+                  pcmsrc=PCMSRC_RDFT2,
                   flash_stream=(("pcm.u0217", 4, 0x17C247),
                                 ("sound1.u0222", 0, 0x4C665)),
                   upd=(0x2edc30b5, 0xb7bd3703)),
     "rfjet": dict(parts=PARTS_RFJET, probe=0xe5a3b304, flash=True,
+                  pcmsrc=PCMSRC_RFJET,
                   flash_stream=(("pcm-d.u0227", 4, 0x189DD5),
                                 ("sound1.u0222", 0, 0x41C08)),
                   upd=(0x8ee3ff45, 0xd4fc3da1)),
@@ -214,6 +225,7 @@ SETS = {
     # the only mode that produces a runnable image, and its PCM source is 1 MB
     # rather than 2 and has no second sound ROM behind it.
     "viprp1": dict(parts=PARTS_VIPRP1, probe=0xe5caf4ff, flash=False,
+                   pcmsrc=PCMSRC_SEI252,
                    upd=(0xe3111b60, None), upd_pcm_size=0x100000,
                    upd_blank=BLANK_VIPRP1),
 }
@@ -322,7 +334,23 @@ def main():
         tail.append(("pcm", cfg.get("upd_blank", BLANK_FLASH), 0x100000, "LINEAR", 0))
         PARTS = [p for p in PARTS if p[0] != "snd01"] + tail
 
-    image = bytearray(b"\xFF" * (SDRAM_SIZE_UPD if upd else SDRAM_SIZE))
+    # `pcmsrc` is the one per-set base, and only --upd writes it. Splicing it in
+    # here rather than keeping it in BASE means a pre-flashed build cannot
+    # accidentally resolve it at all -- there is no entry to resolve.
+    base_of = dict(BASE)
+    image_size = SDRAM_SIZE
+    if upd:
+        base_of["pcmsrc"] = cfg["pcmsrc"]
+        top = cfg["pcmsrc"] + cfg.get("upd_pcm_size", 0x200000)
+        # The image file keeps its historical 41 MB floor whatever the set's own
+        # top is -- shrinking it would move nothing in the map and would only
+        # invalidate every SDRAM= path in sim/. What the fit is actually stated
+        # in terms of is `top`, so print that.
+        image_size = max(image_size, top)
+        print("map top: %d MB (pcmsrc at %d MB)"
+              % (top >> 20, cfg["pcmsrc"] >> 20))
+
+    image = bytearray(b"\xFF" * image_size)
     placed = 0
 
     for part in PARTS:
@@ -344,7 +372,7 @@ def main():
         if len(data) != size:
             raise SystemExit("%s is %d bytes, expected %d" % (name, len(data), size))
 
-        base = BASE[region] + off
+        base = base_of[region] + off
         for i, b in enumerate(data):
             image[base + dest_of(mode, i + skip)] = b
         placed += 1

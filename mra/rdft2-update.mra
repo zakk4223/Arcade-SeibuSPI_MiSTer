@@ -59,7 +59,7 @@
       The tail is where this differs from the pre-flashed MRA, and it is in
       MAME's own region order: sound01's two ROMs, then soundflash1's blank.
 
-        part 14  the PCM source ROM      -> 0x2900000, the source window
+        part 14  the PCM source ROM      -> 0x2300000, the source window
         part 15  the second sound ROM    -> 0x0480000, source AND Z80 program
         part 16  a BLANK 2 MB flash      -> 0x0280000, what the game programs
 
@@ -72,7 +72,9 @@
         0x0480000  512 KB the second sound ROM, packed one byte per 386 dword
         0x0500000  12 MB  background tiles
         0x1100000  18 MB  sprites, three 6 MB plane-pair chunks
-        0x2900000  2 MB   the PCM source ROM, read through the sound01 window
+        0x2300000  2 MB   the PCM source ROM, read through the sound01 window
+                          -- PER-SET, immediately above this set's own 18 MB of
+                          sprites; 37 MB top, so this one needs 64 MB either way
     -->
 
     <!--

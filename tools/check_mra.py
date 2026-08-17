@@ -48,8 +48,15 @@ BASES = {
     "snd01":   0x0480000,
     "tiles":   0x0500000,
     "sprites": 0x1100000,
-    "pcmsrc":  0x2900000,
 }
+# The PCM source ROM's base is PER-SET -- it follows that set's own sprites
+# rather than the largest set's, so an authentic-flash SEI252 game still fits a
+# 32 MB module. Three regions rather than one, named exactly as the RTL names
+# them, so a set's `special` entry below picks the base by naming it and no
+# per-set value has to be threaded through expected_base().
+BASES["pcmsrc_sei252"] = BASES["sprites"] + 3 * 0x400000   # 0x1D00000
+BASES["pcmsrc_rdft2"]  = BASES["sprites"] + 3 * 0x600000   # 0x2300000
+BASES["pcmsrc_rfjet"]  = BASES["sprites"] + 3 * 0x800000   # 0x2900000
 
 # rtl/spi_defs.vh. The MRA names one of these per part; anything else is a typo
 # that would load a part as noise.
@@ -131,13 +138,13 @@ SETS = {
     # being compared against tools/build_soundflash.py's image on hardware.
     "rdft-upd":  dict(mra="rdft-update.mra",  table="rdft",  mod=0x11,
                       mame="rdft", skip=("audiocpu",),
-                      special={"gun_dogs_pcm.u0217": ("pcmsrc", "M_LINEAR"),
+                      special={"gun_dogs_pcm.u0217": ("pcmsrc_sei252", "M_LINEAR"),
                                "seibu_8.u0216":      ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     "rdft2-upd": dict(mra="rdft2-update.mra", table="rdft2", mod=0x13,
                       mame="rdft2", skip=("audiocpu", "pals"),
-                      special={"pcm.u0217":    ("pcmsrc", "M_LINEAR"),
+                      special={"pcm.u0217":    ("pcmsrc_rdft2", "M_LINEAR"),
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV_R", spr_chunk=0x600000),
@@ -148,7 +155,7 @@ SETS = {
     # on the cartridge board.
     "viprp1-upd": dict(mra="viprp1-update.mra", table="viprp1", mod=0x17,
                        mame="viprp1", skip=("audiocpu",),
-                       special={"v_pcm.215": ("pcmsrc", "M_LINEAR"),
+                       special={"v_pcm.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "flash0_blank_regionbe.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     # The other two generation-A cartridges. Both have a second sound ROM,
@@ -156,19 +163,19 @@ SETS = {
     # the region behind a megabyte of zero fill.
     "senkyu-upd": dict(mra="senkyu-update.mra", table="senkyu", mod=0x19,
                        mame="senkyu", skip=("audiocpu",),
-                       special={"fb_pcm-1.215": ("pcmsrc", "M_LINEAR"),
+                       special={"fb_pcm-1.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "fb_7.216":     ("snd01",  "M_LINEAR"),
                                 "flash0_blank_region01.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     "ejanhs-upd": dict(mra="ejanhs-update.mra", table="ejanhs", mod=0x1B,
                        mame="ejanhs", skip=("audiocpu",),
-                       special={"ej3_pcm1.215": ("pcmsrc", "M_LINEAR"),
+                       special={"ej3_pcm1.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "ejan3_7.216":  ("snd01",  "M_LINEAR"),
                                 "flash0_blank_region01.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     "rfjet-upd": dict(mra="rfjet-update.mra", table="rfjet", mod=0x15,
                       mame="rfjet", skip=("audiocpu", "pals"),
-                      special={"pcm-d.u0227":  ("pcmsrc", "M_LINEAR"),
+                      special={"pcm-d.u0227":  ("pcmsrc_rfjet", "M_LINEAR"),
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV_R", spr_chunk=0x800000),
@@ -390,7 +397,9 @@ def resolve_base(expr):
     for k, v in (("SDR_PRG_BASE", BASES["prg"]), ("SDR_Z80_BASE", BASES["z80"]),
                  ("SDR_CHARS_BASE", BASES["chars"]), ("SDR_PCM_BASE", BASES["pcm"]),
                  ("SDR_SND01_BASE", BASES["snd01"]),
-                 ("SDR_PCMSRC_BASE", BASES["pcmsrc"]),
+                 ("SDR_PCMSRC_SEI252", BASES["pcmsrc_sei252"]),
+                 ("SDR_PCMSRC_RDFT2", BASES["pcmsrc_rdft2"]),
+                 ("SDR_PCMSRC_RFJET", BASES["pcmsrc_rfjet"]),
                  ("SDR_TILES_BASE", BASES["tiles"]), ("SDR_SPRITES_BASE", BASES["sprites"]),
                  ("SPR_CHUNK_SIZE", 0x400000)):
         e = e.replace(k, hex(v))

@@ -129,10 +129,18 @@ turned out to be corrupting every set's download, rdfts included; `PLAN.md`
 section 10c is the hunt for that one and is worth reading before touching the
 loader.
 
-SDRAM: **32 MB is enough for rdfts and rdft** (both reach 29 MB in the map).
-**rdft2 and rfjet need 64 MB** — rdft2's sprites are 18 MB rather than 12, which
-puts the top of its image at 35 MB, and rfjet's are 24 MB, which puts its top at
-41 MB.
+SDRAM: **32 MB is enough for every SEI252 set, in either flash form** — rdfts,
+rdft, viprp1, senkyu and ejanhs all reach 29 MB of sprites and top out at 30 or
+31 MB. **rdft2 and rfjet need 64 MB** — rdft2's sprites are 18 MB rather than
+12, which puts the top of its image at 37 MB, and rfjet's are 24 MB, which puts
+its top at 43 MB.
+
+The PCM source ROM is the one region whose base is per-set: it follows that
+set's *own* sprites rather than sitting above the largest set's. It exists only
+in the self-flashing MRAs, and a single 41 MB base put all four SEI252
+cartridge sets over 32 MB in exactly the form that has to work everywhere.
+`rtl/spi_defs.vh` `SDR_PCMSRC_*`, and `build_sdram_image.py --upd` prints the
+map top it produces.
 
 ## Building
 

@@ -45,19 +45,6 @@ localparam [25:0] SDR_PCM_BASE     = 26'h028_0000;  // 2.5 MB  YMF271 samples
 localparam [25:0] SDR_SND01_BASE   = 26'h048_0000;  // 512 KB  sound1.u0222
 localparam [25:0] SDR_TILES_BASE   = 26'h050_0000;  //  12 MB  background tiles
 localparam [25:0] SDR_SPRITES_BASE = 26'h110_0000;  //  24 MB  sprites (3 chunks)
-// The cartridge's PCM source ROM, and ONLY for the authentic-flash MRAs
-// (PLAN.md 17.2). This is the material the game's own sample-flash updater
-// reads out of the 386's sound01 window and programs into flash; a pre-flashed
-// MRA ships the finished image instead and never loads this at all, which is
-// why it sits above SDR_END's old value rather than anywhere tighter.
-//
-// Stored PACKED -- the raw 2 MB ROM -- and unpacked by spi_cpu.sv, exactly like
-// SDR_SND01_BASE above. In MAME's region the ROM occupies two byte lanes of
-// every dword and skips 2 MB every 2 MB (ROM_CONTINUE), so materialising it
-// would cost 8 MB to hold 2 MB of data.
-localparam [25:0] SDR_PCMSRC_BASE  = 26'h290_0000;  //   2 MB  pcm.u0217 etc
-localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
-
 // Size of ONE sprite plane-pair chunk in the ROM set -- 4 MB for the SEI252
 // games, 6 MB for rdft2, 8 MB for rfjet. It used to be the address stride
 // between the three chunks in SDRAM; since rom_loader interleaves them
@@ -67,6 +54,39 @@ localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 localparam [25:0] SPR_CHUNK_SIZE       = 26'h040_0000;  // SEI252 sets
 localparam [25:0] SPR_CHUNK_SIZE_RDFT2 = 26'h060_0000;
 localparam [25:0] SPR_CHUNK_SIZE_RFJET = 26'h080_0000;
+
+// The cartridge's PCM source ROM, and ONLY for the authentic-flash MRAs
+// (PLAN.md 17.2). This is the material the game's own sample-flash updater
+// reads out of the 386's sound01 window and programs into flash; a pre-flashed
+// MRA ships the finished image instead and never loads this at all.
+//
+// Stored PACKED -- the raw ROM -- and unpacked by spi_cpu.sv, exactly like
+// SDR_SND01_BASE above. In MAME's region the ROM occupies two byte lanes of
+// every dword and skips 2 MB every 2 MB (ROM_CONTINUE), so materialising it
+// would cost 8 MB to hold 2 MB of data.
+//
+// THIS BASE IS PER-SET, and it is the one place the map is not "sized for the
+// worst case in the family". It sits immediately above the set's OWN sprites,
+// not above rfjet's, because it is the only region that would otherwise push a
+// 32 MB board off the map:
+//
+//   set family        sprites end   pcmsrc      image top
+//   SEI252 (4 MB)     29 MB         1 or 2 MB   30 or 31 MB   <- fits 32 MB
+//   rdft2  (6 MB)     35 MB         2 MB        37 MB
+//   rfjet  (8 MB)     41 MB         2 MB        43 MB
+//
+// A single 41 MB base put rdft, viprp1, senkyu and ejanhs over 32 MB in their
+// authentic-flash form while their pre-flashed form fitted -- so the self
+// flashing MRA, which is the one that has to work everywhere for the two-MRA
+// split to collapse into one, was the variant a 32 MB module could not run.
+// Every other region stays common, and nothing but the loader table and
+// spi_cpu.sv's source window ever addresses this one.
+localparam [25:0] SDR_PCMSRC_SEI252 = SDR_SPRITES_BASE + 26'd3 * SPR_CHUNK_SIZE;
+localparam [25:0] SDR_PCMSRC_RDFT2  = SDR_SPRITES_BASE + 26'd3 * SPR_CHUNK_SIZE_RDFT2;
+localparam [25:0] SDR_PCMSRC_RFJET  = SDR_SPRITES_BASE + 26'd3 * SPR_CHUNK_SIZE_RFJET;
+
+// The top of the largest map any set produces: rfjet's, which is unchanged.
+localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 
 // --------------------------------------------------------------------------
 // Which ROM set is loading. The MRA's mod byte says so: bit 0 picks the SXX2C
