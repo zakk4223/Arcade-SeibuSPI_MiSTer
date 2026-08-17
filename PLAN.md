@@ -7096,3 +7096,42 @@ auto-precharge that goes out with every read (A10 high in the CAS phase), and
 where the fitter put the DQ capture register. That last one has a history in
 this file already -- the comment above `dq_reg` records an earlier attempt to
 split it per channel that destroyed the input timing.
+
+### 19.16  Control: the watches are not causing it
+
+A fair question once five builds' worth of debug logic is in the design: is the
+instrument the bug? Two answers, and the second is the one that counts.
+
+**The bug predates all of it.** `rdft2-update.nvm.bad` on the MiSTer is dated
+06:44 on 16 August, written by a core with no watch in it anywhere -- the first
+debug register went in that evening. Byte 0x29FE was already 0xFF in that file,
+and the same byte was read back erased from a second uninstrumented build before
+any of this started. Also, by construction, every watch added since only SAMPLES
+existing signals into new registers; not one of them drives anything a datapath
+reads.
+
+**And the control says the same.** The RTL was reverted to c7a6160 -- the last
+commit before the first watch, whose core is identical to the build that first
+showed the fault -- rebuilt, and put through the same trial loop, using only the
+JTAG peek that every build has had since section 14:
+
+```
+uninstrumented core: 7 lost, 3 ok in ten trials
+```
+
+Against 3 of 8 on the fully instrumented build. So the watches are not the
+cause; if anything this build is WORSE than the instrumented one.
+
+Which points at the thing that actually varies. The clean build closed at
+**+0.018 ns**, on `sdram|ch5_rq -> SDRAM_A[11]`; the instrumented build that
+failed 3 of 8 closed at +0.458, with its worst path in ascal and the SDRAM ones
+well clear. Two builds is not a controlled comparison -- different worst paths,
+different placements, and the DQ capture path's own slack was not extracted for
+either -- but it is consistent with 19.15: a marginal capture whose failure rate
+moves with how much margin the fitter happened to leave. It is also why the seed
+roulette in this project has been more than an annoyance.
+
+**The uncomfortable implication stands and gets worse.** Seven rituals in ten
+corrupt a byte on the core as it ships. The five sets whose saves matched their
+references in section 19 were single runs each, and that is now the right way to
+read them: not a clean bill, but five coin flips that happened to land well.
