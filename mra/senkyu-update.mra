@@ -71,7 +71,33 @@
 
       IT MUST COME BEFORE THE index="0" ROM.
     -->
-    <rom index="1"><part>19</part></rom>
+    <rom index="1">
+      <!--
+        Byte 0 is the mod byte. Bytes 1-15 are the {part index, codec}
+        pairs, all FF here because this variant decodes nothing on the
+        way in -- FF is the documented terminator.
+
+        Bytes 16-24 are the sample-flash derivation's constants, read
+        at fixed offsets by SeibuSPI.sv. They are in the MRA and not in
+        the RTL because a CLONE has its own job-table address: its
+        program differs, so the table moves. senkyu is 0x00302324 and
+        batlball 0x00302290, same game, same graphics, same everything
+        else. In the RTL that would be a core rebuild per clone.
+
+          job table  0x00302324
+          stamp      0x003ffffc   written to flash[0..3] LAST
+          generation 0            A
+
+        All three come out of tools/build_soundflash.py's GAMES table,
+        which read them out of the game's own program image; make
+        check-mra holds this block against it.
+      -->
+      <part>19</part>
+      <part>FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF</part>
+      <part>24 23 30 00</part>
+      <part>FC FF 3F 00</part>
+      <part>00</part>
+    </rom>
 
     <rom index="0" address="0x30000000" zip="senkyu.zip" md5="none">
         <!-- the empty lower half of the program region -->

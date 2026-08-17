@@ -309,7 +309,7 @@ def parse_codecs(path, nparts):
     src = read_mra(path)
     m = re.search(r'<rom index="1".*?>(.*?)</rom>', src, re.S)
     if not m:
-        return None, {}
+        return None, {}, []
 
     data = []
     for pm in re.finditer(r"<part\b[^>]*>(.*?)</part>", m.group(1), re.S):
@@ -334,7 +334,36 @@ def parse_codecs(path, nparts):
                  "define (have: %s)" % (path, part, codec,
                                         ", ".join(sorted(CODECS.values()))))
         codecs[part] = CODECS[codec]
-    return data[0], codecs
+    return data[0], codecs, data
+
+
+def check_derive_cfg(path, setname, data):
+    """Bytes 16-24: the sample-flash derivation's per-set constants.
+
+    A FOURTH copy of numbers that already exist in build_soundflash's GAMES and
+    in the game's own program image, and the one nothing at runtime checks: a
+    wrong job-table address here does not fail loudly, it walks nonsense. The
+    RTL rejects an out-of-range source (spi_flash_derive's err_badjob), which
+    turns it into a blank flash and a game that runs its own updater -- safe,
+    but silent. So it is checked where it can still be shouted about.
+    """
+    from build_soundflash import GAMES
+    GEN = {"A": 0, "B0": 1, "B1": 2}
+    if setname not in GAMES:
+        return
+    if len(data) < 25:
+        fail("%s: index-1 config is %d bytes; the derivation constants need 25 "
+             "(job table at 16, stamp at 20, generation at 24)" % (path, len(data)))
+    le = lambda o: (data[o] | (data[o+1] << 8) | (data[o+2] << 16) | (data[o+3] << 24))
+    g = GAMES[setname]
+    for name, got, want in (("job table", le(16), g["job_table"]),
+                            ("stamp", le(20), g["stamp"]),
+                            ("generation", data[24], GEN[g["gen"]])):
+        if got != want:
+            fail("%s: index-1 %s is %#x, but build_soundflash says %#x"
+                 % (path, name, got, want))
+    print("  derivation: job table %#010x, stamp %#010x, generation %s"
+          % (le(16), le(20), g["gen"]))
 
 
 def parse_loader(path, table, upd=False):
@@ -521,7 +550,7 @@ def check_set(setname, cfg, args):
     # circular.
     rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"),
                                cfg["table"], upd=bool(cfg["mod"] & 0x10))
-    mod_byte, codecs = parse_codecs(mra_path, nparts)
+    mod_byte, codecs, cfg_bytes = parse_codecs(mra_path, nparts)
 
     if (mod_byte or 0) != cfg["mod"]:
         fail("%s: mod byte %s, but the %s table needs %#04x"
@@ -529,6 +558,10 @@ def check_set(setname, cfg, args):
                 cfg["table"], cfg["mod"]))
     for part, codec in sorted(codecs.items()):
         print("  part %d decoded by %s" % (part, codec))
+    # Only the authentic-flash MRAs carry them: the derivation reads the source
+    # ROMs only that variant loads.
+    if cfg["mod"] & 0x10:
+        check_derive_cfg(mra_path, cfg.get("mame", setname), cfg_bytes)
 
     roms = [r for r in mame if not r.get("skipped")]
     skipped = [r for r in mame if r.get("skipped")]

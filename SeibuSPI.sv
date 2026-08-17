@@ -205,6 +205,10 @@ localparam CONF_STR = {
 	"-;",
 	"O[20],Vital Signs Panel,Off,On;",
 	"O[21],Freeze Button (Btn 3),Off,On;",
+	// H1: hidden when status_menumask bit 1 is set, which is ~set_sxx2c. SXX2E
+	// has a mask ROM where the cartridge has a flash chip, so there is nothing
+	// to build and nothing to choose.
+	"H1O[22],Sample Flash,Ritual,Pre-built;",
 	"-;",
 	"DIP;",
 	"-;",
@@ -268,7 +272,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({direct_video}),
+	.status_menumask({~set_sxx2c, direct_video}),
 
 	.ioctl_download(ioctl_download),
 	.ioctl_wr(ioctl_wr),
@@ -319,8 +323,10 @@ pll pll
 // The nvram download writes the sample region through ch3, which the running
 // board also uses, so the board is held down for it exactly as it is for the
 // ROM image. It is two megabytes and arrives once, at load.
+// derive_busy is here for the same reason nv_wr_active is: it owns ch3, which
+// the running board also uses. It is a third of a second, once, at load.
 wire reset = RESET | status[0] | buttons[1] | (dl_download & (dl_index == 8'd0))
-           | nv_wr_active | ~pll_locked;
+           | nv_wr_active | derive_busy | ~pll_locked;
 
 ///////////////////////////  DIP SWITCHES  ///////////////////////
 
@@ -355,19 +361,58 @@ end
 // A part index above 15 is ignored, so 'FF' works as a terminator for anyone
 // who wants one. Writing byte 0 clears the whole codec table, so a stale
 // assignment cannot survive into the next MRA.
+//
+// FIXED OFFSETS FROM 16 UP carry the sample-flash derivation's per-set
+// constants (rtl/spi_flash_derive.sv). They are here rather than in an RTL
+// table keyed by set_id for one reason: a CLONE has its own job-table address,
+// because its program differs -- senkyu 0x00302324 against batlball 0x00302290
+// -- so a table would make every clone an RTL change, which is the whole thing
+// the single-MRA plan is trying to stop.
+//
+//     16..19  job_table, little endian, a 386 address
+//     20..23  stamp,     little endian, a 386 address
+//     24      generation: 0 = A, 1 = B0, 2 = B1
+//
+// Offsets rather than opcodes because the pair machine above is a strict
+// two-byte alternation and a variable-length opcode does not fit it. Fifteen
+// bytes is seven codec pairs and no set uses more than one.
+//
+// An MRA that stops before byte 16 leaves job_table zero, which
+// spi_flash_derive rejects -- so an old MRA cannot accidentally derive.
 reg  [7:0] mod_byte   = 8'd0;
 reg [127:0] part_codec = 128'd0;
 reg  [7:0] cfg_part   = 8'hFF;
+reg [31:0] cfg_job_table = 32'd0;
+reg [31:0] cfg_stamp     = 32'd0;
+reg  [1:0] cfg_gen       = 2'd0;
 always @(posedge clk_sys) begin
 	if (ioctl_wr && (ioctl_index == 8'd1)) begin
 		if (~|ioctl_addr[25:0]) begin
-			mod_byte   <= ioctl_dout;
-			part_codec <= 128'd0;
-			cfg_part   <= 8'hFF;
+			mod_byte      <= ioctl_dout;
+			part_codec    <= 128'd0;
+			cfg_part      <= 8'hFF;
+			cfg_job_table <= 32'd0;
+			cfg_stamp     <= 32'd0;
+			cfg_gen       <= 2'd0;
 		end
-		else if (ioctl_addr[0]) cfg_part <= ioctl_dout;
-		else if (cfg_part < 8'd32)
-			part_codec[{cfg_part[4:0], 2'b00} +: 4] <= ioctl_dout[3:0];
+		else if (ioctl_addr[25:5] == 21'd0) begin
+			case (ioctl_addr[4:0])
+			5'd16: cfg_job_table[7:0]   <= ioctl_dout;
+			5'd17: cfg_job_table[15:8]  <= ioctl_dout;
+			5'd18: cfg_job_table[23:16] <= ioctl_dout;
+			5'd19: cfg_job_table[31:24] <= ioctl_dout;
+			5'd20: cfg_stamp[7:0]       <= ioctl_dout;
+			5'd21: cfg_stamp[15:8]      <= ioctl_dout;
+			5'd22: cfg_stamp[23:16]     <= ioctl_dout;
+			5'd23: cfg_stamp[31:24]     <= ioctl_dout;
+			5'd24: cfg_gen              <= ioctl_dout[1:0];
+			default:
+				// Below 16 the stream is still {part index, codec} pairs.
+				if (ioctl_addr[0]) cfg_part <= ioctl_dout;
+				else if (cfg_part < 8'd32)
+					part_codec[{cfg_part[4:0], 2'b00} +: 4] <= ioctl_dout[3:0];
+			endcase
+		end
 	end
 end
 
@@ -380,18 +425,25 @@ end
 // part table is a garbage download either way, but rdft is the board's own
 // first set and the one whose table an unrecognised cartridge MRA is likeliest
 // to have meant.
+// The set ids and the SDRAM map, so the decode below and the derivation above
+// name them rather than repeating their values in a comment. This file used the
+// numbers with the symbol in a trailing comment, which is one edit away from
+// being wrong -- and the derivation needs SDR_PCMSRC_* anyway, which cannot be
+// written as a literal without repeating spi_defs.vh's arithmetic.
+`include "spi_defs.vh"
+
 wire       set_sxx2c   = mod_byte[0];
 wire [2:0] set_variant = mod_byte[3:1];
 reg  [2:0] set_id;
 always @* begin
-	if (!set_sxx2c)        set_id = 3'd0;    // SET_RDFTS
+	if (!set_sxx2c)        set_id = SET_RDFTS;
 	else case (set_variant)
-		3'd1:              set_id = 3'd2;    // SET_RDFT2
-		3'd2:              set_id = 3'd3;    // SET_RFJET
-		3'd3:              set_id = 3'd4;    // SET_VIPRP1
-		3'd4:              set_id = 3'd5;    // SET_SENKYU
-		3'd5:              set_id = 3'd6;    // SET_EJANHS
-		default:           set_id = 3'd1;    // SET_RDFT
+		3'd1:              set_id = SET_RDFT2;
+		3'd2:              set_id = SET_RFJET;
+		3'd3:              set_id = SET_VIPRP1;
+		3'd4:              set_id = SET_SENKYU;
+		3'd5:              set_id = SET_EJANHS;
+		default:           set_id = SET_RDFT;
 	endcase
 end
 
@@ -670,8 +722,12 @@ wire [31:0] chk_sum_prg, chk_sum_chars, chk_sum_tiles, chk_sum_sprites;
 spi_romcheck romcheck
 (
 	.clk      (clk_ram),
-	.reset    (RESET | ~pll_locked | nv_wr_active),
-	.start    (rom_ready),
+	// derive_busy joins nv_wr_active for the same reason: it owns ch3, and a
+	// checker still walking would take its acks. `start` waits on derive_done
+	// as well, so the check runs over the image the derivation has FINISHED
+	// writing rather than one it is halfway through.
+	.reset    (RESET | ~pll_locked | nv_wr_active | derive_busy),
+	.start    (rom_ready & derive_done),
 	.sdr_addr (chk_addr),
 	.sdr_dout (sdr_rw_dout),
 	.sdr_req  (chk_req),
@@ -698,7 +754,7 @@ spi_romcheck romcheck
 spi_jtag_peek peek
 (
 	.clk      (clk_ram),
-	.reset    (RESET | ~pll_locked | nv_wr_active),
+	.reset    (RESET | ~pll_locked | nv_wr_active | derive_busy),
 	.enable   (chk_done),
 	.sdr_addr (peek_addr),
 	.sdr_dout (peek_dout),
@@ -826,23 +882,119 @@ spi_sdr_arb4 ch3_arb
 	.dbg_d_total      (dbg_arb_d_total)
 );
 
-// ch3's owners in order of life: the ROM loader, the checker, then the board's
-// arbiter -- and, cutting in front of all of them, the nvram load. That one
-// arrives AFTER the image (Main sends <nvram> in file order) so it cannot use
-// the loader's slot, and it holds the board in reset while it runs, so nothing
-// else is asking.
+// ---------------------------------------------------------------------------
+// The sample-flash derivation (rtl/spi_flash_derive.sv)
+// ---------------------------------------------------------------------------
+// Pre-built mode: instead of the game spending six minutes programming its own
+// flash through the 386/FIFO/Z80/wave port, the core builds the same image out
+// of SDRAM in about 0.3 s. Same job table, same sources, same bytes -- PLAN.md
+// 24 has the seven hashes.
+//
+// It runs BETWEEN the download and the ROM check, so the sequence is
+//
+//     rom_ready -> derive -> derive_done -> romcheck -> chk_done -> board runs
+//
+// and every other ch3 master is provably idle for its window: the loader has
+// finished (rom_ready), the checker has not started (its `start` waits on
+// derive_done), the peek and the board are held in reset below. That is what
+// makes the priority mux safe here rather than a repeat of 21.3 -- the claim
+// "nothing else is asking" is ENFORCED, which is exactly what it was not when
+// the nvram load made the same claim.
+//
+// Requires an authentic-flash MRA: the sources it reads are the ROMs only that
+// MRA carries. On anything else derive_en is low and nothing changes.
+// Where the loader put the PCM source for this set -- the same per-set base
+// spi_top picks for spi_cpu, and it has to be the same one or the derivation
+// reads sprite data as samples (spi_defs.vh SDR_PCMSRC_*).
+reg [25:0] pcmsrc_base;
+always @* case (set_id)
+	SET_RDFT2: pcmsrc_base = SDR_PCMSRC_RDFT2;
+	SET_RFJET: pcmsrc_base = SDR_PCMSRC_RFJET;
+	default:   pcmsrc_base = SDR_PCMSRC_SEI252;
+endcase
+
+wire derive_sel = status[22];
+wire derive_en  = set_sxx2c & set_upd & derive_sel & (|cfg_job_table);
+
+wire [25:0] drv_addr;
+wire [15:0] drv_din;
+wire  [1:0] drv_be;
+wire        drv_req, drv_rnw, drv_done, drv_overrun, drv_badjob;
+wire [21:0] drv_bytes;
+wire  [7:0] drv_jobs;
+
+// One shot per download. Toggling the OSD option afterwards does not re-run it
+// -- the sources are still resident, but a half-written flash would be worse
+// than either state, so the option is read once and a change needs a reload.
+reg  derive_started;
+wire derive_busy = derive_en & derive_started & ~drv_done & ~drv_overrun & ~drv_badjob;
+always @(posedge clk_ram) begin
+	if (RESET | ~pll_locked | ~rom_ready) derive_started <= 1'b0;
+	else if (rom_ready)                   derive_started <= 1'b1;
+end
+// Done means "the checker may start": either it finished, or it failed, or it
+// was never going to run. A failure leaves the flash blank, which is safe --
+// the stamp is written last, so the game just runs its own updater.
+wire derive_done = ~derive_en | drv_done | drv_overrun | drv_badjob;
+
+spi_flash_derive derive
+(
+	.clk          (clk_ram),
+	.reset        (RESET | ~pll_locked | ~derive_en),
+	.start        (derive_en & rom_ready & ~derive_started),
+
+	.job_table    (cfg_job_table),
+	.stamp_addr   (cfg_stamp),
+	.gen          (cfg_gen),
+
+	.snd01_en     ((set_id == SET_RDFT2) || (set_id == SET_RFJET)
+	               || (set_id == SET_SENKYU) || (set_id == SET_EJANHS)
+	               || (set_id == SET_RDFT)),
+	.pcmsrc_en    (1'b1),
+	.pcmsrc_1lane ((set_id == SET_VIPRP1) || (set_id == SET_SENKYU)
+	               || (set_id == SET_EJANHS)),
+	.pcmsrc_base  (pcmsrc_base),
+
+	.sdr_addr     (drv_addr),
+	.sdr_din      (drv_din),
+	.sdr_be       (drv_be),
+	.sdr_rnw      (drv_rnw),
+	.sdr_req      (drv_req),
+	.sdr_ack      (sdr_rw_ack),
+	.sdr_dout     (sdr_rw_dout),
+
+	.done         (drv_done),
+	.bytes_out    (drv_bytes),
+	.jobs_done    (drv_jobs),
+	.err_overrun  (drv_overrun),
+	.err_badjob   (drv_badjob),
+	.dbg_state    (), .dbg_esi (), .dbg_src (),
+	.dbg_len      (), .dbg_mode(), .dbg_dec ()
+);
+
+// ch3's owners in order of life: the ROM loader, the derivation, the checker,
+// then the board's arbiter -- and, cutting in front of all of them, the nvram
+// load. That one arrives AFTER the image (Main sends <nvram> in file order) so
+// it cannot use the loader's slot. Every arm here holds every other master in
+// reset for its window; see the note above, and 21.3 for what happens when one
+// of them only CLAIMS to.
 assign arb_ack     = sdr_rw_ack;
 assign sdr_rw_addr = nv_wr_active ? nv_wr_addr
+                   : derive_busy  ? drv_addr
                    : chk_done     ? arb_addr
                    : rom_ready    ? chk_addr : ldr_addr;
 assign sdr_rw_din  = nv_wr_active ? nv_wr_din
+                   : derive_busy  ? drv_din
                    : chk_done     ? arb_din  : ldr_din;
 assign sdr_rw_be   = nv_wr_active ? nv_wr_be
+                   : derive_busy  ? drv_be
                    : chk_done     ? arb_be   : ldr_be;
 assign sdr_rw_req  = nv_wr_active ? nv_wr_req
+                   : derive_busy  ? drv_req
                    : chk_done     ? arb_req
                    : rom_ready    ? chk_req  : ldr_req;
 assign sdr_rw_rnw  = nv_wr_active ? 1'b0
+                   : derive_busy  ? drv_rnw
                    : chk_done     ? arb_rnw
                    : rom_ready    ? 1'b1     : ldr_rnw;
 
@@ -877,7 +1029,9 @@ spi_nvram nvram
 (
 	.clk        (clk_ram),
 	.reset      (RESET | ~pll_locked),
-	.enable     (set_upd),
+	// Pre-built mode has no ritual to record, and loading a save over a freshly
+	// derived image would be the same bytes at best and a stale one at worst.
+	.enable     (set_upd & ~derive_en),
 
 	// Raw ioctl, not the replayed copy -- see the header of spi_nvram.sv.
 	.ioctl_download (ioctl_download),
@@ -1021,7 +1175,9 @@ spi_top spi_top
 	// Leaving it in update mode does NOT make a programmed cartridge reflash:
 	// the game skips the updater on a matching stamp whatever the jumper says,
 	// which is what section 0 measured under MAME's own default of Update.
-	.jumpers        (set_upd ? 8'hFF : 8'hFC),
+	// JP1. Pre-built mode sends the not-update position: the matching stamp
+	// already makes the game skip its updater (18.5), and this says so twice.
+	.jumpers        ((set_upd & ~derive_en) ? 8'hFF : 8'hFC),
 	.flash_dirty    (flash_dirty),
 	.flash_sdr_addr (flash_sdr_addr),
 	.flash_sdr_din  (flash_sdr_din),

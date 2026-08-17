@@ -7836,3 +7836,148 @@ in spi_top yet and the main lint does not reach it.
   MRA-only, and batlball above is the evidence it works.
 * **The OSD option** and its `status_menumask` gating on `~set_sxx2c`.
 * **Collapse the MRAs**, last.
+
+## 25. The derivation, integrated: an OSD toggle instead of six minutes
+
+`spi_flash_derive` is in the core now, behind **Sample Flash: Ritual / Pre-built**
+on the OSD, hidden on SXX2E where there is a mask ROM and nothing to build.
+
+### 25.1 The sequence, and why the priority mux is safe HERE
+
+    rom_ready -> derive -> derive_done -> romcheck -> chk_done -> board runs
+
+The derivation takes ch3 through the same priority mux that 21.3 caught the
+nvram load abusing. The difference is that this time the claim "nothing else is
+asking" is ENFORCED rather than asserted:
+
+* the **loader** has finished -- that is what `rom_ready` means
+* the **checker** has not started: its `start` is `rom_ready & derive_done`
+* the **peek** and the **board** are held in reset by `derive_busy`, the same
+  way they now are by `nv_wr_active`
+
+That is the rule 21.5 wrote down -- every ch3 master either inside one arbiter
+or held in reset while another owns the bus -- applied deliberately instead of
+discovered afterwards. The alternative, a real slot in spi_sdr_arb4, buys
+nothing while every other master is provably idle and costs a wider arbiter on
+the clock that is already tightest.
+
+The module was also collapsed from two SDRAM ports to ONE with an rnw, because
+ch3 is one port and muxing two toggle handshakes onto it would have been the
+same bug in a new place.
+
+### 25.2 The per-set constants live in the MRA
+
+Index-1's config stream gained three fields at FIXED OFFSETS, after the
+`{part, codec}` pairs it already carried:
+
+    16..19  job_table   little endian, a 386 address
+    20..23  stamp       little endian, a 386 address
+    24      generation  0 = A, 1 = B0, 2 = B1
+
+Offsets rather than opcodes because the existing decoder is a strict two-byte
+alternation and a variable-length opcode does not fit it; fifteen bytes is seven
+codec pairs and no set uses more than one. An MRA that stops before byte 16
+leaves `job_table` zero, which `derive_en` rejects -- so an old MRA cannot
+accidentally derive.
+
+**In the MRA and not in the RTL** because a clone has its own job-table address:
+senkyu 0x00302324 against batlball 0x00302290, same game, same graphics,
+everything else identical. A table keyed by set_id would make every clone a core
+rebuild, which is the thing this whole plan exists to stop.
+
+`make check-mra` now holds those bytes against build_soundflash's GAMES -- a
+fourth copy of numbers that already exist in three places, and the one nothing
+at runtime checks. A wrong job table does not fail loudly, it walks nonsense;
+the RTL turns that into a blank flash and a game that runs its own updater,
+which is safe but silent.
+
+### 25.3 What Pre-built changes
+
+* `spi_nvram.enable` drops to `set_upd & ~derive_en`: there is no ritual to
+  record, and loading a save over a freshly derived image is the same bytes at
+  best and a stale one at worst.
+* JP1 goes to the not-update position. Belt and braces -- 18.5 established that
+  a matching stamp makes the game skip its updater whatever JP1 says.
+* It runs ONCE per download. Toggling the option afterwards does not re-run it:
+  the sources are still resident, but a half-written flash is worse than either
+  state, so a change needs a core reload. Worth saying in the OSD text if this
+  ever confuses anyone.
+
+### 25.4 Two things this needed that lint could not have told me
+
+`SeibuSPI.sv` did not include `spi_defs.vh` -- it wrote `set_id = 3'd2;` with
+`// SET_RDFT2` in a trailing comment, which is one edit away from being wrong.
+It includes it now and names the symbols, which it had to anyway: the derivation
+needs `SDR_PCMSRC_*`, and those cannot be written as literals without repeating
+spi_defs.vh's arithmetic.
+
+And **`make lint` does not reach `SeibuSPI.sv` at all** -- it lints `spi_top`,
+because the top needs hps_io and the PLLs. So none of this integration was
+covered by lint, and the check that actually caught the missing include was
+`make map`, Quartus's analysis and synthesis pass. Worth knowing: for anything
+in the top-level file, `make map` is the first real check, not `make lint`.
+
+### 25.5 Timing failed first, and the walker owned the paths
+
+The first integrated build closed at **-0.266 ns on clk_ram, TNS -0.541**, and
+this time it was not placement luck -- five of the worst paths were the
+derivation's own:
+
+    -0.171  spi_flash_derive|esi[28] -> spi_flash_derive|jacc[27]
+    -0.158  spi_flash_derive|esi[29] -> ...
+
+That is one combinational chain: `esi -> 32-bit magnitude compare -> window
+select -> 32-bit dword mux -> 4:1 byte mux -> register`, on the clock with no
+margin to spend. Two changes took real logic out of it, which is the test
+19.16 says to judge a fix by:
+
+* **`in_s01` is `|esi[31:23]`, not `esi >= 32'h00A00000`.** The program image
+  is below 0x0040_0000 and the region at 0x00A0_0000 and up, so no valid source
+  address has any of those bits set on one side or clear on the other. Nine-bit
+  OR instead of a 32-bit compare, at the head of the chain.
+* **The byte fetch is two registered stages**: the selects and a 3-bit group
+  index, then a single 8:1 mux out of the group. Each half is short.
+
+Rebuilt: **clk_ram +0.247, TNS 0.000 on every clock**, and `spi_flash_derive`
+appears **zero times** in the worst 25. It cost 1.4% more cycles -- 34.0 M
+instead of 33.6 M on rdft, still 0.3 s.
+
+### 25.6 Splitting the fetch exposed a latent race, and the test caught it
+
+With the pipeline in, all seven sets broke in different ways -- rdft read its
+job source as `E9A00008` instead of `0A000008`, one byte wrong in the top lane.
+
+`grp_held` is written in S_RD_REQ but `grp_data` only in S_RD_ACK, so for the
+duration of a read `cache_hit` was TRUE against a group that had not arrived.
+The old code could not hit it: it only ever sampled the group from inside a
+consumer state, never during a read. The new byte pipeline runs independently
+of the walk state, so it happily latched the new index out of the old data.
+
+`have_grp` now drops for the length of a read. Worth keeping as a shape: adding
+a stage that runs independently of an FSM re-times every signal that FSM was
+implicitly ordering, and "this was safe before" is not an argument.
+
+### 25.7 On hardware: rdft builds its own flash and boots
+
+Deployed with `derive_sel` forced high -- see the gap below -- and with
+`rdft-update.nvm` PARKED, so the flash could only come from the derivation:
+
+* the ritual did not run: **109,896 bytes of screenshot**, rdft in attract with
+  sprites, against the 13,848-byte "NOW UPDATING" halt screen the same MRA
+  produced on the previous build
+* **17 of 17 sampled windows match the reference image**, chosen where an
+  off-by-one shows: the region stamp at flash[0..3], the payload start at 4,
+  0x100, 0x80000, three windows around 0x1213B0, the last payload byte at
+  0x1D9642 with its 0xFF boundary, and the erased tail
+
+That is zip -> MRA -> loader -> SDRAM -> the derivation -> the sample region,
+and what comes out is what MAME's own flash devices hold.
+
+**THE GAP: the OSD toggle itself is untested.** `/dev/MiSTer_cmd` has no menu
+command, so there is no remote way to set a status bit. Writing the 16-byte
+`/media/fat/config/rdft-update.CFG` on the assumption that it is the raw
+128-bit status word did NOT work -- the file came back unmodified and the core
+still ran the ritual, so Main's .CFG is some other format (sizes vary, 8 bytes
+on some cores and 16 on others). What was validated is everything downstream of
+`derive_sel`. Flipping **Sample Flash: Ritual / Pre-built** on the OSD and
+confirming it takes needs a human at the machine.

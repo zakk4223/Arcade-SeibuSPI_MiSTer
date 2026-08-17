@@ -159,8 +159,14 @@ static int jitter(int base) { lcg = lcg * 1103515245u + 12345u; return base + (l
 static void tick() {
     dut->clk = 0; dut->eval();
 
-    if (dut->sdr_req != rd_prev && rd_wait < 0) {
-        rd_prev = dut->sdr_req; rd_addr = dut->sdr_addr; rd_wait = jitter(4);
+    // One port now, read and write, exactly as ch3 presents it.
+    if (dut->sdr_req != rd_prev && rd_wait < 0 && wr_wait < 0) {
+        rd_prev = dut->sdr_req;
+        if (dut->sdr_rnw) { rd_addr = dut->sdr_addr; rd_wait = jitter(4); }
+        else {
+            wr_addr = dut->sdr_addr; wr_data = dut->sdr_din;
+            wr_mask = dut->sdr_be;   wr_wait = jitter(3);
+        }
     }
     if (rd_wait > 0) rd_wait--;
     else if (rd_wait == 0) {
@@ -174,15 +180,12 @@ static void tick() {
         rd_wait = -1; reads++;
     }
 
-    if (dut->wr_req != wr_prev && wr_wait < 0) {
-        wr_prev = dut->wr_req; wr_addr = dut->wr_addr;
-        wr_data = dut->wr_din; wr_mask = dut->wr_be; wr_wait = jitter(3);
-    }
+
     if (wr_wait > 0) wr_wait--;
     else if (wr_wait == 0) {
         if (wr_mask & 1) sdram[wr_addr]     = (uint8_t)(wr_data & 0xFF);
         if (wr_mask & 2) sdram[wr_addr + 1] = (uint8_t)(wr_data >> 8);
-        dut->wr_ack = wr_prev;
+        dut->sdr_ack = rd_prev;
         wr_wait = -1; writes++;
     }
 
@@ -225,7 +228,7 @@ int main(int argc, char **argv) {
     dut->pcmsrc_en    = 1;
     dut->pcmsrc_1lane = cfg->one_lane;
     dut->pcmsrc_base  = cfg->pcmsrc_base;
-    dut->sdr_ack = 0; dut->wr_ack = 0; dut->sdr_dout = 0;
+    dut->sdr_ack = 0; dut->sdr_dout = 0;
     for (int i = 0; i < 8; i++) tick();
     dut->reset = 0;
     for (int i = 0; i < 8; i++) tick();

@@ -95,18 +95,17 @@ module spi_flash_derive
 	input             pcmsrc_1lane,
 	input      [25:0] pcmsrc_base,
 
-	// SDRAM read port (toggle handshake)
+	// ONE SDRAM port, read and write, because that is the shape of ch3 -- and
+	// because two toggle handshakes muxed onto one bus is the hazard PLAN.md
+	// 21.3 was. The walk is single-threaded, so only ever one transaction is
+	// outstanding and one req/ack pair is all it needs.
 	output reg [25:0] sdr_addr,
-	input      [63:0] sdr_dout,
+	output reg [15:0] sdr_din,
+	output reg  [1:0] sdr_be,
+	output reg        sdr_rnw,
 	output reg        sdr_req,
 	input             sdr_ack,
-
-	// SDRAM write port (toggle handshake), into the sample region
-	output reg [25:0] wr_addr,
-	output reg [15:0] wr_din,
-	output reg  [1:0] wr_be,
-	output reg        wr_req,
-	input             wr_ack,
+	input      [63:0] sdr_dout,
 
 	output reg        done,
 	// Telemetry, and the first thing to look at when a set derives wrongly.
@@ -134,7 +133,10 @@ module spi_flash_derive
 
 	// No PRG base constant: spi_snd_window's PRG arm masks to 2 MB itself, so
 	// a program address needs no adjusting before it goes in.
-	localparam [31:0] S01_386_BASE = 32'h00A0_0000;
+	// The sound01 window's base is not a constant here any more: `in_s01`
+	// tests bits 31:23 instead of comparing against it. Kept as the number
+	// that split is derived from.
+	// localparam [31:0] S01_386_BASE = 32'h00A0_0000;
 	localparam [21:0] FLASH_SIZE   = 22'h20_0000;
 	localparam [21:0] FLASH_START  = 22'd4;      // 0..3 is the stamp
 
@@ -153,7 +155,12 @@ module spi_flash_derive
 	wire [31:0] w_prg;
 
 	reg  [63:0] grp_data;
-	wire        in_s01 = esi >= S01_386_BASE;
+	// The program image lives below 0x0040_0000 and the sound01 region at
+	// 0x00A0_0000 and up, so no valid source address has any of bits 31:23 set
+	// on one side or clear on the other. An OR of nine bits, not a 32-bit
+	// magnitude compare -- this sits at the head of the byte-fetch chain and
+	// clk_ram is the clock with no margin to spend on it.
+	wire        in_s01 = |esi[31:23];
 	wire  [1:0] w_src  = !in_s01   ? SNDW_PRG
 	                   : w_sel_s01 ? SNDW_S01
 	                               : SNDW_PCM;
@@ -250,6 +257,38 @@ module spi_flash_derive
 	reg [31:0] jacc;
 	reg  [2:0] stamp_i;
 
+	// ---- the byte at esi, in two registered steps ----------------------
+	//
+	// One stage was too long for clk_ram: `esi -> compares -> 32-bit dword mux
+	// -> 4:1 byte mux -> register` closed at -0.171 ns and dragged four more
+	// paths negative with it. Split, each half is short -- the selects and a
+	// 3-bit index, then a single 8:1 mux out of the group.
+	//
+	// The index is the same byte the dword form below picks, stated directly:
+	//
+	//   program      esi[2:0]                     four lanes, all live
+	//   sound1       esi[4:2], 0 unless esi[1:0]==0    one byte per dword
+	//   PCM 1 lane   esi[4:2], 0 unless esi[1:0]==0    generation A
+	//   PCM 2 lane   {esi[3:2], esi[0]}, 0 if esi[1]   generation B
+	//
+	// Nothing asserts that equivalence in the RTL; what does is the acceptance
+	// test, which reaches all seven reference hashes or it does not.
+	reg  [2:0] bidx_r;
+	reg        bzero_r;
+	reg        bvalid_r;
+	reg  [7:0] sbyte_r;
+	reg        sbyte_v;
+
+	wire [2:0] bidx  = !in_s01    ? esi[2:0]
+	                 : w_sel_s01  ? esi[4:2]
+	                 : pcmsrc_1lane ? esi[4:2]
+	                                : {esi[3:2], esi[0]};
+	wire       bzero = !in_s01    ? 1'b0
+	                 : w_sel_s01  ? (esi[1:0] != 2'd0)
+	                 : !w_sel_pcm ? 1'b1
+	                 : pcmsrc_1lane ? (esi[1:0] != 2'd0)
+	                                :  esi[1];
+
 	// The byte at esi. Universal across both generations and every lane mode:
 	// gen A reads it explicitly, and gen B's dword cache -- load at esi%4==0,
 	// shift once per byte -- hands out exactly the same byte, because the modes
@@ -259,7 +298,11 @@ module spi_flash_derive
 	// It is also correct for an UNALIGNED address, which is what the job-record
 	// reader above depends on: the window's PRG arm returns the dword holding
 	// esi and this picks the byte out of it.
-	wire [7:0] src_byte = src_dword[{esi[1:0], 3'b000} +: 8];
+	// Kept as the DEFINITION the split above must agree with, and as what
+	// spi_cpu reads through the same window. Not in any timing path here.
+	/* verilator lint_off UNUSEDSIGNAL */
+	wire [7:0] src_byte_comb = src_dword[{esi[1:0], 3'b000} +: 8];
+	/* verilator lint_on UNUSEDSIGNAL */
 
 	// gen B lane advance, from the 386: take the byte, step one, then skip the
 	// lanes this mode does not use. The mode-1 test is against the ALREADY
@@ -333,18 +376,37 @@ module spi_flash_derive
 			state       <= S_IDLE;
 			done        <= 1'b0;
 			sdr_req     <= 1'b0;
-			wr_req      <= 1'b0;
+			sdr_rnw     <= 1'b1;
 			bytes_out   <= 22'd0;
 			jobs_done   <= 8'd0;
 			err_overrun <= 1'b0;
 			err_badjob  <= 1'b0;
 			have_grp    <= 1'b0;
 			have_byte   <= 1'b0;
+			sbyte_v     <= 1'b0;
+			bvalid_r    <= 1'b0;
 			stamping    <= 1'b0;
 		end
 		else begin
 			// The decoder's input handshake, independent of the walk state.
 			if (in_valid && in_ready) have_byte <= 1'b0;
+
+			// ---- the two-stage byte fetch, independent of the walk state --
+			// Stage 1 latches the selects and the index off esi, stage 2 does
+			// the one mux out of the group. A consumer waits for sbyte_v and
+			// clears it when it advances esi; stage 1 is blocked while
+			// sbyte_v is set, so it never runs on a half-updated esi.
+			if (cache_hit && !sbyte_v && !bvalid_r) begin
+				bidx_r   <= bidx;
+				bzero_r  <= bzero;
+				bvalid_r <= 1'b1;
+			end
+			if (bvalid_r && !sbyte_v) begin
+				sbyte_r  <= bzero_r ? 8'd0
+				                    : grp_data[{bidx_r, 3'b000} +: 8];
+				sbyte_v  <= 1'b1;
+				bvalid_r <= 1'b0;
+			end
 
 			case (state)
 
@@ -362,24 +424,29 @@ module spi_flash_derive
 				stamping    <= 1'b0;
 				jw          <= 2'd0;
 				jb          <= 2'd0;
+				sbyte_v     <= 1'b0;
+				bvalid_r    <= 1'b0;
 				state       <= S_JOBB;
 			end
 
 			S_J0: begin
-				esi   <= job;
-				jw    <= 2'd0;
-				jb    <= 2'd0;
-				state <= S_JOBB;
+				esi      <= job;
+				jw       <= 2'd0;
+				jb       <= 2'd0;
+				sbyte_v  <= 1'b0;
+				bvalid_r <= 1'b0;
+				state    <= S_JOBB;
 			end
 
 			// ---- one job record, twelve bytes, little endian --------------
-			S_JOBB: if (cache_hit) begin
-				jacc  <= {src_byte, jacc[31:8]};
-				esi   <= esi + 32'd1;
-				jb    <= jb + 2'd1;
+			S_JOBB: if (sbyte_v) begin
+				jacc    <= {sbyte_r, jacc[31:8]};
+				esi     <= esi + 32'd1;
+				jb      <= jb + 2'd1;
+				sbyte_v <= 1'b0;
 				if (jb == 2'd3) state <= S_JOBD;
 			end
-			else begin
+			else if (!cache_hit) begin
 				ret_r <= S_JOBB;
 				state <= S_RD_REQ;
 			end
@@ -398,6 +465,8 @@ module spi_flash_derive
 						stamping <= 1'b1;
 						pos      <= 22'd0;
 						stamp_i  <= 3'd0;
+						sbyte_v  <= 1'b0;
+						bvalid_r <= 1'b0;
 						state    <= S_STAMPB;
 					end
 					// A source outside the 386's program image or its sound01
@@ -420,6 +489,8 @@ module spi_flash_derive
 				esi       <= j_src;
 				produced  <= 32'd0;
 				have_byte <= 1'b0;
+				sbyte_v   <= 1'b0;
+				bvalid_r  <= 1'b0;
 				state     <= S_RUN;
 			end
 
@@ -441,12 +512,13 @@ module spi_flash_derive
 					state    <= S_WR_REQ;
 				end
 				else if (!have_byte) begin
-					if (cache_hit) begin
-						fbyte     <= src_byte;
+					if (sbyte_v) begin
+						fbyte     <= sbyte_r;
 						have_byte <= 1'b1;
 						esi       <= esi_next;
+						sbyte_v   <= 1'b0;
 					end
-					else begin
+					else if (!cache_hit) begin
 						ret_r <= S_RUN;
 						state <= S_RD_REQ;
 					end
@@ -464,14 +536,15 @@ module spi_flash_derive
 				done  <= 1'b1;
 				state <= S_DONE;
 			end
-			else if (cache_hit) begin
-				wbyte   <= src_byte;
+			else if (sbyte_v) begin
+				wbyte   <= sbyte_r;
 				esi     <= esi + 32'd1;
 				stamp_i <= stamp_i + 3'd1;
+				sbyte_v <= 1'b0;
 				ret_w   <= S_STAMPB;
 				state   <= S_WR_REQ;
 			end
-			else begin
+			else if (!cache_hit) begin
 				ret_r <= S_STAMPB;
 				state <= S_RD_REQ;
 			end
@@ -480,6 +553,15 @@ module spi_flash_derive
 			S_RD_REQ: begin
 				sdr_addr <= w_grp_addr;
 				grp_held <= w_grp_addr;
+				// have_grp DOWN for the duration. grp_held is the address now
+				// being fetched, so leaving have_grp up would make cache_hit
+				// true against a group that has not arrived, and the byte
+				// pipeline -- which runs independently of the walk state --
+				// would latch the new index out of the OLD data. The
+				// pre-pipeline version could not hit this: it only ever
+				// sampled the group from inside a consumer state.
+				have_grp <= 1'b0;
+				sdr_rnw  <= 1'b1;
 				sdr_req  <= ~sdr_req;
 				state    <= S_RD_ACK;
 			end
@@ -491,14 +573,15 @@ module spi_flash_derive
 			end
 
 			S_WR_REQ: begin
-				wr_addr <= SDR_PCM_BASE + {4'd0, pos[21:1], 1'b0};
-				wr_din  <= {wbyte, wbyte};
-				wr_be   <= pos[0] ? 2'b10 : 2'b01;
-				wr_req  <= ~wr_req;
-				state   <= S_WR_ACK;
+				sdr_addr <= SDR_PCM_BASE + {4'd0, pos[21:1], 1'b0};
+				sdr_din  <= {wbyte, wbyte};
+				sdr_be   <= pos[0] ? 2'b10 : 2'b01;
+				sdr_rnw  <= 1'b0;
+				sdr_req  <= ~sdr_req;
+				state    <= S_WR_ACK;
 			end
 
-			S_WR_ACK: if (wr_ack == wr_req) begin
+			S_WR_ACK: if (sdr_ack == sdr_req) begin
 				pos <= pos + 22'd1;
 				if (!stamping) bytes_out <= bytes_out + 22'd1;
 				state <= ret_w;
