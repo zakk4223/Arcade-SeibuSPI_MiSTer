@@ -643,10 +643,34 @@ wire  [3:0] chk_ok;
 wire [15:0] chk_passes, chk_fails;
 wire [31:0] chk_sum_prg, chk_sum_chars, chk_sum_tiles, chk_sum_sprites;
 
+// HELD IN RESET FOR THE NVRAM LOAD, and this is not optional. ch3 is a TOGGLE
+// handshake, and the mux below hands it to nv_wr_active in front of everyone
+// -- which is exactly what spi_sdr_arb4.sv's header says must never be done to
+// a toggle handshake, because a master whose req is muxed out still sees the
+// shared `sdr_rw_ack` toggling for somebody else's transactions and takes them
+// for its own.
+//
+// That is what happened. `wire reset` above includes nv_wr_active so the BOARD
+// is down for the save load, and the comment there says "nothing else is
+// asking" -- but this checker is on RESET, not on that wire, so it kept
+// walking. Its reads never reached SDRAM (nv_wr_req won the mux) while the
+// 2 MB of save writes acked its requests for it, so it summed a static
+// sdr_rw_dout, tore through PRG, CHARS and TILES at write speed, and latched
+// `done` on garbage. On hardware that read as three ZERO sums, a wrong
+// SPRITES, `ok bits 0000`, and a pass count that varied with placement.
+//
+// It only ever showed on the authentic-flash sets, because they are the only
+// ones with a save to load: pre-flashed rdft on the same build reports all
+// four sums and `ok bits 1110`, the single mismatch being its own program ROM
+// against rdfts' constant. That comparison is what identified this.
+//
+// Resetting rather than gating `start`: start is rom_ready, which is already
+// high when the nvram arrives (Main sends <nvram> after the image), so gating
+// it would not restart a walk that had already begun and been corrupted.
 spi_romcheck romcheck
 (
 	.clk      (clk_ram),
-	.reset    (RESET | ~pll_locked),
+	.reset    (RESET | ~pll_locked | nv_wr_active),
 	.start    (rom_ready),
 	.sdr_addr (chk_addr),
 	.sdr_dout (sdr_rw_dout),
@@ -663,10 +687,18 @@ spi_romcheck romcheck
 );
 
 // Host-driven SDRAM reads over JTAG; see tools/jtag_peek.tcl.
+//
+// Held in reset for the nvram load for the same reason the checker above is:
+// it is the other ch3 master outside the board's reset domain, so a peek issued
+// during a save load would be handed the nvram writer's acks and return a value
+// it never read. Rarer -- it needs a human peeking inside a 2 MB window -- and
+// the same one-line fix. This reset clears only the handshake registers; the
+// panel fields are inputs wired straight to the ISSP probes, so nothing the
+// instrument reports is lost.
 spi_jtag_peek peek
 (
 	.clk      (clk_ram),
-	.reset    (RESET | ~pll_locked),
+	.reset    (RESET | ~pll_locked | nv_wr_active),
 	.enable   (chk_done),
 	.sdr_addr (peek_addr),
 	.sdr_dout (peek_dout),

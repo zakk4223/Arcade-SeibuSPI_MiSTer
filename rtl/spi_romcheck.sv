@@ -35,11 +35,20 @@ module spi_romcheck
 
 	output reg        done,
 	output reg  [3:0] ok,
-	// After the first pass `done` latches so the board comes out of reset, but
-	// the walk keeps repeating. Later passes therefore run while the video
-	// engine is hammering channel 2, which is the one condition the original
-	// one-shot check could never cover: the CPU reads its ROM under exactly
-	// that contention, and that is where its data goes bad.
+	// `done` latches after the first full pass and the walk STOPS THERE. The
+	// FSM below is entirely inside `else if (!done)`, so `passes` reaches 1 and
+	// stays -- confirmed on hardware, which reports `check passes= 1`.
+	//
+	// This used to claim the walk keeps repeating, so that later passes would
+	// run while the video engine hammers channel 2 and catch ROM data going bad
+	// under contention. That never happened, and it CANNOT be switched on by
+	// deleting the guard: SeibuSPI.sv hands ch3 to the board's arbiter the
+	// moment `done` latches, and ch3 is a toggle handshake, so a checker still
+	// walking after that would be muxed out and would take the arbiter's acks
+	// for its own -- corrupting the Z80 fetch and the JTAG peek, which is
+	// exactly the failure the nvram load caused here (SeibuSPI.sv, romcheck's
+	// reset). Making it repeat means giving the checker a real slot in
+	// spi_sdr_arb4 alongside the other ch3 owners, not removing this guard.
 	output reg [15:0] passes,
 	output reg [15:0] fails,             // per region, 1 = matches
 	output reg [31:0] sum_prg,        // what it actually computed, for JTAG

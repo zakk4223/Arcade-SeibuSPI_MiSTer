@@ -7414,3 +7414,103 @@ here before (PLAN.md 10d), and `part_end = 10` alongside three zeroed sums looks
 much more like a field-offset problem than like three failed walks. Not chased
 here; logged so the next person does not read `ok bits 0000` as evidence of
 anything.
+
+## 21. The `sums` panel was reading a race, not a checksum (2026-08-17)
+
+### 21.1 What it looked like
+
+`sums` on `rdft-update`: three region sums **zero**, SPRITES a value that is not
+`SUM_SPRITES`, `ok bits 0000`, `check passes` reading 1 on one build and 2 on
+another. `part_end = 10` looked wrong too and was not -- `jtag_peek.tcl` prints
+it with `bin2hex`, so that is 0x10, which is 16, which is right for rdft-upd's
+seventeen parts. Two of the four "wrong" numbers were the instrument's display
+convention and one was the reader's arithmetic. Only the sums were real.
+
+### 21.2 Ruling things out, cheapest first
+
+**The field offsets were fine.** The Tcl's own width line printed 221 and the
+concatenation adds to 221. Both previous lies here were width/offset drift
+(10d), which made that the obvious suspect and the wrong one.
+
+**The RTL was fine.** `make -C sim run-romcheck` on the reference image passes
+and localises a flipped bit to each region in turn. So the checker computes
+correctly when nothing is fighting it.
+
+**The control named it.** Pre-flashed `rdft.mra` on the SAME build reports all
+four sums and `ok bits 1110` -- CHARS `79A0EB60`, TILES `D3E9E887`, SPRITES
+`76809831` matching rdfts' constants exactly, PRG `34181571` differing because
+rdft's program ROMs are its own. The two MRAs differ in one relevant way: the
+authentic one carries `<nvram index="2" size="2097152"/>` and the pre-flashed
+one does not.
+
+### 21.3 The bug: a toggle handshake with a priority mux in front of it
+
+ch3's owners are muxed by priority in SeibuSPI.sv, with the nvram load cutting
+in front of everyone:
+
+    assign sdr_rw_req = nv_wr_active ? nv_wr_req
+                      : chk_done     ? arb_req
+                      : rom_ready    ? chk_req : ldr_req;
+
+`spi_sdr_arb4.sv`'s header already says why this is dangerous: ch3 uses a toggle
+handshake, so "switching the mux with a transaction outstanding would hand one
+master's ack to another." The arbiter serialises for exactly that reason. This
+mux does not.
+
+`wire reset` includes `nv_wr_active`, so the BOARD is held down for the save
+load, and the comment there concludes "nothing else is asking". **The checker
+was asking.** It is on `RESET | ~pll_locked`, not on that wire. So during the
+2 MB save load its requests were muxed out and never reached SDRAM, while the
+shared `sdr_rw_ack` toggled once per nvram WRITE and its `sdr_ack == sdr_req`
+took each one as its own completion. It summed a static `sdr_rw_dout`, ran
+through PRG, CHARS and TILES at write speed -- hence three sums of zero -- got
+partway into SPRITES as the load ended and real data started arriving, and
+latched `done` on the result. The pass count varying between builds is the same
+race landing differently under a different placement.
+
+Only the authentic-flash sets have a save to load, which is why rdfts and the
+pre-flashed sets have always looked right.
+
+### 21.4 The fix
+
+`spi_romcheck` and `spi_jtag_peek` -- the two ch3 masters outside the board's
+reset domain -- now take `nv_wr_active` in their reset. Reset rather than gating
+`start`, because `start` is `rom_ready` and is already high when the nvram
+arrives: gating it would not restart a walk that had already begun and been
+corrupted.
+
+The peek half is rarer -- it needs a human peeking inside a 2 MB window -- but it
+is the same bug and would have returned a value that was never read. Its reset
+clears only handshake registers; the panel fields are inputs wired straight to
+the ISSP probes.
+
+**Verified on hardware.** `rdft-update` now reports exactly what the pre-flashed
+control does:
+
+    ok bits     = 1110
+    sum SPRITES = 76809831     sum TILES = D3E9E887
+    sum CHARS   = 79A0EB60     sum PRG   = 34181571
+    part_end    = 10 (hex)     bytes_in  = 25886720
+
+and the game still boots to attract. Timing: every clock positive, TNS 0.000,
+clk_ram +0.316.
+
+### 21.5 The repeating walk never repeated, and must not be switched on
+
+`spi_romcheck`'s header claimed `done` latches to release the board "but the walk
+keeps repeating", so later passes would check ROM under video contention. The FSM
+is entirely inside `else if (!done)`, so it stops after one pass -- `check
+passes= 1` on hardware, always.
+
+**Deleting that guard would reintroduce 21.3 in a worse place.** SeibuSPI.sv
+hands ch3 to the board's arbiter the instant `done` latches, so a checker still
+walking after that is muxed out and eats the arbiter's acks -- corrupting the
+Z80 fetch and the peek. Making it repeat means giving the checker a real slot in
+`spi_sdr_arb4` next to the other ch3 owners. The header now says so instead of
+claiming a behaviour that does not exist.
+
+**The general lesson**, which is the third time this file has recorded a version
+of it: every ch3 master must be either inside one arbiter or held in reset while
+another owns the bus. A priority mux over a toggle handshake is not arbitration,
+and its failure is silent -- the starved master reports plausible numbers rather
+than stalling.
