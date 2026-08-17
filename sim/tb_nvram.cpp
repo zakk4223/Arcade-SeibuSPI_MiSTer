@@ -207,6 +207,39 @@ int main(int argc, char **argv) {
     if (reqs == 3 && !short_req)
         printf("request: one per settled burst, held until taken and not renewed\n");
 
+    // ---- enable low: the whole device is inert --------------------------
+    // Pre-built mode (PLAN.md 25) drives `enable` from `set_upd & ~derive_en`,
+    // so the sample flash the core DERIVED is not overwritten by a save file
+    // and no save is asked for. Both halves of that are checked here because
+    // both are load-bearing and neither was covered: `enable` was set to 1 at
+    // the top of this file and never cleared again.
+    //
+    // The save half has a second guard in the core -- flash_dirty is toggled
+    // only by spi_soundflash, which the derivation does not write through --
+    // but a test that leans on the belt without checking the braces is not
+    // testing the thing the code says it relies on.
+    dut->enable = 0;
+    std::vector<uint8_t> decoy(N);
+    for (size_t i = 0; i < N; i++) decoy[i] = (uint8_t)(i * 53 + 7);
+    load(decoy);
+    int leaked = 0;
+    for (size_t i = 0; i < N; i++) if (sdram[PCM_BASE + i] != img[i]) leaked++;
+    if (leaked) {
+        printf("FAIL: %d bytes of a save file reached the sample region with "
+               "enable low\n", leaked);
+        errors++;
+    }
+
+    for (int i = 0; i < 5; i++) { dut->flash_dirty = !dut->flash_dirty; run(20); }
+    int asked = 0;
+    for (int i = 0; i < 4000; i++) { tick(); if (dut->ioctl_upload_req) asked++; }
+    if (asked) {
+        printf("FAIL: a save was requested on %d cycles with enable low\n", asked);
+        errors++;
+    }
+    if (!leaked && !asked)
+        printf("disabled: no load into the region, no save requested\n");
+
     delete dut;
     if (errors) { printf("\n%d FAILURES\n", errors); return 1; }
     printf("\nall nvram checks passed\n");

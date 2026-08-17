@@ -7981,3 +7981,34 @@ still ran the ritual, so Main's .CFG is some other format (sizes vary, 8 bytes
 on some cores and 16 on others). What was validated is everything downstream of
 `derive_sel`. Flipping **Sample Flash: Ritual / Pre-built** on the OSD and
 confirming it takes needs a human at the machine.
+
+### 25.8 Pre-built mode skips the save AND the load, and that is now tested
+
+Asked whether the nvram save can be skipped when the ritual is off. It already
+is, twice over:
+
+* `spi_nvram.enable` is `set_upd & ~derive_en`, and `enable` gates BOTH halves
+  of the device -- the load, through `sel` (spi_nvram.sv:115), and the
+  save-request watcher (spi_nvram.sv:278).
+* Even with the watcher live nothing would ask, because `flash_dirty` is
+  toggled only by `spi_soundflash` (spi_soundflash.sv:253) -- that is the flash
+  DEVICE, written through the YMF271's wave port by the game. The derivation
+  writes SDRAM directly and never goes near it.
+
+The load is skipped as well as the save, deliberately: a save file written by an
+earlier ritual is at best the same bytes as the derived image and at worst a
+stale one from a different region byte, and loading it over a freshly derived
+region would hide the difference.
+
+The other reading of the question -- Ritual mode, but the game skips its updater
+because the stamp already matches -- also writes nothing: nothing programs the
+flash, so `flash_dirty` never toggles. 19.10 saw that on hardware as a silent
+save panel.
+
+**None of this was tested.** `tb_nvram` set `enable = 1` at the top and never
+cleared it, so the one term Pre-built mode's correctness rests on was never
+exercised. It now loads a decoy image with `enable` low and requires that not a
+byte of it reaches the sample region, then toggles `flash_dirty` and requires no
+request on any of 4,000 cycles. Checked for the ability to fail by setting
+`enable` back to 1 for that section: 4,096 bytes leak and the request comes up
+on 3,763 cycles.
