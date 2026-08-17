@@ -704,6 +704,8 @@ spi_jtag_peek peek
 	.fw_er_after(dbg_flash_w_er_after), .fw_trace(dbg_flash_w_trace),
 	.aw_n(dbg_arb_w_n), .aw_be(dbg_arb_w_be), .aw_data(dbg_arb_w_data),
 	.aw_total(dbg_arb_d_total),
+	.cw_hits(dbg_c_hits), .cw_rom(dbg_c_rom), .cw_pair(dbg_c_pair),
+	.cw_addr(dbg_c_addr), .cw_hit(dbg_c_hit),
 	.fw_pushes(dbg_fw_pushes), .fw_pops(dbg_fw_pops), .fw_fill(dbg_fw_fill), .fw_empty(dbg_fw_empty),
 	.fw_din(dbg_fw_din), .fw_frozen(dbg_fw_frozen),
 	.sw_takes(dbg_sw_takes), .sw_writes(dbg_sw_writes), .sw_same(dbg_sw_same),
@@ -735,6 +737,11 @@ wire  [7:0] dbg_flash_w_progs, dbg_flash_w_data, dbg_flash_w_erases;
 wire  [1:0] dbg_flash_w_be;
 wire        dbg_flash_w_er_after;
 wire [55:0] dbg_flash_w_trace;
+wire  [7:0] dbg_c_hits;
+wire [63:0] dbg_c_rom;
+wire [15:0] dbg_c_pair;
+wire [25:0] dbg_c_addr;
+wire        dbg_c_hit;
 wire [31:0] dbg_fw_pushes, dbg_fw_pops;
 wire  [8:0] dbg_fw_fill;
 wire [15:0] dbg_fw_empty;
@@ -995,6 +1002,8 @@ spi_top spi_top
 	.dbg_flash_w_erases   (dbg_flash_w_erases),
 	.dbg_flash_w_er_after (dbg_flash_w_er_after),
 	.dbg_flash_w_trace    (dbg_flash_w_trace),
+	.dbg_c_hits(dbg_c_hits), .dbg_c_rom(dbg_c_rom), .dbg_c_pair(dbg_c_pair),
+	.dbg_c_addr(dbg_c_addr), .dbg_c_hit(dbg_c_hit),
 	.dbg_fw_pushes(dbg_fw_pushes), .dbg_fw_pops(dbg_fw_pops), .dbg_fw_fill(dbg_fw_fill),
 	.dbg_fw_empty(dbg_fw_empty), .dbg_fw_din(dbg_fw_din),
 	.dbg_fw_frozen(dbg_fw_frozen),

@@ -7024,3 +7024,75 @@ Worth noting for whoever picks it up: 0xFF is not what a missed decode gives
 here. An undecoded address falls through to S_NULL, which answers zeroes -- that
 is what `tools/check_snd01_window.py` checks the whole 10 MB region against. So
 this is not a hole in the window; it is a read that goes wrong on its way.
+
+### 19.15  The SDRAM read brings back an all-ones final beat
+
+The last link. 19.14 put the wrong byte in the 386's own read, so this watches
+that read: one dword -- the one whose PCM pair carries source byte 0x29FE --
+recorded at the serve with the whole 8-byte line it came out of, the ADDRESS of
+the fetch that filled it, and the pair picked out of it. Three fields, because
+there are three ways the read can go wrong and they need different fixes.
+
+Eight trials:
+
+```
+trial 1 LOST:  line = FFFF0000FEFDFE00   from = 29029F8   pair = FFFF
+trial 2 ok:    line = FFFE0000FEFDFE00   from = 29029F8   pair = FFFE
+trial 3 LOST:  line = FFFF0000FEFDFE00   from = 29029F8   pair = FFFF
+trial 4 LOST:  line = FFFF0000FEFDFE00   from = 29029F8   pair = FFFF
+trials 5-8 ok: line = FFFE0000FEFDFE00   from = 29029F8   pair = FFFE
+```
+
+**The address is right every time, and so is the extraction.** The fetch goes to
+SDR_PCMSRC_BASE+0x29F8 and the pair is the top two bytes of the line, exactly as
+the arithmetic says. What differs is the LINE: on a bad run its last 16-bit beat
+reads 0xFFFF where memory holds 0xFFFE.
+
+`ch1_dout[63:48]` is the FOURTH beat of a four-beat burst -- `data_ready_delay1`
+puts the first at [15:0] and the last at [63:48] -- so it is specifically the
+end of the burst that comes back wrong. Every other beat is perfect in every
+run.
+
+And the memory is not wrong: peeking that same address over ch3 returns
+FFFE0000FEFDFE00 every single time, before and after.
+
+**0xFF is what an undriven bus reads.** The final beat is being captured after
+the SDRAM has stopped driving DQ -- the other three bits of that byte are
+already ones in the correct value, so an all-ones capture is indistinguishable
+from the truth except in bit 0, which is exactly the bit that changes. The
+read-capture path is also the one that keeps appearing at the top of the timing
+report: `sdram|dq_reg[11] -> dq_reg_d[11]` was the worst setup path in several
+of today's builds, at +0.167 in one of them.
+
+So the whole chain, traced end to end and each link measured rather than
+assumed:
+
+```
+SDRAM holds FE  ->  ch1 read returns FF in the last beat  ->  386 pushes FF
+   ->  FIFO hands over FF  ->  Z80 writes FF  ->  flash programs FF
+```
+
+Everything from the push downwards was already proved faithful in 19.14, and
+sdram.sv's write path and the arbiter in 19.12/19.13. The fault is one place:
+the read.
+
+**What this does NOT establish**, and it matters:
+
+* Why the LAST beat, and why intermittently. A capture window that is simply too
+  late would fail every burst; this one fails maybe half the rituals, on a read
+  that happens once each.
+* Why ch3's peek of the same address never sees it. The likeliest reason is
+  traffic -- the peek runs on a quiet bus, the ritual does not -- which would
+  make this a marginal capture disturbed by whatever else is in flight.
+* **How much else it corrupts.** This watch looks at ONE read. Every ch1 read
+  takes the same path, so the implication is far wider than one byte of sample
+  data, and the reason it has never been noticed is that program code is read
+  once into cache and sample data is written once and rarely inspected. The
+  ROM checksum passes because it runs on a quiet bus at load time.
+
+**Next**, and it is now a hardware-timing question rather than a logic one:
+`data_ready_delay1`'s alignment against CAS_LATENCY at the end of a burst, the
+auto-precharge that goes out with every read (A10 high in the CAS phase), and
+where the fitter put the DQ capture register. That last one has a history in
+this file already -- the comment above `dq_reg` records an earlier attempt to
+split it per channel that destroyed the input timing.

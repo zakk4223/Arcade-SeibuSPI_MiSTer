@@ -40,6 +40,13 @@ module spi_top
 	output            flash_sdr_req,
 	input             flash_sdr_ack,
 	output            flash_dirty,
+	// The sel_pcm watch (PLAN.md 19.15), from spi_cpu.
+	output      [7:0] dbg_c_hits,
+	output     [63:0] dbg_c_rom,
+	output     [15:0] dbg_c_pair,
+	output     [25:0] dbg_c_addr,
+	output            dbg_c_hit,
+
 	// The FIFO watch (PLAN.md 19.14), passed straight through from spi_sound.
 	output     [31:0] dbg_fw_pushes,
 	output     [31:0] dbg_fw_pops,
@@ -291,6 +298,12 @@ module spi_top
 
 	spi_cpu cpu
 	(
+		// The sel_pcm watch (PLAN.md 19.15).
+		.dbg_c_hits (dbg_c_hits),
+		.dbg_c_rom  (dbg_c_rom),
+		.dbg_c_pair (dbg_c_pair),
+		.dbg_c_addr (dbg_c_addr),
+		.dbg_c_hit  (dbg_c_hit),
 		.z80dl_stall (z80dl_stall),
 		// Only the sets with a second sound ROM read sound1.u0222's window, and
 		// only their loader tables put anything behind it -- see spi_cpu.sv's

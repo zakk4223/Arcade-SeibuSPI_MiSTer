@@ -155,6 +155,15 @@ module spi_jtag_peek
 
 	// The FIFO watch (PLAN.md 19.14). On SDRW rather than SNDV only because
 	// SNDV is full; these are clk_sys signals like the rest of the sound side.
+	// The sel_pcm watch (PLAN.md 19.15). Its own instance: spi_cpu is on
+	// clk_cpu, a third domain, and one instance per domain keeps a reading
+	// from being half from each.
+	input       [7:0] cw_hits,
+	input      [63:0] cw_rom,
+	input      [15:0] cw_pair,
+	input      [25:0] cw_addr,
+	input             cw_hit,
+
 	input      [31:0] fw_pushes,
 	input      [31:0] fw_pops,
 	input       [8:0] fw_fill,
@@ -321,6 +330,22 @@ module spi_jtag_peek
 		          sw_e0_dq, sw_e0_dqm, sw_e0_gap, sw_e0_ab, sw_e0_ac, sw_e0_after,
 		          sw_e1_dq, sw_e1_dqm, sw_e1_gap, sw_e1_ab, sw_e1_ac, sw_e1_after,
 		          fw_pushes, fw_pops, fw_fill, fw_empty, fw_din, fw_frozen}),
+		.source ()
+	);
+
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (9),
+		.instance_id             ("CPUW"),
+		.probe_width             (115),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	cpuw_issp
+	(
+		.probe  ({cw_hits, cw_rom, cw_pair, cw_addr, cw_hit}),
 		.source ()
 	);
 

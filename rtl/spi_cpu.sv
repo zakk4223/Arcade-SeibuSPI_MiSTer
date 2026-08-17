@@ -141,10 +141,32 @@ module spi_cpu
 
 	// Vertical blanking interrupt. Crosses from clk_sys as a toggle: a one-cycle
 	// clk_sys pulse would be invisible to a clock running at half the rate.
-	input             vbl_toggle
+	input             vbl_toggle,
+
+	// ---- the sel_pcm watch (PLAN.md 19.15) ----------------------------
+	// 19.14 traced the wrong byte back to the 386's own read: it pushes 0xFF
+	// into the sound FIFO where the source holds 0xFE, and everything below
+	// the push is faithful. This watches the read that feeds it.
+	//
+	// One dword: the one whose PCM pair carries source byte 0x29FE. On a serve
+	// it records the whole 8-byte line the pair came out of, the ADDRESS of the
+	// fetch that filled it, and the pair extracted. Those three separate the
+	// three ways this can go wrong -- a line fetched from the wrong place, a
+	// line fetched from the right place holding the wrong bytes, or the right
+	// line with the pair picked out of it wrongly.
+	output reg  [7:0] dbg_c_hits,
+	output reg [63:0] dbg_c_rom,
+	output reg [15:0] dbg_c_pair,
+	output reg [25:0] dbg_c_addr,
+	output reg        dbg_c_hit
 );
 
 `include "spi_defs.vh"
+
+	// The 386 dword whose PCM pair carries source byte 0x29FE: 386 address
+	// 0x0A053FC, which is dword 0x02814FF. Its pair sits at bytes 6-7 of the
+	// line at SDR_PCMSRC_BASE + 0x29F8 (PLAN.md 19.15).
+	localparam [29:0] WATCH_DW = 30'h02814FF;
 
 	// ------------------------------------------------------------------
 	// z386
@@ -525,6 +547,11 @@ module spi_cpu
 			sdr_req    <= 1'b0;
 			burst_left <= 8'd0;
 			dma_own    <= 1'b0;
+			dbg_c_hits <= 8'd0;
+			dbg_c_rom  <= 64'd0;
+			dbg_c_pair <= 16'd0;
+			dbg_c_addr <= 26'd0;
+			dbg_c_hit  <= 1'b0;
 		end
 		else begin
 			// Grant the DMA the RAM port only from a fully quiescent state.
@@ -629,6 +656,20 @@ module spi_cpu
 					default: mem_din <= cur_dw[0] ? rom_data[63:32]
 					                              : rom_data[31:0];
 				endcase
+				// The watch. Frozen on the FIRST serve of this dword: the
+				// updater reads each source dword once, so a second would mean
+				// something quite different is happening and is worth seeing
+				// in `dbg_c_hits` rather than overwriting the evidence.
+				if (rd_src == R_PCM && cur_dw == WATCH_DW) begin
+					dbg_c_hits <= dbg_c_hits + 8'd1;
+					if (!dbg_c_hit) begin
+						dbg_c_hit  <= 1'b1;
+						dbg_c_rom  <= rom_data;
+						dbg_c_pair <= pcm_pair;
+						dbg_c_addr <= sdr_addr;
+					end
+				end
+
 				mem_resp_valid <= 1'b1;
 				cur_dw         <= cur_dw + 30'd1;
 				burst_left     <= burst_left - 8'd1;

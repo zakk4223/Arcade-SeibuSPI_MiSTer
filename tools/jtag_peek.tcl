@@ -338,6 +338,31 @@ if {$mode eq "list"} {
         puts "fifo watch = never froze -- no program command for the watched byte"
     }
     puts [format "empty reads= %d  (reads of 0x4008 with the FIFO empty; these pop nothing)" $fwe]
+} elseif {$mode eq "pcmread"} {
+    # The sel_pcm watch (PLAN.md 19.15). One 386 dword -- the one whose PCM
+    # pair carries source byte 0x29FE -- recorded on the read that feeds the
+    # push into the sound FIFO.
+    #
+    #   line 29F8 should read FFFE0000FEFDFE00, and the pair FFFE.
+    #   addr should be 29029F8, which is SDR_PCMSRC_BASE + 0x29F8.
+    #
+    # A wrong `addr` means the dword was served out of a line fetched from
+    # somewhere else. A right addr with a wrong line means the fetch itself
+    # brought back the wrong bytes. A right line with a wrong pair means the
+    # bytes were picked out of it wrongly.
+    set p [read_probe_data -instance_index [index_of "CPUW"]]
+    proc fld {p a n} { return [expr 0b[string range $p $a [expr {$a+$n-1}]]] }
+    set hits [fld $p 0 8]
+    set hit  [fld $p 114 1]
+    if {!$hit} {
+        puts "pcm read   = never served -- the 386 has not read that dword"
+    } else {
+        puts [format "pcm read   = %d serves of dword 0x2814FF" $hits]
+        puts [format "  line     = %s   (want FFFE0000FEFDFE00)" \
+              [bin2hex [string range $p 8 71]]]
+        puts [format "  from     = %07X   (want 29029F8)" [fld $p 88 26]]
+        puts [format "  pair     = %04X   (want FFFE; low byte is 0x29FE)" [fld $p 72 16]]
+    }
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits
@@ -607,7 +632,7 @@ if {$mode eq "list"} {
     }
 } else {
     puts "usage: quartus_stp -t tools/jtag_peek.tcl \[list | sums | vitals | sound | sdram |"
-    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\] | sdram]"
+    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\] | sdram | pcmread]"
 }
 
 end_insystem_source_probe
