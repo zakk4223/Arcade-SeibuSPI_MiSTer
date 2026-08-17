@@ -272,11 +272,12 @@ lint: lint-derive
 lint-top:
 	$(VERILATOR) --lint-only -Wall -DMISTER_FB -I$(RTL) -I$(RTL)/z386 -I.. lint.vlt \
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
-	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
-	    $(RTL)/spi_romcheck.sv $(RTL)/sdram.sv $(RTL)/rom_loader.sv \
-	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb4.sv $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv $(RTL)/spi_sdr_stats.sv $(RTL)/spi_rom_decode.sv $(RTL)/ddr_rom_reader.sv \
+	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
+	    $(RTL)/sdram.sv $(RTL)/rom_loader.sv $(RTL)/spi_flash_derive.sv \
+	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb4.sv $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv $(RTL)/spi_rom_decode.sv $(RTL)/ddr_rom_reader.sv \
 	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise11_decrypt.sv 2>&1 | \
-	    grep -E "WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" || echo "no width or pin problems"
+	    grep -E "%Error|WIDTHTRUNC|WIDTHEXPAND|IMPLICIT|PINMISSING" | \
+	    grep -vE "MODMISSING|Exiting due to" || echo "no width or pin problems"
 
 
 # Boots the real 386 against the real SDRAM image. STEPS is clk_ram half-steps
@@ -292,13 +293,13 @@ run-boot: obj_dir/Vtb_boot_top
 	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS) $(GAME)
 
 obj_dir/Vtb_boot_top: tb_boot_top.sv tb_boot.cpp lint.vlt $(CORE_SRCS) $(Z386_SRCS) \
-                      $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv $(RTL)/spi_debug.sv \
+                      $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
                       $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_rise10_tables.vh \
                       $(RTL)/spi_spr_tables.vh
 	$(VERILATOR) $(VFLAGS) -I$(RTL)/z386 --top-module tb_boot_top \
 	    tb_boot_top.sv $(CORE_SRCS) $(Z386_SRCS) \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
-	    $(RTL)/spi_rise10_decrypt.sv $(RTL)/spi_debug.sv tb_boot.cpp
+	    $(RTL)/spi_rise10_decrypt.sv tb_boot.cpp
 
 
 # Streams the real ROM image through rom_loader -> rtl/sdram.sv -> a behavioural

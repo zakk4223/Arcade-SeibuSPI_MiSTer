@@ -20,14 +20,16 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_dma.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_layers.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_mixer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sprite.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_debug.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_romcheck.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_jtag_peek.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb4.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_soundflash.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_nvram.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_stats.sv
+
+# NOT BUILT, deliberately. rtl/spi_debug.sv (the vital signs panel),
+# rtl/spi_jtag_peek.sv (the ISSP probes), rtl/spi_romcheck.sv (the checksum
+# walker) and rtl/spi_sdr_stats.sv (the bus meter) are instrumentation. They
+# stay in the tree for the next investigation; nothing instantiates them, so
+# nothing of theirs reaches the fabric. PLAN.md 29.
 
 # Sound: Z80 + YMF271. The T80 core is VHDL, so it comes in through its own qip.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sound.sv

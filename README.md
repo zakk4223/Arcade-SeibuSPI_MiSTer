@@ -227,7 +227,14 @@ File size alone distinguishes a black frame from a drawn one, and the menu core
 is a control. Three JTAG counters once said healthy while one screenshot named
 the bug.
 
-**JTAG, over the USB-Blaster** (`tools/jtag_peek.tcl`):
+**JTAG, over the USB-Blaster** (`tools/jtag_peek.tcl`) — **not in the current
+build.** The probes it talks to, the ROM checksum walker, the SDRAM bus meter
+and the on-screen panel were all instrumentation, and they are out of the
+synthesised net so a release does not carry them (PLAN.md 29). `rtl/` still has
+every module and `tools/` still has the Tcl; putting them back means
+re-instantiating `spi_jtag_peek` (plus whichever watch it is to read) and
+re-adding the file to `files.qip`. Expect the timing endpoint in `sdram.sv` to
+move when you do -- that is most of what these cost.
 
     quartus_stp -t tools/jtag_peek.tcl sums              # ROM checksums + download telemetry
     quartus_stp -t tools/jtag_peek.tcl dump <addr> <n>   # read SDRAM back, 8 bytes at a time
@@ -235,30 +242,14 @@ the bug.
     quartus_stp -t tools/jtag_peek.tcl vitals            # CPU counters, CS:EIP, layer state
     quartus_stp -t tools/jtag_peek.tcl freeze / mask / sweep / trace / rate / gdt / list
 
-`sums` reporting `ok bits 1111` means all four regions were read back on the
-board and matched. Note the expected sums in `spi_romcheck.sv` are **rdfts'**,
-so on `rdft`/`rdft2` the regions that genuinely differ are expected to report a
-mismatch — the sums themselves are still the useful number there. Re-derive
-them with `tools/build_sdram_image.py <zip> out.bin --sums` after any change to
-how a region is LAID OUT; a permutation that keeps every byte still moves a sum
-over 32-bit words, which is how the sprite interleave left a stale constant
-reporting a failure on a perfect download for a day.
-
-`make -C sim run-romcheck SDRAM=<image>` is the offline version of that check
-and needs no hardware: it feeds the checker the reference image, expects all
-four regions to pass, then flips one bit in each region in turn and expects
-exactly that region to fail. It is not in `make verify` because it needs a real
-ROM set.
-
-`dump` reads any address in the 64 MB map and compares
-directly against what `tools/build_sdram_image.py` produces, which is the same
-image the testbenches use — that is how a "wrong" checksum was traced to a
-stale constant in the checker rather than to bad data. Two caveats it earned
-the hard way: the loader never writes the Z80 window (the 386 fills it at
-boot, so the reference image holds `FF` there and a mismatch is expected), and
-a `dump` value that looks like *neighbouring* data used to be exactly that —
-`go` and the address share one ISSP source word and do not update together, so
-the Tcl now writes the address first and flips `go` on a second write.
+The offline half of all this needs no hardware and still works:
+`make -C sim run-romcheck SDRAM=<image>` feeds the checker the reference image,
+expects all four regions to pass, then flips one bit in each region in turn and
+expects exactly that region to fail. `tools/build_sdram_image.py <zip> out.bin
+--sums` re-derives the expected sums after any change to how a region is LAID
+OUT -- a permutation that keeps every byte still moves a sum over 32-bit words,
+which is how a stale constant reported a failure on a perfect download for a
+day.
 
 **Audio, through the capture card.** The MiSTer's HDMI audio arrives on the
 Elgato's *digital* input, and the default profile is the analog one, which
@@ -297,16 +288,16 @@ Keyboard: `1`/`2` start, `5`/`6` coin, `9` service coin, `F2` test.
 
 ## Debugging aids
 
-Two independent OSD options, both off by default:
+One OSD option, off by default:
 
 - **Freeze Button (Btn 3)** — Button 3 toggles a CPU freeze. The video engines
   keep running, so the frame stays on screen and can be studied or captured at
   leisure. This is the one to use for a rendering fault.
-- **Vital Signs Panel** — replaces the picture with a telemetry screen. It
-  *replaces* it, so do not expect to see the game with this on.
 
-They used to be the same option, which made the freeze useless for looking at
-the picture: enabling the button also hid the frame behind the panel.
+There used to be a second, **Vital Signs Panel**, which replaced the picture
+with a telemetry screen. The panel and the rest of the instrumentation are no
+longer built (PLAN.md 29). Its status bit, O[20], is left unassigned so an old
+saved `.CFG` cannot turn something else on by accident.
 
 Flip Screen (SW1:1) and Service Mode are on the OSD's DIP page. The bit order
 above is defined by the `<buttons names=...>` list in `mra/rdfts.mra`; the MRA

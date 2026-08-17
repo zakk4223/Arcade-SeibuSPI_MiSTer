@@ -8288,3 +8288,91 @@ session. That is the signature of a convergence point that is routing-limited
 rather than one bad path -- and the reason 28.3's flattening made it worse, and
 the reason the next attempt should be about where `command` is placed and how its
 inputs are gathered, not about which of them is "the" problem.
+
+## 29. Taking the instrumentation out of the net (2026-08-17)
+
+Everything built to answer a question is still in `rtl/`; none of it is
+instantiated any more, so none of it reaches the fabric. What went:
+
+| module | what it did |
+|---|---|
+| `spi_debug.sv` | the vital signs panel, drawn over the picture |
+| `spi_jtag_peek.sv` | the ISSP probes: ~70 counters, the SDRAM read port, the source register |
+| `spi_romcheck.sv` | the four region checksums, walked once at boot |
+| `spi_sdr_stats.sv` | the per-channel bus meter |
+
+and with them the per-module watches that fed the probes -- the sel_pcm watch in
+`spi_cpu`, the FIFO and flash watches in `spi_sound`, the sprite and layer
+counters, `sdram.sv`'s write watch, `spi_sdr_arb4`'s d-port watch, the
+sprite-DMA gap and stall latch, and the EIP profiler. Those live inside modules
+that ARE built, so they are disconnected at the instantiation rather than
+deleted: an output with no fanout takes its cone with it, and the source stays
+where the next investigation will look for it.
+
+**The freeze stays.** It is the one debug control that survives into a release:
+Button 3 with `O[21]` on, gated in `spi_top` as `cpu_en`, video engines still
+running. It used to be ORed with `dbg_ctrl[5]` from the JTAG source register;
+the button is the only path now.
+
+### 29.1 What it cost the design
+
+Three things had a real consequence rather than just disappearing.
+
+**`chk_done` was the board's release gate.** The sequence was
+`rom_ready -> derive -> derive_done -> romcheck -> chk_done -> board runs`, and
+`spi_top`'s `rom_ready` input was `rom_ready & chk_done`. It is now
+`rom_ready -> derive -> board runs`, with `derive_busy` in `wire reset` holding
+the board down for the derivation's third of a second exactly as before. The
+ch3 ownership mux lost its checker arm the same way.
+
+**The peek was one of four masters on `spi_sdr_arb4`.** Its `b` port is tied
+off rather than the arbiter narrowed to three, so nothing else has to move.
+
+**`O[20]` is unassigned, not reused.** A saved `.CFG` from an older build would
+otherwise turn on whatever took the bit.
+
+### 29.2 The number
+
+Synthesis, before and after, same tree otherwise:
+
+    registers   37,912  ->  30,745     (-7,167, -19%)
+
+The old build had `Total LABs: partially or completely used  4,142 / 4,191`,
+99%. Nineteen percent of the registers in this design were there to watch it.
+
+That is also the answer to 28.5's endpoint. `spi_flash_derive`, the DRIV probe
+and the config registers never appeared in the worst 25 -- but the fitter was
+placing this design into 99% of the LABs, which is where `ch*_rq -> command[1]`
+being routing-limited came from. 28.3 and the seed sweep were both trying to fix
+a placement problem by rewriting logic.
+
+### 29.3 Timing, which this fixes
+
+Three fits of the same tree, differing only in SEED:
+
+    seed 12   clk_ram +0.466   ascal -0.261 / TNS -3.101     fails
+    seed  4   clk_ram -0.003   ascal +0.433                  fails
+    seed  1   clk_ram +0.254   ascal +0.394                  PASSES
+
+Seed 1 is committed. Everything positive, TNS 0.000 on every clock, hold worst
++0.182, 0 critical warnings, and `output_files/SeibuSPI.rbf` is that placement
+-- `make fit` and `make sta` do not write the bitstream, `make asm` does (the
+same trap 18.x recorded).
+
+    setup worst  +0.254   sdram|ch2_rq -> sdram|command[1]
+    clk_ram      +0.254   clk_cpu  +2.026   clk_sys  +2.275   pll_hdmi +0.394
+
+**The endpoint is the same one, and it is comfortable now.** `ch*_rq ->
+command[1]` is still the worst path in the design; at +0.254 rather than -0.019
+it is no longer the thing standing between this and a release. 26.4's list of
+what to try next -- a registered gather per side of the die, `command`
+duplicated closer to the pins, constraining the SDRAM interface at all -- is
+still the right list if it ever comes back, and 28.3's flattening is still
+measured-worse and still not to be retried.
+
+`ascal` deserves the note it did not get before. It is `sys/ascal.vhd` on the
+HDMI clock, framework logic that nothing in this core is on, and it is a second
+marginal path in a second domain: it read -0.215 in 18.x, +0.153/+0.278/+0.307
+across other fits, and -0.261 at seed 12 here. A fit of this design closes two
+knife-edge paths at once, so "the compile succeeded" still says nothing and
+`make timing` still has to be run.

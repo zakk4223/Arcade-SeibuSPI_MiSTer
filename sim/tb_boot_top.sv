@@ -112,57 +112,8 @@ module tb_boot_top
 		// SXX2C jumpers, as SeibuSPI.sv sends them: NOT update mode, which
 		// would park the sound program in the reflash path forever.
 		.jumpers      (8'hFC),
-		.dbg_en       (1'b0),
-		// These grew on spi_top for the JTAG debug plumbing. Leaving them
-		// unconnected made Verilator drive dbg_mask with X, which ORs into the
-		// layer enables and blanked the whole frame in simulation.
-		.chk_ok       (4'hF),
-		.chk_done     (1'b1),
-		.dbg_mask     (8'd0),
-		.c_prg        (),
-		.c_iowr       (),
-		.c_dma_tm     (),
-		.c_dma_pal    (),
-		.c_vbl        (),
-		.why          (),
-		.eip          (),
-		.cs           (),
-		.irq          (),
-		.gdt          (),
-		.lay_ovr      (),
-		.lay_ovr_layer(),
-		.lay_text_col (),
-		.spr_scanned  (),
-		.spr_yhit     (),
-		.spr_emitted  (),
-		.spr_starved  (),
-		.spr_tiles    (),
-		.c_dma_spr    (),
-		.spr_codes_nz (),
-		.spr_ram_or   (),
-		.dma_src_spr  (),
-		.dma_text_dw  (),
-		.cpu_wr_spr   (),
-		.cpu_wr_tm    (),
-		.rs_out       (),
-		.fd13_out     (),
-		.tm_dwords_out(),
-		.scroll_out   (),
-		.lay_en_out   (),
-		.snd_pc       (p_snd_pc),
-		.snd_fifo_rd  (),
-		.snd_ymf_wr   (),
-		.snd_stall    (),
-		.ymf_overrun  (),
-		.ymf_active   (),
-		.snd_f2_wr    (),
-		.snd_f2_rd    (),
-		.snd_fifo_peak(),
-		.snd_full_max (),
-		.spr_gap_max  (),
-		.snd_wait_max (),
-		.stall_eip    (),
-		.stall_cs     (),
+		// The one debug control still in the core: the CPU freeze. Off here.
+		.freeze       (1'b0),
 
 		// Ports spi_top grew after this file was last touched. Leaving them
 		// off is not free: Verilator's -Wall makes PINMISSING an error, so the
@@ -187,25 +138,6 @@ module tb_boot_top
 		.flash_sdr_req (flash_sdr_req),
 		.flash_sdr_ack (flash_sdr_req),
 		.flash_dirty   (),
-
-		// The EIP profiler (PLAN.md 16.8), off: an empty window profiles
-		// nothing and costs nothing.
-		.prof_lo      (32'd0),
-		.prof_hi      (32'd0),
-		.prof_in      (),
-		.prof_total   (),
-
-		// Telemetry, all outputs: the sel_pcm watch, the sound FIFO watch and
-		// the flash counters.
-		.dbg_c_hits   (), .dbg_c_rom    (), .dbg_c_pair   (),
-		.dbg_c_addr   (), .dbg_c_hit    (),
-		.dbg_fw_pushes(), .dbg_fw_pops  (), .dbg_fw_fill  (),
-		.dbg_fw_empty (), .dbg_fw_din   (), .dbg_fw_frozen(),
-		.dbg_flash_w_progs   (), .dbg_flash_w_be      (),
-		.dbg_flash_w_data    (), .dbg_flash_w_erases  (),
-		.dbg_flash_w_er_after(), .dbg_flash_w_trace   (),
-		.dbg_flash_progs     (), .dbg_flash_erases    (),
-		.dbg_flash_drops     (), .dbg_flash_busy      (),
 
 		.sdr_prg_addr (sdr_prg_addr),
 		.sdr_prg_dout (sdr_prg_dout),
@@ -274,5 +206,10 @@ module tb_boot_top
 	assign p_dma_busy    = dut.dma_busy;
 	assign p_prg_outstanding = dut.sdr_prg_req ^ dut.sdr_prg_ack;
 	assign p_z80_rst_n       = dut.z80_rst_n;
+	// The Z80's last opcode fetch. It used to arrive on a spi_top port, with the
+	// rest of the telemetry the JTAG probe read; that plumbing is out of the
+	// synthesised net now (PLAN.md 29), so this reaches into spi_sound the same
+	// way every other probe in this file reaches into the DUT.
+	assign p_snd_pc          = dut.sound.dbg_z80_pc;
 
 endmodule

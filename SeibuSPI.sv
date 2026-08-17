@@ -203,7 +203,10 @@ localparam CONF_STR = {
 	"P1O[10],Orientation,Vert,Horz;",
 	"P1O[11],Rotation,CCW,CW;",
 	"-;",
-	"O[20],Vital Signs Panel,Off,On;",
+	// O[20] was the Vital Signs Panel. The panel and the rest of the telemetry
+	// are no longer in the synthesised net (PLAN.md 29); the bit is left unused
+	// rather than reassigned, so a saved .CFG from an older build cannot turn
+	// something else on by accident.
 	"O[21],Freeze Button (Btn 3),Off,On;",
 	// H1: hidden when status_menumask bit 1 is set, which is ~set_sxx2c. SXX2E
 	// has a mask ROM where the cartridge has a flash chip, so there is nothing
@@ -530,16 +533,15 @@ wire        sdr_refresh;
 // USE_CH5 was 0 while nothing read PCM samples; the YMF271 does now.
 sdram #(.USE_CH5(1)) sdram
 (
-	// The watch (PLAN.md 19.12).
-	.dbg_s_takes (dbg_sw_takes),  .dbg_s_writes(dbg_sw_writes),
-	.dbg_s_same  (dbg_sw_same),
-	.dbg_s_wbank (dbg_sw_wbank),  .dbg_s_wchip (dbg_sw_wchip),
-	.dbg_s_e0_dq (dbg_sw_e0_dq),  .dbg_s_e0_dqm(dbg_sw_e0_dqm),
-	.dbg_s_e0_gap(dbg_sw_e0_gap), .dbg_s_e0_ab (dbg_sw_e0_ab),
-	.dbg_s_e0_ac (dbg_sw_e0_ac),  .dbg_s_e0_after(dbg_sw_e0_after),
-	.dbg_s_e1_dq (dbg_sw_e1_dq),  .dbg_s_e1_dqm(dbg_sw_e1_dqm),
-	.dbg_s_e1_gap(dbg_sw_e1_gap), .dbg_s_e1_ab (dbg_sw_e1_ab),
-	.dbg_s_e1_ac (dbg_sw_e1_ac),  .dbg_s_e1_after(dbg_sw_e1_after),
+	// The watch (PLAN.md 19.12), left unconnected: its counters have no fanout
+	// now, so synthesis drops them. That matters more here than anywhere else
+	// -- clk_ram's worst path is inside this module.
+	.dbg_s_takes (),  .dbg_s_writes(),  .dbg_s_same  (),
+	.dbg_s_wbank (),  .dbg_s_wchip (),
+	.dbg_s_e0_dq (),  .dbg_s_e0_dqm(),  .dbg_s_e0_gap(),
+	.dbg_s_e0_ab (),  .dbg_s_e0_ac (),  .dbg_s_e0_after(),
+	.dbg_s_e1_dq (),  .dbg_s_e1_dqm(),  .dbg_s_e1_gap(),
+	.dbg_s_e1_ab (),  .dbg_s_e1_ac (),  .dbg_s_e1_after(),
 	.init      (~pll_locked),
 	.clk       (clk_ram),
 	.doRefresh (sdr_refresh),
@@ -564,58 +566,28 @@ sdram #(.USE_CH5(1)) sdram
 	.ch5_req (ch5_req),      .ch5_ack (ch5_ack)
 );
 
-// How busy that bus actually is. Taps the handshakes only -- nothing here
-// touches sdram.sv, whose clk_ram paths PLAN.md 15.8 says to leave alone.
-wire [94:0] sdr_trans;
-
-spi_sdr_stats sdr_stats
-(
-	.clk   (clk_ram),
-	.ack   ({sdr_pcm_ack, sdr_spr_ack, sdr_rw_ack, sdr_gfx_ack, sdr_prg_ack}),
-	.trans (sdr_trans)
-);
+// The SDRAM traffic meter (spi_sdr_stats) used to tap the handshakes here and
+// feed the JTAG probe. It went with the rest of the instrumentation; the module
+// is still in rtl/. PLAN.md 29.
 
 /////////////////////////  ROM LOADER  ///////////////////////////
 
 wire        rom_ready;
 
 wire [25:0] ldr_addr;
-wire [25:0] ldr_bytes;
-wire [25:0] ldr_bytes_out;
-wire [15:0] v_prg, v_iowr, v_tm, v_pal, v_vbl;
-wire  [3:0] v_why;
-wire [31:0] v_eip;
-wire [15:0] v_cs;
-wire        v_irq;
-wire [191:0] v_gdt;
-wire   [7:0] dbg_ctrl;
-
 // ---------------------------------------------------------------------------
-// Freeze the CPU from a controller button -- a debugging aid, NOT a game
-// control, so it is gated on the Vital Signs Panel option being on.
+// Freeze the CPU from a controller button. It stays in the release build: the
+// video engines keep running (only spi_cpu's cpu_en is gated), so a frozen
+// frame stays on screen.
 //
-// Every attempt to catch a particular attract scene by timing a JTAG freeze
-// went wrong: quartus_stp needs about five seconds just to claim the chain, and
-// the ROM download shifts the whole attract sequence by seconds between runs.
-// Several measurements taken that way landed on a completely different scene
-// and were reported as faults that did not exist. A button is a zero-latency
-// trigger that a human can aim by eye, which is the one thing this debugging
-// actually needed.
+// It used to fire on ANY button of either pad, which made the game unplayable
+// the moment anyone pressed shot. It needs an option enabled, and only button 3
+// triggers it.
 //
-// It used to fire on ANY button of either pad, which made the game
-// unplayable the moment anyone pressed shot. It needs an option enabled, and
-// only button 3 triggers it.
-//
-// The video engines keep running (only spi_cpu's cpu_en is gated), so a frozen
-// frame stays on screen and can be instrumented over JTAG at leisure.
-//
-// This has its OWN option, separate from the Vital Signs Panel. It used to be
-// gated on the panel option, which made it useless for the one job it exists
-// for: spi_top drives the output as `panel ? dbg_r : mix_r`, so turning the
-// panel on REPLACES the picture with the telemetry screen. Freezing a frame to
-// look at a rendering fault meant enabling the very thing that hid the frame.
-// The two are independent now -- freeze alone to study the picture, or both
-// together to read the counters with the CPU stopped.
+// The option is its own, separate from the vital signs panel it was once gated
+// on -- that was useless for the job this exists for, since turning the panel
+// on REPLACED the picture with the telemetry screen. The panel is gone now and
+// this is the only debug control left in the net.
 // ---------------------------------------------------------------------------
 wire dbg_freeze_en = status[21];
 wire any_btn   = dbg_freeze_en & (joystick_p1[6] | joystick_p2[6]);
@@ -626,35 +598,10 @@ always @(posedge clk_sys) begin
 	if (!dbg_freeze_en) freeze_tgl <= 1'b0;
 end
 
-// The JTAG freeze bit and the button are ORed, so either can stop the core and
-// tools/jtag_server.tcl still works exactly as before.
-wire [7:0] dbg_mask_eff = {dbg_ctrl[7:6], dbg_ctrl[5] | freeze_tgl, dbg_ctrl[4:0]};
-wire  [15:0] v_ovr;
-wire   [1:0] v_ovrl;
-wire   [5:0] v_tcol;
-wire  [15:0] v_ss, v_sy, v_se;
-wire   [4:0] v_len;
-wire  [11:0] v_tdw;
-wire  [15:0] v_sstv, v_stil;
-wire  [15:0] v_dspr, v_nz;
-wire  [31:0] v_sor;
-wire         v_rs, v_fd13;
-wire  [12:0] v_tmdw;
-wire  [95:0] v_scr;
-wire  [17:2] v_ssrc;
-wire  [15:0] v_wspr, v_wtm;
-wire [15:0] v_spc, v_sfr, v_syw, v_sst, v_yov, v_yac;
-wire [15:0] v_f2w, v_f2r;
-wire  [8:0] v_fpk;
-wire [15:0] v_fmx;
-wire [15:0] v_gap;
-wire [15:0] v_wmx;
-wire [31:0] v_seip;
-wire [15:0] v_scs;
-// EIP profiler: window down from the host, two free-running counters back up.
-wire [31:0] v_plo, v_phi;
-wire [39:0] v_pin, v_ptot;
-wire  [4:0] ldr_part_end;
+// The JTAG source register used to OR into this; with spi_jtag_peek out of the
+// net the button is the only way to freeze.
+wire freeze = freeze_tgl;
+
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
 wire        ldr_req, ldr_rnw;
@@ -711,189 +658,50 @@ rom_loader rom_loader
 	.sdr_ack        (sdr_rw_ack),
 
 	.rom_ready      (rom_ready),
-	.bytes_in       (ldr_bytes),
-	// Wired now, for the reason this comment used to predict: rdft2 is the
-	// first set with a decoded part to reach hardware, and bytes_in alone
-	// cannot tell a stalled decoder from a working one.
-	.bytes_out      (ldr_bytes_out),
-	.part_end       (ldr_part_end)
+	// The byte counters and the part-end marker were read over JTAG; nothing
+	// consumes them now.
+	.bytes_in       (),
+	.bytes_out      (),
+	.part_end       ()
 );
 
-// Channel 3 belongs to the loader while downloading, then to the ROM checker,
-// and to the board after that.
-// TODO(T5): drive the "after" side from the Z80 program fetcher.
-wire [25:0] chk_addr, peek_addr;
-wire        chk_req, chk_done, peek_req, peek_ack;
-wire  [3:0] chk_ok;
-wire [15:0] chk_passes, chk_fails;
-wire [31:0] chk_sum_prg, chk_sum_chars, chk_sum_tiles, chk_sum_sprites;
+// Channel 3 belongs to the loader while downloading, and to the board after
+// that.
+//
+// The spi_romcheck walker and the spi_jtag_peek host-read port used to sit
+// between those two, and both are out of the net now (PLAN.md 29). What went
+// with them:
+//
+//   * the four region checksums and the `ok` bits, which were only ever read
+//     by the panel and over JTAG;
+//   * `chk_done` as the board's release gate -- `rom_ready & derive_done` is
+//     that gate now, and the sequence is rom_ready -> derive -> board;
+//   * one of the four masters on the ch3 arbiter, whose b port is tied off
+//     below.
+//
+// The two of them also carried a reset each for the nvram load and the
+// derivation (21.3): both were ch3 masters outside the board's reset domain,
+// so a walk or a peek in flight took the writer's acks. Neither exists to be
+// confused now.
 
-// HELD IN RESET FOR THE NVRAM LOAD, and this is not optional. ch3 is a TOGGLE
-// handshake, and the mux below hands it to nv_wr_active in front of everyone
-// -- which is exactly what spi_sdr_arb4.sv's header says must never be done to
-// a toggle handshake, because a master whose req is muxed out still sees the
-// shared `sdr_rw_ack` toggling for somebody else's transactions and takes them
-// for its own.
-//
-// That is what happened. `wire reset` above includes nv_wr_active so the BOARD
-// is down for the save load, and the comment there says "nothing else is
-// asking" -- but this checker is on RESET, not on that wire, so it kept
-// walking. Its reads never reached SDRAM (nv_wr_req won the mux) while the
-// 2 MB of save writes acked its requests for it, so it summed a static
-// sdr_rw_dout, tore through PRG, CHARS and TILES at write speed, and latched
-// `done` on garbage. On hardware that read as three ZERO sums, a wrong
-// SPRITES, `ok bits 0000`, and a pass count that varied with placement.
-//
-// It only ever showed on the authentic-flash sets, because they are the only
-// ones with a save to load: pre-flashed rdft on the same build reports all
-// four sums and `ok bits 1110`, the single mismatch being its own program ROM
-// against rdfts' constant. That comparison is what identified this.
-//
-// Resetting rather than gating `start`: start is rom_ready, which is already
-// high when the nvram arrives (Main sends <nvram> after the image), so gating
-// it would not restart a walk that had already begun and been corrupted.
-spi_romcheck romcheck
-(
-	.clk      (clk_ram),
-	// derive_busy joins nv_wr_active for the same reason: it owns ch3, and a
-	// checker still walking would take its acks. `start` waits on derive_done
-	// as well, so the check runs over the image the derivation has FINISHED
-	// writing rather than one it is halfway through.
-	.reset    (RESET | ~pll_locked | nv_wr_active | derive_busy),
-	.start    (rom_ready & derive_done),
-	.sdr_addr (chk_addr),
-	.sdr_dout (sdr_rw_dout),
-	.sdr_req  (chk_req),
-	.sdr_ack  (sdr_rw_ack),
-	.done     (chk_done),
-	.ok       (chk_ok),
-	.passes   (chk_passes),
-	.fails    (chk_fails),
-	.sum_prg     (chk_sum_prg),
-	.sum_chars   (chk_sum_chars),
-	.sum_tiles   (chk_sum_tiles),
-	.sum_sprites (chk_sum_sprites)
-);
-
-// Host-driven SDRAM reads over JTAG; see tools/jtag_peek.tcl.
-//
-// Held in reset for the nvram load for the same reason the checker above is:
-// it is the other ch3 master outside the board's reset domain, so a peek issued
-// during a save load would be handed the nvram writer's acks and return a value
-// it never read. Rarer -- it needs a human peeking inside a 2 MB window -- and
-// the same one-line fix. This reset clears only the handshake registers; the
-// panel fields are inputs wired straight to the ISSP probes, so nothing the
-// instrument reports is lost.
-spi_jtag_peek peek
-(
-	.clk      (clk_ram),
-	.reset    (RESET | ~pll_locked | nv_wr_active | derive_busy),
-	.enable   (chk_done),
-	.sdr_addr (peek_addr),
-	.sdr_dout (peek_dout),
-	.sdr_req  (peek_req),
-	.sdr_ack  (peek_ack),
-	.sum_prg     (chk_sum_prg),
-	.sum_chars   (chk_sum_chars),
-	.sum_tiles   (chk_sum_tiles),
-	.sum_sprites (chk_sum_sprites),
-	.ok       (chk_ok),
-	.passes   (chk_passes),
-	.fails    (chk_fails),
-	.bytes_in (ldr_bytes),
-	.bytes_out(ldr_bytes_out),
-	.part_end (ldr_part_end),
-	.c_prg(v_prg), .c_iowr(v_iowr), .c_dma_tm(v_tm),
-	.c_dma_pal(v_pal), .c_vbl(v_vbl), .why(v_why),
-	.eip(v_eip), .cs(v_cs), .irq(v_irq), .gdt(v_gdt),
-	.lay_ovr(v_ovr), .lay_ovr_layer(v_ovrl), .lay_text_col(v_tcol),
-	.spr_scanned(v_ss), .spr_yhit(v_sy), .spr_emitted(v_se), .lay_en(v_len),
-	.dma_text_dw(v_tdw), .spr_starved(v_sstv), .spr_tiles(v_stil),
-	.c_dma_spr(v_dspr), .spr_codes_nz(v_nz), .spr_ram_or(v_sor), .dma_src_spr(v_ssrc),
-	.cpu_wr_spr(v_wspr), .cpu_wr_tm(v_wtm),
-	.frozen(dbg_mask_eff[5]),
-	.rs_en(v_rs), .fd13(v_fd13), .tm_dwords(v_tmdw), .scrolls(v_scr),
-	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
-	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
-	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
-	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
-	.drv_cfg_job  (cfg_job_r),     .drv_cfg_gen  (cfg_gen_r),
-	.drv_en       (derive_en),     .drv_done     (drv_done),
-	.drv_overrun  (drv_overrun),   .drv_badjob   (drv_badjob),
-	.drv_jobs     (drv_jobs),      .drv_bytes    (drv_bytes),
-	.drv_state    (drv_dbg_state),
-	.flash_progs(dbg_flash_progs), .flash_erases(dbg_flash_erases),
-	.flash_drops(dbg_flash_drops), .flash_busy(dbg_flash_busy),
-	.nv_bytes(dbg_nv_bytes), .nv_saves(dbg_nv_saves), .nv_beats(dbg_nv_beats),
-	.fw_progs(dbg_flash_w_progs), .fw_be(dbg_flash_w_be),
-	.fw_data(dbg_flash_w_data),   .fw_erases(dbg_flash_w_erases),
-	.fw_er_after(dbg_flash_w_er_after), .fw_trace(dbg_flash_w_trace),
-	.aw_n(dbg_arb_w_n), .aw_be(dbg_arb_w_be), .aw_data(dbg_arb_w_data),
-	.aw_total(dbg_arb_d_total),
-	.cw_hits(dbg_c_hits), .cw_rom(dbg_c_rom), .cw_pair(dbg_c_pair),
-	.cw_addr(dbg_c_addr), .cw_hit(dbg_c_hit),
-	.fw_pushes(dbg_fw_pushes), .fw_pops(dbg_fw_pops), .fw_fill(dbg_fw_fill), .fw_empty(dbg_fw_empty),
-	.fw_din(dbg_fw_din), .fw_frozen(dbg_fw_frozen),
-	.sw_takes(dbg_sw_takes), .sw_writes(dbg_sw_writes), .sw_same(dbg_sw_same),
-	.sw_wbank(dbg_sw_wbank), .sw_wchip(dbg_sw_wchip),
-	.sw_e0_dq(dbg_sw_e0_dq), .sw_e0_dqm(dbg_sw_e0_dqm), .sw_e0_gap(dbg_sw_e0_gap),
-	.sw_e0_ab(dbg_sw_e0_ab), .sw_e0_ac(dbg_sw_e0_ac), .sw_e0_after(dbg_sw_e0_after),
-	.sw_e1_dq(dbg_sw_e1_dq), .sw_e1_dqm(dbg_sw_e1_dqm), .sw_e1_gap(dbg_sw_e1_gap),
-	.sw_e1_ab(dbg_sw_e1_ab), .sw_e1_ac(dbg_sw_e1_ac), .sw_e1_after(dbg_sw_e1_after),
-	.sdr_trans(sdr_trans),
-	.ctrl(dbg_ctrl),
-	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
-);
-
-// Loader owns channel 3 during the download, the checker until it is done,
-// and after that the Z80 and the JTAG peek share it through an arbiter. The
-// Z80 is served first: it stalls a running CPU, while the peek is a human.
+// Loader owns channel 3 during the download; after that the board's masters
+// share it through an arbiter.
 wire [25:0] arb_addr;
 wire        arb_req, arb_ack;
 wire [25:0] z80dl_sdr_addr;
 wire [15:0] z80dl_sdr_din;
 wire  [1:0] z80dl_sdr_be;
 wire        z80dl_sdr_req, z80dl_sdr_ack;
-wire [31:0] dbg_flash_progs;
-wire [15:0] dbg_flash_erases, dbg_flash_drops;
-wire  [1:0] dbg_flash_busy;
-// The watch (PLAN.md 19.11): one halfword of the sample flash, from both ends
-// of the clk_sys -> clk_ram handoff.
-wire  [7:0] dbg_flash_w_progs, dbg_flash_w_data, dbg_flash_w_erases;
-wire  [1:0] dbg_flash_w_be;
-wire        dbg_flash_w_er_after;
-wire [55:0] dbg_flash_w_trace;
-wire  [7:0] dbg_c_hits;
-wire [63:0] dbg_c_rom;
-wire [15:0] dbg_c_pair;
-wire [25:0] dbg_c_addr;
-wire        dbg_c_hit;
-wire [31:0] dbg_fw_pushes, dbg_fw_pops;
-wire  [8:0] dbg_fw_fill;
-wire [15:0] dbg_fw_empty;
-wire  [7:0] dbg_fw_din;
-wire        dbg_fw_frozen;
-wire  [7:0] dbg_sw_takes, dbg_sw_writes, dbg_sw_same;
-wire  [1:0] dbg_sw_wbank, dbg_sw_e0_dqm, dbg_sw_e0_ab, dbg_sw_e1_dqm, dbg_sw_e1_ab;
-wire        dbg_sw_wchip, dbg_sw_e0_ac, dbg_sw_e1_ac;
-wire [15:0] dbg_sw_e0_dq, dbg_sw_e1_dq;
-wire  [3:0] dbg_sw_e0_gap, dbg_sw_e1_gap;
-wire [14:0] dbg_sw_e0_after, dbg_sw_e1_after;
-wire  [7:0] dbg_arb_w_n, dbg_arb_w_data;
-wire  [1:0] dbg_arb_w_be;
-wire [25:0] dbg_arb_d_total;
 wire [25:0] flash_sdr_addr;
 wire [15:0] flash_sdr_din;
 wire  [1:0] flash_sdr_be;
 wire        flash_sdr_req, flash_sdr_ack;
-wire [63:0] sdr_z80_dout, peek_dout;
+wire [63:0] sdr_z80_dout;
 
-// Four masters on ch3 once the ROM check is done: the Z80 fetch, the JTAG
-// peek, the 386 writing the Z80's program into RAM on SXX2C, and the sample
-// flash programming ITSELF on an authentic-flash MRA. The arbiter serialises
-// whole round trips, so the channel's toggle handshake is never handed to the
-// wrong master. See rtl/spi_sdr_arb4.sv.
-//
+// Three masters on ch3 once the download is done: the Z80 fetch, the 386
+// writing the Z80's program into RAM on SXX2C, and the sample flash
+// programming ITSELF on an authentic-flash MRA. The b port was the JTAG
+// peek's and is tied off; the arbiter keeps four so nothing else has to move.
 // The flash writes the SAMPLE region, which ch5 reads. It is on this channel
 // because ch3 is the only one sdram.sv gives a write path, not because the
 // address has anything to do with the Z80.
@@ -905,7 +713,7 @@ spi_sdr_arb4 ch3_arb
 (
 	.clk    (clk_ram),
 	.a_addr (sdr_z80_addr), .a_req (sdr_z80_req), .a_ack (sdr_z80_ack),
-	.b_addr (peek_addr),    .b_req (peek_req),    .b_ack (peek_ack),
+	.b_addr (26'd0),        .b_req (1'b0),        .b_ack (),
 	.c_addr (z80dl_sdr_addr), .c_din (z80dl_sdr_din), .c_be (z80dl_sdr_be),
 	.c_req  (z80dl_sdr_req),  .c_ack (z80dl_sdr_ack),
 	.d_addr (flash_sdr_addr), .d_din (flash_sdr_din), .d_be (flash_sdr_be),
@@ -913,11 +721,12 @@ spi_sdr_arb4 ch3_arb
 	.m_addr (arb_addr),     .m_req (arb_req),     .m_ack (arb_ack),
 	.m_din  (arb_din),      .m_be  (arb_be),      .m_rnw (arb_rnw),
 	.m_dout (sdr_rw_dout),
-	.a_dout (sdr_z80_dout), .b_dout (peek_dout),
-	.dbg_d_watch_n    (dbg_arb_w_n),
-	.dbg_d_watch_be   (dbg_arb_w_be),
-	.dbg_d_watch_data (dbg_arb_w_data),
-	.dbg_d_total      (dbg_arb_d_total)
+	.a_dout (sdr_z80_dout), .b_dout (),
+	// The d-port write watch (PLAN.md 19.13): no fanout, so it is dropped.
+	.dbg_d_watch_n    (),
+	.dbg_d_watch_be   (),
+	.dbg_d_watch_data (),
+	.dbg_d_total      ()
 );
 
 // ---------------------------------------------------------------------------
@@ -930,11 +739,10 @@ spi_sdr_arb4 ch3_arb
 //
 // It runs BETWEEN the download and the ROM check, so the sequence is
 //
-//     rom_ready -> derive -> derive_done -> romcheck -> chk_done -> board runs
+//     rom_ready -> derive -> board runs
 //
 // and every other ch3 master is provably idle for its window: the loader has
-// finished (rom_ready), the checker has not started (its `start` waits on
-// derive_done), the peek and the board are held in reset below. That is what
+// finished (rom_ready), and the board is held in reset below. That is what
 // makes the priority mux safe here rather than a repeat of 21.3 -- the claim
 // "nothing else is asking" is ENFORCED, which is exactly what it was not when
 // the nvram load made the same claim.
@@ -963,9 +771,6 @@ wire [25:0] drv_addr;
 wire [15:0] drv_din;
 wire  [1:0] drv_be;
 wire        drv_req, drv_rnw, drv_done, drv_overrun, drv_badjob;
-wire [21:0] drv_bytes;
-wire  [7:0] drv_jobs;
-wire  [3:0] drv_dbg_state;
 
 // One shot per download. Toggling the OSD option afterwards does not re-run it
 // -- the sources are still resident, but a half-written flash would be worse
@@ -976,9 +781,16 @@ always @(posedge clk_ram) begin
 	if (RESET | ~pll_locked | ~rom_ready) derive_started <= 1'b0;
 	else if (rom_ready)                   derive_started <= 1'b1;
 end
-// Done means "the checker may start": either it finished, or it failed, or it
+// Done means "the board may start": either it finished, or it failed, or it
 // was never going to run. A failure leaves the flash blank, which is safe --
 // the stamp is written last, so the game just runs its own updater.
+//
+// This is what spi_top's rom_ready is gated on, where it used to be gated on
+// the ROM checker's `chk_done`. `derive_busy` in `wire reset` above is NOT
+// enough on its own: it is qualified by `derive_started`, which is a register,
+// so it rises one clk_ram cycle after rom_ready and leaves the board out of
+// reset for that cycle. derive_done is low from the moment rom_ready is high,
+// with no such hole.
 wire derive_done = ~derive_en | drv_done | drv_overrun | drv_badjob;
 
 spi_flash_derive derive
@@ -1008,16 +820,16 @@ spi_flash_derive derive
 	.sdr_dout     (sdr_rw_dout),
 
 	.done         (drv_done),
-	.bytes_out    (drv_bytes),
-	.jobs_done    (drv_jobs),
+	.bytes_out    (),
+	.jobs_done    (),
 	.err_overrun  (drv_overrun),
 	.err_badjob   (drv_badjob),
-	.dbg_state    (drv_dbg_state), .dbg_esi (), .dbg_src (),
+	.dbg_state    (), .dbg_esi (), .dbg_src (),
 	.dbg_len      (), .dbg_mode(), .dbg_dec ()
 );
 
-// ch3's owners in order of life: the ROM loader, the derivation, the checker,
-// then the board's arbiter -- and, cutting in front of all of them, the nvram
+// ch3's owners in order of life: the ROM loader, the derivation, then the
+// board's arbiter -- and, cutting in front of all of them, the nvram
 // load. That one arrives AFTER the image (Main sends <nvram> in file order) so
 // it cannot use the loader's slot. Every arm here holds every other master in
 // reset for its window; see the note above, and 21.3 for what happens when one
@@ -1025,22 +837,19 @@ spi_flash_derive derive
 assign arb_ack     = sdr_rw_ack;
 assign sdr_rw_addr = nv_wr_active ? nv_wr_addr
                    : derive_busy  ? drv_addr
-                   : chk_done     ? arb_addr
-                   : rom_ready    ? chk_addr : ldr_addr;
+                   : rom_ready    ? arb_addr : ldr_addr;
 assign sdr_rw_din  = nv_wr_active ? nv_wr_din
                    : derive_busy  ? drv_din
-                   : chk_done     ? arb_din  : ldr_din;
+                   : rom_ready    ? arb_din  : ldr_din;
 assign sdr_rw_be   = nv_wr_active ? nv_wr_be
                    : derive_busy  ? drv_be
-                   : chk_done     ? arb_be   : ldr_be;
+                   : rom_ready    ? arb_be   : ldr_be;
 assign sdr_rw_req  = nv_wr_active ? nv_wr_req
                    : derive_busy  ? drv_req
-                   : chk_done     ? arb_req
-                   : rom_ready    ? chk_req  : ldr_req;
+                   : rom_ready    ? arb_req  : ldr_req;
 assign sdr_rw_rnw  = nv_wr_active ? 1'b0
                    : derive_busy  ? drv_rnw
-                   : chk_done     ? arb_rnw
-                   : rom_ready    ? 1'b1     : ldr_rnw;
+                   : rom_ready    ? arb_rnw  : ldr_rnw;
 
 // ch5 has two readers once there is a save file: the YMF271's sample fetch and
 // spi_nvram reading the region back. The YMF wins ties -- it is feeding a
@@ -1065,9 +874,6 @@ wire [15:0] nv_wr_din;
 wire  [1:0] nv_wr_be;
 wire        nv_wr_req, nv_wr_active, nv_rd_req, nv_rd_ack;
 wire [63:0] nv_rd_dout;
-wire [15:0] dbg_nv_saves;
-wire [25:0] dbg_nv_beats;
-wire [25:0] dbg_nv_bytes;
 
 spi_nvram nvram
 (
@@ -1111,9 +917,9 @@ spi_nvram nvram
 	.rd_ack     (nv_rd_ack),
 	.rd_dout    (nv_rd_dout),
 
-	.dbg_saves  (dbg_nv_saves),
-	.dbg_beats  (dbg_nv_beats),
-	.dbg_bytes  (dbg_nv_bytes)
+	.dbg_saves  (),
+	.dbg_beats  (),
+	.dbg_bytes  ()
 );
 
 // Refresh aggressively while the board is idle; the controller also has its own
@@ -1196,7 +1002,7 @@ spi_top spi_top
 	.clk_cpu      (clk_cpu),
 	.clk_ram      (clk_ram),
 	.reset        (reset),
-	.rom_ready    (rom_ready & chk_done),
+	.rom_ready    (rom_ready & derive_done),
 
 	.set_sxx2c      (set_sxx2c),
 	.set_id         (set_id),
@@ -1228,21 +1034,6 @@ spi_top spi_top
 	.flash_sdr_be   (flash_sdr_be),
 	.flash_sdr_req  (flash_sdr_req),
 	.flash_sdr_ack  (flash_sdr_ack),
-	.dbg_flash_w_progs    (dbg_flash_w_progs),
-	.dbg_flash_w_be       (dbg_flash_w_be),
-	.dbg_flash_w_data     (dbg_flash_w_data),
-	.dbg_flash_w_erases   (dbg_flash_w_erases),
-	.dbg_flash_w_er_after (dbg_flash_w_er_after),
-	.dbg_flash_w_trace    (dbg_flash_w_trace),
-	.dbg_c_hits(dbg_c_hits), .dbg_c_rom(dbg_c_rom), .dbg_c_pair(dbg_c_pair),
-	.dbg_c_addr(dbg_c_addr), .dbg_c_hit(dbg_c_hit),
-	.dbg_fw_pushes(dbg_fw_pushes), .dbg_fw_pops(dbg_fw_pops), .dbg_fw_fill(dbg_fw_fill),
-	.dbg_fw_empty(dbg_fw_empty), .dbg_fw_din(dbg_fw_din),
-	.dbg_fw_frozen(dbg_fw_frozen),
-	.dbg_flash_progs  (dbg_flash_progs),
-	.dbg_flash_erases (dbg_flash_erases),
-	.dbg_flash_drops  (dbg_flash_drops),
-	.dbg_flash_busy   (dbg_flash_busy),
 
 	.z80dl_sdr_addr (z80dl_sdr_addr),
 	.z80dl_sdr_din  (z80dl_sdr_din),
@@ -1250,24 +1041,7 @@ spi_top spi_top
 	.z80dl_sdr_req  (z80dl_sdr_req),
 	.z80dl_sdr_ack  (z80dl_sdr_ack),
 
-	.dbg_en       (status[20]),
-	.chk_ok       (chk_ok),
-	.chk_done     (chk_done),
-	.dbg_mask     (dbg_mask_eff),
-	.c_prg(v_prg), .c_iowr(v_iowr), .c_dma_tm(v_tm),
-	.c_dma_pal(v_pal), .c_vbl(v_vbl), .why(v_why),
-	.eip(v_eip), .cs(v_cs), .irq(v_irq), .gdt(v_gdt),
-	.lay_ovr(v_ovr), .lay_ovr_layer(v_ovrl), .lay_text_col(v_tcol),
-	.spr_scanned(v_ss), .spr_yhit(v_sy), .spr_emitted(v_se), .lay_en_out(v_len),
-	.c_dma_spr(v_dspr), .spr_codes_nz(v_nz), .spr_ram_or(v_sor), .dma_src_spr(v_ssrc),
-	.cpu_wr_spr(v_wspr), .cpu_wr_tm(v_wtm),
-	.dma_text_dw(v_tdw), .spr_starved(v_sstv), .spr_tiles(v_stil),
-	.rs_out(v_rs), .fd13_out(v_fd13), .tm_dwords_out(v_tmdw), .scroll_out(v_scr),
-	.snd_pc(v_spc), .snd_fifo_rd(v_sfr), .snd_ymf_wr(v_syw),
-	.snd_stall(v_sst), .ymf_overrun(v_yov), .ymf_active(v_yac),
-	.snd_f2_wr(v_f2w), .snd_f2_rd(v_f2r),
-	.snd_fifo_peak(v_fpk), .snd_full_max(v_fmx), .spr_gap_max(v_gap), .snd_wait_max(v_wmx), .stall_eip(v_seip), .stall_cs(v_scs),
-	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot),
+	.freeze       (freeze),
 
 	.sdr_prg_addr (sdr_prg_addr),
 	.sdr_prg_dout (sdr_prg_dout),

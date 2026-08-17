@@ -22,45 +22,46 @@ Five of six steps are committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26.
 | integrated behind the OSD option | done, derivation verified on hardware |
 | MRAs collapsed to seven, Pre-built default | done |
 
-## THE ONE THING BLOCKING A RELEASE
+## The release blocker, and what moved it
 
-**No fit meets timing.** The best is **-0.019 ns, TNS -0.019** -- ONE endpoint,
-19 picoseconds, `sdram|state.STATE_RW1 -> sdram|command[1]`. That is the tree as
-committed (arbitration hoist reverted, esi compare registered), and **none of the
-derivation, its telemetry or the config registers appear in the worst 25**. The
-failing endpoint is sdram.sv's own, every time, though which signal reaches
-`command[1]` moves between fits (`ch1_rq`, `ch4_rq`, `ch5_rq`, `state.STATE_RW1`).
+**The instrumentation is out of the net** (`PLAN.md` 29). `spi_debug`,
+`spi_jtag_peek`, `spi_romcheck` and `spi_sdr_stats` are no longer instantiated,
+and every per-module watch that fed them is disconnected at its instantiation.
+The modules are all still in `rtl/`; nothing of theirs reaches the fabric.
 
-Read `PLAN.md` 26.4 and 28.3 before touching this. The short version:
+    registers  37,912 -> 32,273        ALMs  86% -> 81%      LABs  99% -> 97%
 
-* The endpoint is **pre-existing**. 19.16 recorded the then-shipping build at
-  **+0.018 ns** on its sibling path. The design has been balanced on this
-  endpoint the whole time and a fit passing it is close to a coin flip.
-* It is **routing dominated, not logic dominated**. Flattening the priority
-  cascade into a five-input OR was tried, was correct (the round-trip test
-  passed), and made it WORSE -- -0.020 to -0.522 -- because it forces five
-  signals that live near their own channel logic to converge at one gate in one
-  level. That is recorded in `sdram.sv` as tried-and-rejected. Do not repeat it.
-* A seed sweep was tried: 12 -> -0.256, 13 -> -0.061, 14 -> -0.239,
-  15 -> -0.099. Seeds move it without resolving it. Do not repeat that either.
-  (Those were measured with the 136-bit DRIV probe, before it was trimmed to 72;
-  a sweep on the current tree might land differently, but 19 ps of margin is not
-  worth six fits to chase and it would not be a fix.)
+**That closed the endpoint 26.4 and 28.3 were chasing.** Nineteen percent of
+the registers in this design were there to watch it, and the fitter had been
+placing it into 99% of the LABs. The convergence point was routing-limited
+because of THAT, which is why flattening the cascade (28.3) and the seed sweep
+both failed: both were rewriting logic to fix a placement problem.
 
-What has NOT been tried, in the order I would try it:
+**TIMING MEETS, with margin, at SEED 1.** Everything positive, TNS 0.000 on
+every clock, 0 critical warnings, and the RBF in `output_files/` is that
+placement (`make asm` after a refit -- a refit alone does not write it):
 
-1. **Give the rq flags a registered gather per side of the die.** The problem is
-   five sources converging; two levels of registered OR placed near their
-   sources would cost one cycle of arbitration latency. Check sprite starvation
-   after (PLAN.md's rfjet margin is 1-2 lines a frame, so this is not free).
-2. **Register `command` closer to the pins**, or duplicate it per side, so the
-   long routes end at a flop rather than at the shared encoder.
-3. **Constrain the SDRAM interface.** 19.16 notes it is unconstrained, "exactly
-   as it is in the Irem and IGS cores, so nothing checks it either way". Some of
-   this may be the analyser being pessimistic about paths nobody has told it
-   about.
+    setup worst  +0.254   sdram|ch2_rq -> sdram|command[1]
+    clk_ram      +0.254   clk_cpu  +2.026   clk_sys  +2.275   pll_hdmi +0.394
+    hold worst   +0.182
 
-The safety net for all of it now exists and passes -- see below.
+The endpoint 19.16 first flagged and 26.4/28.3 chased is the worst path still,
+but at +0.254 rather than -0.019.
+
+DO NOT re-apply 28.3's flattening on this basis. It was measured WORSE on its
+own terms (-0.020 -> -0.522) and the note in `sdram.sv` stands.
+
+**The seed still matters, and there are two marginal paths, not one.** Three
+fits of this same tree:
+
+    seed 12   clk_ram +0.466   ascal -0.261 / TNS -3.101     fails
+    seed  4   clk_ram -0.003   ascal +0.433                  fails
+    seed  1   clk_ram +0.254   ascal +0.394                  PASSES
+
+`ascal` is `sys/ascal.vhd`, the framework's scaler on the HDMI clock, which
+nothing here is on; 18.x already recorded it at -0.215 and closed it with a seed
+change. So the design is no longer balanced on a knife edge the way 28.5
+described -- but a fit is still worth CHECKING rather than assuming.
 
 ## Also open
 
@@ -76,11 +77,18 @@ The safety net for all of it now exists and passes -- see below.
   Load a passing build several times before believing it was a one-off --
   intermittent would be worse than broken.
 * **Only rdft's derivation is verified on hardware.** The other five pass in
-  simulation against real images. `quartus_stp -t tools/jtag_peek.tcl derive`
-  reports jobs, bytes, state and the error flags in one line.
-* **`spi_romcheck` walks once**, and `check passes` is always 1. Its header
-  explains why the guard must stay until the checker has a real slot in
-  `spi_sdr_arb4`. PLAN.md 21.5.
+  simulation against real images -- and the one-line JTAG report that used to
+  say so on the board (`jtag_peek.tcl derive`) is gone with the probes, so
+  confirming another set now means watching it boot.
+* **The ROM checker no longer runs at boot.** `spi_romcheck` was the thing
+  that said "the download landed", and it is out of the net with the rest.
+  `make -C sim run-romcheck SDRAM=<image>` is the offline version and still
+  works. Its guard note (21.5) is moot until something instantiates it again.
+* **The JTAG tools have nothing to talk to.** `tools/jtag_peek.tcl`,
+  `jtag_server.tcl` and `jtag_diag.sh` are all still there, and all now find no
+  instances. Putting one back means re-instantiating `spi_jtag_peek`, wiring
+  whichever watch it is to read, and adding the file to `files.qip` -- and
+  expecting the timing to move when you do.
 * **`tb_sdram` is rdfts-only** by design (`set_id` hardcoded to 0). Fine for
   what it tests; do not waste a run feeding it another set's stream, as I did.
 
@@ -92,8 +100,10 @@ silent: nothing runs them, and a testbench that fails to build looks like one
 that is merely slow. All three are fixed (PLAN.md 21.6, 22.3, 28).
 
 `make lint` does not reach `SeibuSPI.sv` at all -- it lints `spi_top`, because
-the top needs hps_io and the PLLs. **For anything in the top-level file,
-`make map` is the first real check, not `make lint`.**
+the top needs hps_io and the PLLs. `make -C sim lint-top` does reach it, for the
+four checks that survive the framework modules being absent, and it no longer
+swallows `%Error` lines the way it used to. **For anything in the top-level
+file, `make map` is still the first real check.**
 
 Worth doing: a `make check-tb` that merely BUILDS every testbench, so this class
 of rot fails loudly the next time a port moves.
@@ -109,8 +119,7 @@ of rot fails loudly the next time a port moves.
     make -C sim run-flash-derive SDRAM=<x-upd.bin> SET=<x>
     make -C sim run-sdram SDRAM=<ref.bin> CONCAT=<stream.bin>   # rdfts only
 
-    quartus_stp -t tools/jtag_peek.tcl derive    # the derivation, on hardware
-    quartus_stp -t tools/jtag_peek.tcl sums      # NOTE: 21.7, ok bits is broken
+    # The jtag_peek.tcl commands need spi_jtag_peek back in the net; see above.
 
 Building the inputs:
 
