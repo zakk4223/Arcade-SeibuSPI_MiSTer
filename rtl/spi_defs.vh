@@ -117,6 +117,19 @@ localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 // set_id is 3 bits since viprp1 became the fifth set; the mod byte's bits 3:1
 // have room for eight in total.
 // --------------------------------------------------------------------------
+// Which generation of the sample-flash updater a set's job table is written
+// for (tools/build_soundflash.py's GAMES table). They differ only in how the
+// job record's bytes 8 and 9 are read:
+//
+//   GEN_A   senkyu / batlball / ejanhs / viprp1   always decode; byte 8 is the
+//                                                 fetcher's address STRIDE
+//   GEN_B0  rdft                                  always verbatim; byte 8 is a
+//                                                 lane-mode enum, no decoder
+//   GEN_B1  rdft2 / rfjet                         both; byte 9 picks per job
+localparam [1:0] GEN_A  = 2'd0;
+localparam [1:0] GEN_B0 = 2'd1;
+localparam [1:0] GEN_B1 = 2'd2;
+
 // Which of the three sources spi_snd_window is addressing. Shared rather than
 // private to spi_cpu, because the flash derivation walks the same windows and
 // the two must agree on the encoding.

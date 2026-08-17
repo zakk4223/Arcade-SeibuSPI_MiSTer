@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
+.PHONY: all clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -30,6 +30,13 @@ all: run-rom_decode run-ddr_rom_reader run-rom_loader run-snd_window run-tile_de
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
 	$(VERILATOR) --lint-only -Wall -I$(RTL) lint.vlt --top-module spi_sound $(SOUND_SRCS)
+
+# The flash derivation is not instantiated in spi_top yet, so `lint` above does
+# not reach it. Until it is, lint it on its own or a break goes unnoticed until
+# someone runs the testbench.
+lint-derive:
+	$(VERILATOR) --lint-only -Wall -I$(RTL) lint.vlt --top-module spi_flash_derive \
+	    $(RTL)/spi_flash_derive.sv $(RTL)/spi_snd_window.sv $(RTL)/spi_rom_decode.sv
 
 
 # The YMF271 step and envelope arithmetic against MAME's doubles, exhaustively.
@@ -82,6 +89,20 @@ run-rom_loader: obj_dir/Vrom_loader
 # tools/check_snd01_window.py.
 run-snd_window: obj_dir/Vspi_snd_window
 	@./obj_dir/Vspi_snd_window
+
+# The flash derivation, against the image MAME's own flash devices hold. Needs
+# an authentic-flash SDRAM image, so it is not in `all` -- the offline twin is
+# `make check-derive ROMS=...`, which does the same walk in Python.
+#   make -C sim run-flash-derive SDRAM=/tmp/rdft2-upd.bin SET=rdft2
+run-flash-derive: obj_dir/Vspi_flash_derive
+	@./obj_dir/Vspi_flash_derive $(SDRAM) $(SET)
+
+obj_dir/Vspi_flash_derive: $(RTL)/spi_flash_derive.sv $(RTL)/spi_snd_window.sv \
+                           $(RTL)/spi_rom_decode.sv $(RTL)/spi_defs.vh \
+                           tb_flash_derive.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_flash_derive \
+	    $(RTL)/spi_flash_derive.sv $(RTL)/spi_snd_window.sv \
+	    $(RTL)/spi_rom_decode.sv tb_flash_derive.cpp
 
 obj_dir/Vspi_snd_window: $(RTL)/spi_snd_window.sv $(RTL)/spi_defs.vh \
                          tb_snd_window.cpp lint.vlt
@@ -236,7 +257,7 @@ CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RT
              $(RTL)/spi_mixer.sv $(RTL)/spi_tile_decrypt.sv \
              $(RTL)/seibu_partial_add.sv $(SOUND_SRCS)
 
-lint:
+lint: lint-derive
 	$(VERILATOR) --lint-only -Wall -I$(RTL) -I$(RTL)/z386 lint.vlt --top-module spi_top \
 	    $(CORE_SRCS) $(Z386_SRCS)
 

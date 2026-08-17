@@ -7747,3 +7747,92 @@ Also fixed here, both paper cuts found by using the thing: `make check-mra
 ZIP=...` did not quote the path, so any rompath with a bracket in it failed with
 a shell syntax error, and it had no SET passthrough, so a single-game zip
 reported every other set's parts missing.
+
+## 24. The walker: the core builds its own sample flash, in 0.3 s
+
+`rtl/spi_flash_derive.sv` does what the game's updater does -- reads the job
+table out of the 386's own program image, walks it, fetches each job's source
+through spi_snd_window, copies or BPE-decodes it into the sample region, and
+writes the region stamp last. Every set that has ever been measured reaches its
+recorded byte count and its reference sha256:
+
+| set | jobs | payload | ritual (19.9) | cycles |
+|---|---|---|---|---|
+| senkyu   | 2 | 2,025,998 | 2,026,002 | 33.7 M |
+| batlball | 2 | 2,025,998 | -- | 33.7 M |
+| ejanhs   | 2 | 2,095,246 | 2,095,250 | 34.7 M |
+| viprp1   | 2 | 1,634,812 | not seen | 27.2 M |
+| rdft     | 2 | 1,939,007 | 1,939,011 | 33.6 M |
+| rdft2    | 2 | 2,028,336 | 2,028,340 | 34.7 M |
+| rfjet    | 2 | 2,004,166 | 2,004,170 | 34.3 M |
+
+Payload plus the four stamp bytes is the ritual figure exactly, on all five
+sets where hardware ever measured one. **34 M cycles at 114.5 MHz is 0.30
+seconds against six minutes** -- about 1,200x, and the difference is entirely
+that this reads SDRAM instead of going through the 386/FIFO/Z80/wave-port chain
+that 16.6 measured as 93% spin.
+
+viprp1 is the row that could not exist before: no MRA can assemble it a
+pre-flashed image, because its second job reads the 386's own program image.
+Here that is the cheapest source of the three.
+
+### 24.1 Two bugs the acceptance test caught, both silent in the wrong way
+
+Neither would have been found by reading the code, and both produce output that
+looks plausible.
+
+**Three of the seven job tables are NOT dword aligned** -- rdft 0x0020174D,
+rdft2 0x00201B55, rfjet 0x00203597. The 386 reads them unaligned and so does
+build_soundflash; the first version of this module read the containing dword,
+so `len` came back shifted by one to three bytes. rdft then copied until it ran
+off the end of the flash region: **0 jobs, 2,097,148 bytes**. Records are read a
+byte at a time now.
+
+**Byte 9 of a gen-B1 record is a VERBATIM flag, not a decode flag.**
+build_soundflash reads it as `verbatim = bool(prg[job+9])` and this module had
+`vb = (j_dec == 0)`, exactly inverted. The symptom is the instructive part:
+rfjet fed sample data to the BPE expander and hung, while rdft2 produced
+**exactly the right number of bytes** -- 2,028,336, matching the reference to
+the byte -- out of entirely the wrong content, because the lengths come from the
+record and only the codecs were swapped. A byte count that matches is not a
+passing test, and nothing short of the hash would have caught it.
+
+### 24.2 A wrong per-set constant fails fast instead of hanging
+
+The job-table and stamp addresses come from the MRA, so a wrong one walks
+nonsense. Walked with the wrong set's constants the module first spun forever
+(`stuck at esi=18C6151C, len=487004390, mode=40`) -- which in hardware, with no
+cycle limit, means the core never leaves reset. It now rejects a source outside
+the 386's program image or sound01 region, and a table longer than sixteen jobs,
+and stops with `err_badjob`. The same run now fails in a few cycles. `err_overrun`
+already covered a job running past the region.
+
+Failing this way is safe by construction: the stamp is written LAST, so a
+rejected derivation leaves the flash blank and the game simply runs its own
+updater.
+
+### 24.3 What checks it
+
+`make -C sim run-flash-derive SDRAM=<set>-upd.bin SET=<name>`, against the
+sha256 recorded in build_soundflash's GAMES -- which is itself bit-exact against
+what MAME's own flash devices hold. Three routes to one hash: MAME's ritual, the
+Python walk over the same SDRAM image (`make check-derive`), and this.
+
+The SDRAM model in the testbench is deliberately jittered rather than
+zero-latency: this will share ch3 with the Z80 fetch and the JTAG peek, and a
+toggle handshake that only works at zero latency is not a working handshake
+(21.3).
+
+`make lint` now includes `lint-derive`, because the module is not instantiated
+in spi_top yet and the main lint does not reach it.
+
+### 24.4 What is left for one MRA
+
+* **Integrate**: a real slot in `spi_sdr_arb4` -- NOT the priority mux, per 21.3
+  -- plus reset sequencing so it runs after the download and before the CPU
+  starts, and `flash_dirty`/nvram interaction.
+* **MRA config opcodes** for `job_table`, `stamp` and `gen`, extending the
+  index-1 stream past its `{part, codec}` pairs. This is what makes a clone
+  MRA-only, and batlball above is the evidence it works.
+* **The OSD option** and its `status_menumask` gating on `~set_sxx2c`.
+* **Collapse the MRAs**, last.
