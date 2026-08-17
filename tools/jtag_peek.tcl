@@ -310,11 +310,34 @@ if {$mode eq "list"} {
         for {set i 4} {$i >= 0} {incr i -1} {
             append cmds [cmdname [expr {($after >> ($i*3)) & 7}]] " "
         }
-        puts [format "%s dq=%04X mask=%02b  next ACTIVE %s  bus: %s" \
-              $name $dq $dqm \
+        puts [format "%s dq=%04X mask=%s  next ACTIVE %s  bus: %s" \
+              $name $dq [format %02b $dqm] \
               [expr {$gap ? "+$gap clk, bank $ab chip $ac" : "none within the window"}] \
               $cmds]
     }
+    # ---- the FIFO watch (PLAN.md 19.14) -------------------------------
+    # The chain's other two links, frozen at the program command for the
+    # watched byte: what the 386 FIFO handed the Z80 just before it, and what
+    # the flash latched. Near this address the payload runs 00, 00, FE, FF, so
+    # a healthy freeze reads pops=0000 00FE with din=FE.
+    #
+    #   pops ...00FE, din FE, dq FEFE   nothing wrong -- this run kept the byte
+    #   pops ...00FE, din FF            corrupted between the FIFO and the flash
+    #   pops ...00FF, din FF            the FIFO handed over the wrong byte
+    set fwu [fld $p 107 32]
+    set fwp [fld $p 139 32]
+    set fwl [fld $p 171 9]
+    set fwe [fld $p 180 16]
+    set fwd [fld $p 196 8]
+    set fwf [fld $p 204 1]
+    if {$fwf} {
+        puts [format "fifo watch = pushed %08X by the 386" $fwu]
+        puts [format "             pops   %08X  (last four bytes the Z80 took, newest low)" $fwp]
+        puts [format "             flash latched %02X, FIFO had %d bytes waiting" $fwd $fwl]
+    } else {
+        puts "fifo watch = never froze -- no program command for the watched byte"
+    }
+    puts [format "empty reads= %d  (reads of 0x4008 with the FIFO empty; these pop nothing)" $fwe]
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits

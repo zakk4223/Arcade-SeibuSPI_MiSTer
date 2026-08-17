@@ -129,7 +129,16 @@ module spi_soundflash
 	output reg  [7:0] dbg_w_data,
 	output reg  [7:0] dbg_w_erases,
 	output reg        dbg_w_er_after,
-	output reg [55:0] dbg_w_trace
+	output reg [55:0] dbg_w_trace,
+
+	// The datum, at the moment the command port accepts it (PLAN.md 19.14).
+	// 19.13 found the write reaching SDRAM carrying 0xFF instead of 0xFE, so
+	// the question moved upstream of here: was this module handed 0xFF, or did
+	// it make one? `dbg_w_hit` pulses on the program command for the watched
+	// BYTE -- not the halfword -- so the consumer can freeze the FIFO's recent
+	// history against it.
+	output reg  [7:0] dbg_w_din,
+	output reg        dbg_w_hit
 );
 
 // Byte addresses within the 2 MB sample region. WATCH is the byte in question;
@@ -237,6 +246,7 @@ parameter [20:0] WATCH_TRIG = 21'h029FC;
 
 	integer k;
 	always @(posedge clk) begin
+		dbg_w_hit <= 1'b0;
 		// ---- the SDRAM write port ------------------------------------
 		if (wr_pend && (sdr_ack == sdr_req)) begin
 			wr_pend <= 1'b0;
@@ -319,6 +329,10 @@ parameter [20:0] WATCH_TRIG = 21'h029FC;
 			case (mode[sel])
 
 			M_PROG: begin
+				if (addr == WATCH) begin
+					dbg_w_din <= din;
+					dbg_w_hit <= 1'b1;
+				end
 				if (pg_pend[sel]) dbg_drops <= dbg_drops + 16'd1;
 				pg_pend[sel] <= 1'b1;
 				pg_addr[sel] <= addr[19:1];
@@ -387,6 +401,8 @@ parameter [20:0] WATCH_TRIG = 21'h029FC;
 			dbg_w_erases   <= 8'd0;
 			dbg_w_er_after <= 1'b0;
 			dbg_w_trace    <= 56'd0;
+			dbg_w_din      <= 8'd0;
+			dbg_w_hit      <= 1'b0;
 			w_tr_n         <= 3'd4;
 			w_tr_armed     <= 1'b0;
 			for (k = 0; k < 2; k = k + 1) begin

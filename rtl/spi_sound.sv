@@ -66,6 +66,31 @@ module spi_sound
 	// Toggles once per store into the sample flash. spi_nvram uses it to know
 	// when there is something worth saving.
 	output            flash_dirty_o,
+	// The FIFO watch (PLAN.md 19.14). 19.13 put 0xFF on the SDRAM bus where
+	// 0xFE belonged, with the address and byte mask right, so the byte was
+	// programmed rather than lost and the fault is upstream of the flash. This
+	// records the chain's other two links in the SAME run: what the FIFO handed
+	// the Z80 just before that write, and what the flash latched.
+	//
+	// `dbg_fw_pops` is the last four bytes the Z80 took from the 386 FIFO,
+	// frozen at the watched write, newest in the low byte. Near this address
+	// the payload runs 00, 00, FE, FF, so the freeze should read ...0000FE.
+	// If it reads ...0000FF the FIFO handed over the wrong byte; if it reads
+	// FE while the flash latched FF, the corruption is between them.
+	//
+	// `dbg_fw_empty` counts reads of 0x4008 taken while the FIFO is EMPTY.
+	// Those do not pop -- `fifo_pop` is gated on !fifo_empty -- so the Z80 gets
+	// `fifo_q`, a registered read that lags `fifo_rp`, and no byte is consumed.
+	// What the 386 PUSHED, against what the Z80 took. 19.14 caught the FIFO
+	// handing over 0xFF, which is either a byte the 386 pushed wrong or one
+	// this FIFO lost in transit -- and those need different fixes.
+	output reg [31:0] dbg_fw_pushes,
+	output reg [31:0] dbg_fw_pops,
+	output reg  [8:0] dbg_fw_fill,
+	output reg [15:0] dbg_fw_empty,
+	output reg  [7:0] dbg_fw_din,
+	output reg        dbg_fw_frozen,
+
 	// The watch (PLAN.md 19.11), straight out of spi_soundflash.
 	output      [7:0] dbg_flash_w_progs,
 	output      [1:0] dbg_flash_w_be,
@@ -356,6 +381,48 @@ module spi_sound
 	end
 
 	// ------------------------------------------------------------------
+	// The FIFO watch (PLAN.md 19.14).
+	//
+	// `fifo_q` is what a read of 0x4008 hands back, so shifting it on every
+	// such read records what the Z80 actually received -- including the reads
+	// that find the FIFO empty and therefore consume nothing.
+	// ------------------------------------------------------------------
+	wire [7:0] flash_w_din;
+	wire       flash_w_hit;
+	wire fifo_rd_any = rd_end && b_io && (bus_addr[12:0] == 13'h008);
+	reg [31:0] fifo_hist;
+	reg [31:0] push_hist;
+
+	always @(posedge clk) begin
+		if (reset) begin
+			fifo_hist     <= 32'd0;
+			push_hist     <= 32'd0;
+			dbg_fw_pushes <= 32'd0;
+			dbg_fw_pops   <= 32'd0;
+			dbg_fw_fill   <= 9'd0;
+			dbg_fw_empty  <= 16'd0;
+			dbg_fw_din    <= 8'd0;
+			dbg_fw_frozen <= 1'b0;
+		end
+		else begin
+			if (snd_wr_pulse && !fifo_full) push_hist <= {push_hist[23:0], snd_din};
+			if (fifo_rd_any) begin
+				fifo_hist <= {fifo_hist[23:0], fifo_q};
+				if (fifo_empty) dbg_fw_empty <= dbg_fw_empty + 16'd1;
+			end
+			// Freeze on the FIRST program command for the watched byte, and
+			// hold it: a later pass must not overwrite the evidence.
+			if (flash_w_hit && !dbg_fw_frozen) begin
+				dbg_fw_pops   <= fifo_hist;
+				dbg_fw_pushes <= push_hist;
+				dbg_fw_fill   <= fifo_wp - fifo_rp;   // fifo_fill is declared below
+				dbg_fw_din    <= flash_w_din;
+				dbg_fw_frozen <= 1'b1;
+			end
+		end
+	end
+
+	// ------------------------------------------------------------------
 	// How hard the 386 is being blocked by the sound CPU.
 	//
 	// `snd_full` is a real flag, so a Z80 that stops draining makes the 386
@@ -559,6 +626,8 @@ module spi_sound
 		.dbg_w_erases   (dbg_flash_w_erases),
 		.dbg_w_er_after (dbg_flash_w_er_after),
 		.dbg_w_trace    (dbg_flash_w_trace),
+		.dbg_w_din      (flash_w_din),
+		.dbg_w_hit      (flash_w_hit),
 		.dbg_progs  (dbg_flash_progs),
 		.dbg_erases (dbg_flash_erases),
 		.dbg_drops  (dbg_flash_drops),

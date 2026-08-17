@@ -153,6 +153,15 @@ module spi_jtag_peek
 	input             sw_e1_ac,
 	input      [14:0] sw_e1_after,
 
+	// The FIFO watch (PLAN.md 19.14). On SDRW rather than SNDV only because
+	// SNDV is full; these are clk_sys signals like the rest of the sound side.
+	input      [31:0] fw_pushes,
+	input      [31:0] fw_pops,
+	input       [8:0] fw_fill,
+	input      [15:0] fw_empty,
+	input       [7:0] fw_din,
+	input             fw_frozen,
+
 	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
 	// because it is a different question from everything on SNDV.
 	input      [94:0] sdr_trans,
@@ -301,7 +310,7 @@ module spi_jtag_peek
 		// not fail or warn usefully -- the concatenation is simply truncated
 		// and every field reads as part of its neighbour, which looked like
 		// 255 writes to a halfword that gets three.
-		.probe_width             (107),
+		.probe_width             (205),
 		.source_width            (1),
 		.source_initial_value    ("0"),
 		.enable_metastability    ("NO")
@@ -310,7 +319,8 @@ module spi_jtag_peek
 	(
 		.probe  ({sw_takes, sw_writes, sw_same, sw_wbank, sw_wchip,
 		          sw_e0_dq, sw_e0_dqm, sw_e0_gap, sw_e0_ab, sw_e0_ac, sw_e0_after,
-		          sw_e1_dq, sw_e1_dqm, sw_e1_gap, sw_e1_ab, sw_e1_ac, sw_e1_after}),
+		          sw_e1_dq, sw_e1_dqm, sw_e1_gap, sw_e1_ab, sw_e1_ac, sw_e1_after,
+		          fw_pushes, fw_pops, fw_fill, fw_empty, fw_din, fw_frozen}),
 		.source ()
 	);
 

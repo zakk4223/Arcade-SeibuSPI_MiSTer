@@ -40,6 +40,14 @@ module spi_top
 	output            flash_sdr_req,
 	input             flash_sdr_ack,
 	output            flash_dirty,
+	// The FIFO watch (PLAN.md 19.14), passed straight through from spi_sound.
+	output     [31:0] dbg_fw_pushes,
+	output     [31:0] dbg_fw_pops,
+	output      [8:0] dbg_fw_fill,
+	output     [15:0] dbg_fw_empty,
+	output      [7:0] dbg_fw_din,
+	output            dbg_fw_frozen,
+
 	// The watch (PLAN.md 19.11), passed straight through from spi_sound.
 	output      [7:0] dbg_flash_w_progs,
 	output      [1:0] dbg_flash_w_be,
@@ -500,6 +508,12 @@ module spi_top
 		.dbg_flash_w_erases   (dbg_flash_w_erases),
 		.dbg_flash_w_er_after (dbg_flash_w_er_after),
 		.dbg_flash_w_trace    (dbg_flash_w_trace),
+		.dbg_fw_pushes (dbg_fw_pushes),
+		.dbg_fw_pops   (dbg_fw_pops),
+		.dbg_fw_fill   (dbg_fw_fill),
+		.dbg_fw_empty  (dbg_fw_empty),
+		.dbg_fw_din    (dbg_fw_din),
+		.dbg_fw_frozen (dbg_fw_frozen),
 		.dbg_flash_progs  (dbg_flash_progs),
 		.dbg_flash_erases (dbg_flash_erases),
 		.dbg_flash_drops  (dbg_flash_drops),

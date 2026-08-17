@@ -704,6 +704,8 @@ spi_jtag_peek peek
 	.fw_er_after(dbg_flash_w_er_after), .fw_trace(dbg_flash_w_trace),
 	.aw_n(dbg_arb_w_n), .aw_be(dbg_arb_w_be), .aw_data(dbg_arb_w_data),
 	.aw_total(dbg_arb_d_total),
+	.fw_pushes(dbg_fw_pushes), .fw_pops(dbg_fw_pops), .fw_fill(dbg_fw_fill), .fw_empty(dbg_fw_empty),
+	.fw_din(dbg_fw_din), .fw_frozen(dbg_fw_frozen),
 	.sw_takes(dbg_sw_takes), .sw_writes(dbg_sw_writes), .sw_same(dbg_sw_same),
 	.sw_wbank(dbg_sw_wbank), .sw_wchip(dbg_sw_wchip),
 	.sw_e0_dq(dbg_sw_e0_dq), .sw_e0_dqm(dbg_sw_e0_dqm), .sw_e0_gap(dbg_sw_e0_gap),
@@ -733,6 +735,11 @@ wire  [7:0] dbg_flash_w_progs, dbg_flash_w_data, dbg_flash_w_erases;
 wire  [1:0] dbg_flash_w_be;
 wire        dbg_flash_w_er_after;
 wire [55:0] dbg_flash_w_trace;
+wire [31:0] dbg_fw_pushes, dbg_fw_pops;
+wire  [8:0] dbg_fw_fill;
+wire [15:0] dbg_fw_empty;
+wire  [7:0] dbg_fw_din;
+wire        dbg_fw_frozen;
 wire  [7:0] dbg_sw_takes, dbg_sw_writes, dbg_sw_same;
 wire  [1:0] dbg_sw_wbank, dbg_sw_e0_dqm, dbg_sw_e0_ab, dbg_sw_e1_dqm, dbg_sw_e1_ab;
 wire        dbg_sw_wchip, dbg_sw_e0_ac, dbg_sw_e1_ac;
@@ -988,6 +995,9 @@ spi_top spi_top
 	.dbg_flash_w_erases   (dbg_flash_w_erases),
 	.dbg_flash_w_er_after (dbg_flash_w_er_after),
 	.dbg_flash_w_trace    (dbg_flash_w_trace),
+	.dbg_fw_pushes(dbg_fw_pushes), .dbg_fw_pops(dbg_fw_pops), .dbg_fw_fill(dbg_fw_fill),
+	.dbg_fw_empty(dbg_fw_empty), .dbg_fw_din(dbg_fw_din),
+	.dbg_fw_frozen(dbg_fw_frozen),
 	.dbg_flash_progs  (dbg_flash_progs),
 	.dbg_flash_erases (dbg_flash_erases),
 	.dbg_flash_drops  (dbg_flash_drops),

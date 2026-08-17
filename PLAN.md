@@ -6973,3 +6973,54 @@ million.
 **Next instrument:** the datum, upstream. Record what `ext_wd` carries for the
 write to this address, and alongside it the FIFO's occupancy and whether the
 Z80's read of it found anything there.
+
+### 19.14  It is the 386's read, not the FIFO and not anything below it
+
+19.13 found the datum already wrong at the flash, so this instrument follows it
+back up: what the 386 PUSHED into the sound FIFO, what the Z80 TOOK out of it,
+what the flash LATCHED, and what reached SDRAM -- all four frozen in the same
+run against the program command for the watched byte.
+
+Freezing them together is the point. Each link was previously measured in a
+different run, which is how 19.12 managed to be confidently wrong.
+
+```
+trial 1 LOST:  pushed E6FFE6FF -> pops E600E6FF -> latched FF -> dq FFFF
+trial 2 ok:    pushed E6FEE6FF -> pops E600E6FE -> latched FE -> dq FEFE
+trial 3 ok:    pushed E6FEE6FF -> pops E600E6FE -> latched FE -> dq FEFE
+trial 4 LOST:  pushed E6FFE6FF -> pops E600E6FF -> latched FF -> dq FFFF
+...
+2 lost, 6 ok in eight trials, and the byte the 386 pushed predicts the
+outcome every time.
+```
+
+The updater's stream is a command byte and a datum in pairs -- E6, byte, E6,
+byte -- and it is the DATUM that changes: 0xFE on a run that keeps the byte,
+0xFF on a run that does not. Everything downstream is faithful. The FIFO hands
+over exactly what it was given, the flash latches exactly what the Z80 wrote,
+and sdram.sv stores exactly what the flash sent.
+
+**So the fault is the 386 reading 0xFF where the source holds 0xFE**, on the
+copy job that walks the PCM source through the sound01 window. Which is a
+strange thing to be intermittent, because the source itself is not: peeking
+SDR_PCMSRC_BASE+0x29FE returns the ROM's bytes exactly, every time.
+
+Also retired here, by measurement rather than argument:
+
+* `empty reads = 0`. The Z80 never read 0x4008 with the FIFO empty, so the
+  read-while-empty path -- `fifo_pop` is gated on `!fifo_empty`, and such a read
+  returns `fifo_q` without consuming anything -- is not what happens. The FIFO
+  had two bytes waiting at every freeze.
+* The tWR window from 19.12, again: the bus after the write is WRIT then four
+  NOPs on failing and passing runs alike.
+
+**Next, and it is now a narrow question:** the 386's read path for that window.
+`spi_cpu.sv`'s `sel_pcm` decode, the fetch behind it, and whatever caching sits
+in front -- one of them answers 0xFF instead of the byte that is demonstrably in
+memory. The instrument is the same shape as this one: freeze the address, the
+dword returned, and the fetch's state, at the read that feeds this push.
+
+Worth noting for whoever picks it up: 0xFF is not what a missed decode gives
+here. An undecoded address falls through to S_NULL, which answers zeroes -- that
+is what `tools/check_snd01_window.py` checks the whole 10 MB region against. So
+this is not a hole in the window; it is a read that goes wrong on its way.
