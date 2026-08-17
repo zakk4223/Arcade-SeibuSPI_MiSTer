@@ -9,6 +9,28 @@
 //  This is the path that runs on hardware before the 386 executes anything,
 //  and until now nothing in sim/ covered it.
 //
+//  ---------------------------------------------------------------------------
+//  BROKEN, 2026-08-17. IT DOES NOT PASS ON UNMODIFIED RTL.
+//  ---------------------------------------------------------------------------
+//  It had stopped BUILDING -- eighteen pins sdram.sv and rom_loader grew since
+//  it was last touched, plus set_id still 2 bits against 3 (the same rot that
+//  killed tb_ymf_top and tb_boot_top, PLAN.md 21.6, 22.3). Those are fixed and
+//  it builds again, but it now reports 15,906,965 of 23,592,960 bytes differing
+//  with every readback coming back 0xFF, on RTL nobody has changed.
+//
+//  What is known: the writes happen (23,396,352 write commands, exactly the
+//  download) and the reads happen (2,949,120, exactly the 64-bit readback), so
+//  the two sides disagree about DATA, not about whether they ran. Candidates,
+//  in the order worth trying: sdram_model.sv's CAS pipeline against sdram.sv's
+//  dq_reg timing; the model being ONE 32 MB chip where the design drives two
+//  across 64 MB; and SDR_SIZE below.
+//
+//  THIS MATTERS MORE THAN IT LOOKS. It is the only test that would catch
+//  sdram.sv corrupting data, which is the failure that cost PLAN.md 19.11-19.18
+//  six instruments and five builds to find -- and it was a weak SDRAM module in
+//  the end, not the RTL. Until this passes, changes to sdram.sv rest on
+//  inspection alone, and 26.4's arbitration fix is blocked behind it.
+//
 //  usage: Vtb_sdram_top <sdram.bin> [<rom_concat.bin>]
 //
 //  Both files are required: the concatenated part image is what MiSTer streams
@@ -24,6 +46,11 @@
 #include <cstdlib>
 #include <vector>
 
+// 22.5 MB, and STALE: the map is 43 MB now (spi_defs.vh SDR_END). It is left
+// alone rather than raised because sim/sdram_model.sv is a single 32 MB chip and
+// the design addresses 64 MB across two, so raising this reads past the model.
+// Sizing both to the real map is part of repairing this testbench -- see the
+// note at the top of the file.
 static const uint32_t SDR_SIZE = 0x1680000;
 
 int main(int argc, char **argv)

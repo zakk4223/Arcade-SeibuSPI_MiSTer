@@ -58,7 +58,10 @@ module tb_sdram_top
 		.ioctl_index    (8'd0),
 		.ioctl_dout     (ioctl_dout),
 		.ioctl_wait     (ioctl_wait),
-		.set_id         (2'd0),      // this bench drives the rdfts layout
+		.set_id         (3'd0),
+	// Grew on rom_loader when the authentic-flash variants landed; 0 is the
+	// pre-flashed tail, which is what this testbench streams.
+	.set_upd        (1'b0),      // this bench drives the rdfts layout
 		.part_codec     (128'd0),    // every part a straight copy
 		.sdr_addr       (ldr_addr),
 		.sdr_din        (ldr_din),
@@ -80,6 +83,19 @@ module tb_sdram_top
 		.init       (init),
 		.clk        (clk),
 		.doRefresh  (~rom_ready),
+		// The 0x29FE write watch (PLAN.md 19.12), added to sdram.sv while the
+		// rdft2 save byte was being chased. All outputs, all unconnected here:
+		// this testbench streams the whole ROM image through and compares every
+		// byte, which is a stronger statement than any one watched address --
+		// but -Wall makes an unconnected pin an ERROR, so leaving them off is
+		// what stopped this testbench BUILDING, and with it the only check that
+		// would catch sdram.sv corrupting data.
+		.dbg_s_takes    (), .dbg_s_writes   (), .dbg_s_same     (),
+		.dbg_s_wbank    (), .dbg_s_wchip    (),
+		.dbg_s_e0_dq    (), .dbg_s_e0_dqm   (), .dbg_s_e0_gap   (),
+		.dbg_s_e0_ab    (), .dbg_s_e0_ac    (), .dbg_s_e0_after (),
+		.dbg_s_e1_dq    (), .dbg_s_e1_dqm   (), .dbg_s_e1_gap   (),
+		.dbg_s_e1_ab    (), .dbg_s_e1_ac    (), .dbg_s_e1_after (),
 
 		.SDRAM_DQ   (SDRAM_DQ),
 		.SDRAM_A    (SDRAM_A),

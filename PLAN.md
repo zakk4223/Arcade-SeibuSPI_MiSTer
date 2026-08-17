@@ -8122,3 +8122,57 @@ each, not a move.** That is what is there now: `mod_byte`/`cfg_*` stay the
 clk_sys masters feeding every clk_sys consumer exactly as before, and
 `mod_byte_r`/`cfg_*_r` are clk_ram copies feeding the loader-side logic, the
 derivation, the nvram gate and ch3. `derive_en` likewise exists once per domain.
+
+## 27. The arbitration fix is blocked on a rotted testbench, and I stopped there
+
+Asked to fix `sdram|ch1_rq -> command[1]` properly. The fix itself is small and
+I can state it exactly; what I could not do is show that it does not corrupt
+data, and in this file that is the whole job.
+
+### 27.1 What the fix would be
+
+STATE_IDLE resolves a seven-deep priority chain -- refresh_due, ch2, ch1, ch4,
+ch5, ch3, doRefresh_1 -- and every one of the five CHANNEL arms assigns the same
+thing to the same register: `command <= CMD_ACTIVE`. So the path to `command`
+does not need the priority resolution at all, only "is any channel asking":
+
+    if (refresh_due)      command <= CMD_AUTO_REFRESH;
+    else if (any_ch_rq)   command <= CMD_ACTIVE;      // a 5-input OR
+    else if (doRefresh_1) command <= CMD_AUTO_REFRESH;
+
+with `command` removed from the five arms, which then set only address, chip, ch
+and their own rq. Same values, same cycles, and the cascade comes off the failing
+endpoint while still choosing the channel for the ADDRESS registers, which have
+more slack (`SDRAM_A[7]` +0.247, `SDRAM_BA[0]` +0.035 in recent fits).
+
+`refresh_due` is already registered (10a(2)), so it is not the problem.
+
+### 27.2 Why I did not apply it
+
+`make -C sim run-sdram` is the only test that instantiates sdram.sv, and it had
+stopped BUILDING: eighteen pins the module and rom_loader grew since it was last
+touched, plus `set_id` still 2 bits against 3. That is the THIRD testbench this
+session found dead the same way (21.6 tb_ymf_top, 22.3 tb_boot_top). Fixed; it
+builds.
+
+**And then it fails on RTL nobody has changed** -- 15,906,965 of 23,592,960
+bytes differing, every readback 0xFF. The writes happen (23,396,352 write
+commands, exactly the download) and the reads happen (2,949,120, exactly the
+64-bit readback), so the two sides disagree about DATA. Candidates: the model's
+CAS pipeline against sdram.sv's `dq_reg` timing; the model being ONE 32 MB chip
+where the design drives two across 64 MB; and `SDR_SIZE`, which is 22.5 MB
+against a map that has been 43 MB for a while.
+
+So the safety net is 20 MB out of date and red on a clean tree. Changing
+sdram.sv behind it would rest on inspection alone -- in the file whose last data
+fault took six instruments and five builds to localise (19.11-19.18), and which
+this file's own build notes say not to optimise. Repairing the testbench is a
+bounded job and it is the prerequisite, not a detour.
+
+### 27.3 Where that leaves the timing
+
+Unchanged from 26.4: clk_ram closes at **-0.020** on `ch1_rq -> command[1]`, none
+of the derivation or its telemetry in the worst 25, and 19.16's +0.018 on the
+sibling path says the design has been balanced on this endpoint all along. The
+RTL is right; this fit is not shippable. Order of work: repair tb_sdram, then
+27.1, then re-fit.
