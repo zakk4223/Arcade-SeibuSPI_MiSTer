@@ -244,6 +244,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_cpu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_snd_window.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_io.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_mainram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_reset_sync.sv

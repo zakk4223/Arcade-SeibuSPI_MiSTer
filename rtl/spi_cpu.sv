@@ -313,16 +313,10 @@ module spi_cpu
 	wire sel_ram = (byte_addr[31:18] == 14'd0) && !sel_io;
 	wire sel_rom = ((byte_addr[31:22] == 10'd0) && byte_addr[21])   // 0020_0000
 	            ||  (byte_addr[31:21] == 11'h7FF);                  // FFE0_0000
-	// 0120_0000-013F_FFFF: the whole of sound1.u0222 inside MAME's sound01
-	// window, which is 0x09 * 2 MB. That ROM is loaded ROM_LOAD32_BYTE on lane 0
-	// at region 0x800000, so 512 KB of ROM occupies 2 MB of 386 space.
-	wire sel_s01 = snd01_en && (byte_addr[31:21] == 11'h009);
-	// The PCM source ROM's two windows, 0x05 and 0x07 * 2 MB. They differ in
-	// byte_addr[22] alone -- 0x0A00000 is 101 and 0x0E00000 is 111 in window
-	// units -- so that bit IS the ROM's address bit 20, and the 0x0C00000 hole
-	// (110) falls out for free because byte_addr[21] is what both windows share.
-	wire sel_pcm = pcmsrc_en && (byte_addr[31:24] == 8'd0)
-	                         && byte_addr[23] && byte_addr[21];
+	// The two sound01 windows are decoded by spi_snd_window, instantiated once
+	// below: `sel_dw` presents the access the CPU is asking for, `cur_dw` the
+	// dword being fetched. See rtl/spi_snd_window.sv for the arithmetic.
+	wire sel_s01, sel_pcm;
 
 	// ------------------------------------------------------------------
 	// Main RAM
@@ -398,7 +392,8 @@ module spi_cpu
 	// Which region this fetch is reading. Latched with the address in S_IDLE:
 	// all three share S_ROM_REQ/ACK/OUT and differ only in where the 8-byte
 	// group comes from and how the dword is cut out of it.
-	localparam [1:0] R_PRG = 2'd0, R_S01 = 2'd1, R_PCM = 2'd2;
+	// The source encoding lives in spi_defs.vh (SNDW_*), shared with
+	// spi_snd_window and with whatever else walks these windows.
 	reg  [1:0] rd_src;
 	// Read delivery is two stages deep, not one: `ram_addr` is only visible to
 	// the RAM the cycle AFTER it is assigned, and the RAM registers its output,
@@ -435,46 +430,40 @@ module spi_cpu
 	// Guard against a zero burstcount, which would underflow the counter.
 	wire [7:0] burst_n = (cpu_burstcount == 8'd0) ? 8'd1 : cpu_burstcount;
 
-	// ROM offset: both the 0x0020_0000 window and the 0xFFE0_0000 mirror map to
-	// the same 2 MB image, so the low 21 bits are the offset either way.
-	// SDRAM 64-bit reads must be 8-byte aligned, so this is the address of the
-	// aligned group containing cur_dw, i.e. (cur_dw & ~1) * 4.
-	wire [25:0] rom_grp_addr = SDR_PRG_BASE + {4'd0, cur_dw[18:1], 3'b000};
+	// The sound01 and PCM-source windows, and where in SDRAM they read from.
+	// `rd_src` is passed in rather than re-derived from cur_dw: a burst latches
+	// its source once and then walks cur_dw, and re-deriving would change
+	// source mid-burst if one ever straddled a window edge.
+	wire [25:0] snd_grp_addr;
+	wire  [7:0] s01_byte, pcm_byte_w;
+	wire [15:0] pcm_pair;
+	wire [31:0] prg_dword;
+	wire        grp_last;
 
-	// sound01: the dword index within the window IS the packed byte index, so
-	// one 64-bit read covers eight consecutive dwords. cur_dw[18:0] spans the
-	// whole 512 KB; the window test above has already fixed the bits above it.
-	wire [25:0] s01_grp_addr = SDR_SND01_BASE + {7'd0, cur_dw[18:3], 3'b000};
-	wire  [7:0] s01_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
+	spi_snd_window window
+	(
+		.sel_dw       (cpu_addr),
+		.snd01_en     (snd01_en),
+		.pcmsrc_en    (pcmsrc_en),
+		.sel_s01      (sel_s01),
+		.sel_pcm      (sel_pcm),
 
-	// PCM source, generation B: two byte lanes per dword, so the packed byte
-	// index is the dword index DOUBLED, with cur_dw[20] (386 address bit 22)
-	// carrying the ROM_CONTINUE skip as the ROM's own address bit 20:
-	//
-	//   idx[20:0] = { cur_dw[20], cur_dw[18:0], 1'b0 }
-	//
-	// A group is therefore four dwords, and the pair sought within it sits at
-	// byte offset idx[2:0] = {cur_dw[1:0], 1'b0} -- always even, so a dword's
-	// two bytes never straddle two groups.
-	//
-	// Generation A is the same windows with ONE lane: the index is the dword
-	// index undoubled, a group is eight dwords, and the byte sits at
-	// idx[2:0] = cur_dw[2:0]. That is the sound1 arithmetic with the skip bit
-	// on top, which is why it costs a mux and not a second decode.
-	wire [25:0] pcm_grp_addr = pcmsrc_base
-	                         + (pcmsrc_1lane
-	                            ? {6'd0, cur_dw[20], cur_dw[18:3], 3'b000}
-	                            : {5'd0, cur_dw[20], cur_dw[18:2], 3'b000});
-	wire  [7:0] pcm_byte     = rom_data[{cur_dw[2:0], 3'b000} +: 8];
-	wire [15:0] pcm_pair     = rom_data[{cur_dw[1:0], 4'b0000} +: 16];
+		.cur_dw       (cur_dw),
+		.src          (rd_src),
+		.pcmsrc_1lane (pcmsrc_1lane),
+		.pcmsrc_base  (pcmsrc_base),
+		.grp_data     (rom_data),
 
-	// Where the group ends: a program dword pair spans one group, eight packed
-	// sound01 bytes do, four PCM-source dwords do, so a burst crossing the end
-	// needs a fresh fetch.
-	wire        grp_last     = (rd_src == R_S01) ? (cur_dw[2:0] == 3'b111)
-	                         : (rd_src == R_PCM) ? (pcmsrc_1lane ? (cur_dw[2:0] == 3'b111)
-	                                                             : (cur_dw[1:0] == 2'b11))
-	                                             :  cur_dw[0];
+		.grp_addr     (snd_grp_addr),
+		.byte_out     (s01_byte),
+		.pair_out     (pcm_pair),
+		.prg_out      (prg_dword),
+		.grp_last     (grp_last)
+	);
+
+	// The gen-A PCM byte and the sound1 byte are the same extraction -- both
+	// are one packed byte at cur_dw[2:0] -- so the module emits it once.
+	assign pcm_byte_w = s01_byte;
 
 	// Snoop the GDT the boot code builds at byte 0x800 (dword index 0x200).
 	//
@@ -612,7 +601,7 @@ module spi_cpu
 					state     <= S_IO_RD;
 				end
 				else if (sel_rom || sel_s01 || sel_pcm) begin
-					rd_src <= sel_s01 ? R_S01 : sel_pcm ? R_PCM : R_PRG;
+					rd_src <= sel_s01 ? SNDW_S01 : sel_pcm ? SNDW_PCM : SNDW_PRG;
 					state  <= S_ROM_REQ;
 				end
 				else begin
@@ -637,11 +626,7 @@ module spi_cpu
 			end
 
 			S_ROM_REQ: begin
-				case (rd_src)
-					R_S01:   sdr_addr <= s01_grp_addr;
-					R_PCM:   sdr_addr <= pcm_grp_addr;
-					default: sdr_addr <= rom_grp_addr;
-				endcase
+				sdr_addr <= snd_grp_addr;
 				sdr_req  <= ~sdr_req;
 				state    <= S_ROM_ACK;
 			end
@@ -658,17 +643,16 @@ module spi_cpu
 				// zero in MAME's region too, not don't-care -- the region is
 				// ERASE00 and the updater's fetcher reads whole dwords.
 				case (rd_src)
-					R_S01:   mem_din <= {24'd0, s01_byte};
-					R_PCM:   mem_din <= pcmsrc_1lane ? {24'd0, pcm_byte}
-					                                : {16'd0, pcm_pair};
-					default: mem_din <= cur_dw[0] ? rom_data[63:32]
-					                              : rom_data[31:0];
+					SNDW_S01: mem_din <= {24'd0, s01_byte};
+					SNDW_PCM: mem_din <= pcmsrc_1lane ? {24'd0, pcm_byte_w}
+					                                  : {16'd0, pcm_pair};
+					default:  mem_din <= prg_dword;
 				endcase
 				// The watch. Frozen on the FIRST serve of this dword: the
 				// updater reads each source dword once, so a second would mean
 				// something quite different is happening and is worth seeing
 				// in `dbg_c_hits` rather than overwriting the evidence.
-				if (rd_src == R_PCM && cur_dw == WATCH_DW) begin
+				if (rd_src == SNDW_PCM && cur_dw == WATCH_DW) begin
 					dbg_c_hits <= dbg_c_hits + 8'd1;
 					if (!dbg_c_hit) begin
 						dbg_c_hit  <= 1'b1;

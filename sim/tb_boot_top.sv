@@ -25,7 +25,10 @@ module tb_boot_top
 
 	// Which board and set, so one testbench covers rdfts and the cartridge.
 	input             set_sxx2c,
-	input       [1:0] set_id,
+	// Three bits since viprp1 became the fifth set. This was [1:0] against
+	// spi_top's [2:0], which is a WIDTHEXPAND and, with the other 32 pins
+	// below, is why this testbench had stopped building at all.
+	input       [2:0] set_id,
 
 	// SDRAM services, driven by the C++ model
 	output     [25:0] sdr_prg_addr,
@@ -94,6 +97,7 @@ module tb_boot_top
 	/* verilator lint_off UNUSEDSIGNAL */
 	wire [25:0] sdr_pcm_addr;   // 26 bits since the map outgrew 32 MB
 	wire        sdr_pcm_req;
+	wire        flash_sdr_req;
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	spi_top dut
@@ -159,6 +163,49 @@ module tb_boot_top
 		.snd_wait_max (),
 		.stall_eip    (),
 		.stall_cs     (),
+
+		// Ports spi_top grew after this file was last touched. Leaving them
+		// off is not free: Verilator's -Wall makes PINMISSING an error, so the
+		// whole boot testbench stopped BUILDING -- silently, since a testbench
+		// that fails to build looks much like one nobody ran.
+		//
+		// set_upd stays 0 to match the jumpers above: this models a cartridge
+		// whose flash is already programmed, which is the configuration the
+		// Z80-program check below is written against. The sound1 window that
+		// check reads through does not depend on it -- rdft2 and rfjet carry
+		// that ROM either way -- so what run-boot covers is unchanged.
+		.set_upd      (1'b0),
+
+		// The sample-flash write port. Nothing programs it with set_upd low,
+		// but the ack is a TOGGLE handshake, so tying it low rather than to
+		// the request would stall the writer forever if anything ever did --
+		// silently, and in the same shape as the ch3 bug in PLAN.md 21.3.
+		// Looping it back models a memory that is always ready.
+		.flash_sdr_addr(),
+		.flash_sdr_din (),
+		.flash_sdr_be  (),
+		.flash_sdr_req (flash_sdr_req),
+		.flash_sdr_ack (flash_sdr_req),
+		.flash_dirty   (),
+
+		// The EIP profiler (PLAN.md 16.8), off: an empty window profiles
+		// nothing and costs nothing.
+		.prof_lo      (32'd0),
+		.prof_hi      (32'd0),
+		.prof_in      (),
+		.prof_total   (),
+
+		// Telemetry, all outputs: the sel_pcm watch, the sound FIFO watch and
+		// the flash counters.
+		.dbg_c_hits   (), .dbg_c_rom    (), .dbg_c_pair   (),
+		.dbg_c_addr   (), .dbg_c_hit    (),
+		.dbg_fw_pushes(), .dbg_fw_pops  (), .dbg_fw_fill  (),
+		.dbg_fw_empty (), .dbg_fw_din   (), .dbg_fw_frozen(),
+		.dbg_flash_w_progs   (), .dbg_flash_w_be      (),
+		.dbg_flash_w_data    (), .dbg_flash_w_erases  (),
+		.dbg_flash_w_er_after(), .dbg_flash_w_trace   (),
+		.dbg_flash_progs     (), .dbg_flash_erases    (),
+		.dbg_flash_drops     (), .dbg_flash_busy      (),
 
 		.sdr_prg_addr (sdr_prg_addr),
 		.sdr_prg_dout (sdr_prg_dout),

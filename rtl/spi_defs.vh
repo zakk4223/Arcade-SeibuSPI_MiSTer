@@ -117,6 +117,13 @@ localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 // set_id is 3 bits since viprp1 became the fifth set; the mod byte's bits 3:1
 // have room for eight in total.
 // --------------------------------------------------------------------------
+// Which of the three sources spi_snd_window is addressing. Shared rather than
+// private to spi_cpu, because the flash derivation walks the same windows and
+// the two must agree on the encoding.
+localparam [1:0] SNDW_PRG = 2'd0;
+localparam [1:0] SNDW_S01 = 2'd1;
+localparam [1:0] SNDW_PCM = 2'd2;
+
 localparam [2:0] SET_RDFTS  = 3'd0;
 localparam [2:0] SET_RDFT   = 3'd1;
 localparam [2:0] SET_RDFT2  = 3'd2;

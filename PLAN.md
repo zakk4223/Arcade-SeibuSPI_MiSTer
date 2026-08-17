@@ -7549,3 +7549,110 @@ per 19.18.
 byte and confirming it reports `want 1 and 00`. A check that cannot fail is
 decoration, and this file has been burned by one before (the stale SUM_SPRITES
 constant, 21.2's ancestor).
+
+## 22. Step 1 of the single-MRA plan: one window decode, and a test that constrains it
+
+The plan (section 21's successor) is one MRA per set with an OSD toggle between
+the authentic ritual and an image the core derives itself. Section 20 made the
+self-flashing payload fit a 32 MB board, which is what that plan puts everyone
+on. This is the next piece: the derivation reads its source material through the
+SAME windows the 386 reads during the ritual, so those windows had to stop being
+private to spi_cpu before a second reader existed.
+
+### 22.1 spi_snd_window
+
+`rtl/spi_snd_window.sv` is the sound1 and PCM-source decode, lifted out of
+spi_cpu unchanged: which window an address falls in, where in SDRAM that reads
+from, how to pick the byte or pair out of the 64-bit group, and where a group
+ends. Purely combinational. The `SNDW_*` source encoding moved to spi_defs.vh so
+spi_cpu and the future walker cannot disagree about it.
+
+Two decisions worth keeping:
+
+* **`src` is an input, not re-derived from `cur_dw`.** A burst latches its source
+  once and then walks cur_dw; re-deriving inside the module would silently
+  change source mid-burst if one ever straddled a window edge. The caller owns
+  that, exactly as spi_cpu already did.
+* **Two address inputs**, `sel_dw` for the decode and `cur_dw` for the fetch,
+  because in spi_cpu those are different signals at different times. Collapsing
+  them would have changed behaviour.
+
+`rom_grp_addr` folded in as the third source, so spi_cpu's S_ROM_REQ is now one
+assignment instead of a three-way case.
+
+### 22.2 The test that makes the refactor believable
+
+`sim/tb_snd_window.cpp` sweeps **every one of the 2,621,440 dwords** of MAME's
+10 MB sound01 region, in four configurations, against a region assembled the way
+MAME assembles it -- `build_soundflash.py`'s rule, not a restatement of the RTL:
+
+    group, lane = divmod(i, lanes)
+    region[base + bank(group * 4 + lane)] = rom[i]
+    bank(raw) = raw + (raw / 0x200000) * 0x200000
+
+No ROM set: the ROMs are synthetic, because what is under test is an address
+mapping and a pattern with no short period proves it better than real samples
+would -- a real ROM's runs of 0xFF hide a lane swap. So it runs in `make test`,
+which `run-romcheck` and `check_snd01_window.py` cannot.
+
+The four configurations are the ones that differ in the field: gen B (2 MB on
+two lanes), gen A (1 MB on one), viprp1 (gen A with NO second sound ROM), and
+pre-flashed (no PCM source loaded).
+
+**It was checked for the ability to fail**, three ways, because a sweep that
+passes 2.6 M times is exactly the kind of result that turns out to be checking
+nothing:
+
+| perturbation | caught |
+|---|---|
+| ROM_CONTINUE skip bit `cur_dw[20]` -> `[19]`, gen A arm | 522,249 dwords |
+| gen-B pair offset +2 | 1,048,555 dwords |
+| the two window enables swapped | 1.57 M dwords, `want 00000000 got 0000FFFF` |
+
+That last signature is viprp1's original bug reproduced exactly: a window opened
+over a region nothing loaded, reading 0xFF where MAME reads 0x00.
+
+**And the first version of this testbench could NOT catch that.** It filled the
+SDRAM model with sound1 data regardless of whether the set carried that ROM, so
+a window opened over nothing still read plausible bytes. The negative check is
+what found it -- in the test, not in the RTL. Model the memory a set does not
+load as 0xFF, or the one bug this file exists to catch walks straight through.
+
+### 22.3 tb_boot_top had also stopped building
+
+`run-boot` -- which the README calls the only test of spi_cpu's sound01 window,
+and therefore the one that matters most for this refactor -- failed to build at
+HEAD with **37 warnings**: 32 pins spi_top had grown since the file was last
+touched (`set_upd`, the sample-flash write port, the EIP profiler, and the
+sel_pcm / sound-FIFO / flash telemetry) plus `set_id` still `[1:0]` against
+spi_top's `[2:0]` from when viprp1 became the fifth set.
+
+Same failure as 21.6's, in a second testbench, found the same way: by trying to
+use it. Two testbenches silently not building is not a coincidence, it is a
+missing habit -- `make test` does not build tb_boot_top, so nothing noticed.
+
+Wired now. `set_upd` is tied low to match the hardcoded `jumpers = 8'hFC`, so
+what run-boot covers is unchanged; the flash write port's ack is looped back to
+its request rather than tied low, because it is a toggle handshake and a
+permanent stall is exactly the silent failure 21.3 was.
+
+### 22.4 What it all says
+
+* every dword of the region, four configurations, against MAME's own scatter
+* the Python transcription still agrees on all six real sets (1.03-1.54 M
+  populated dwords each)
+* and the REAL 386, booting against a real image, reads its Z80 program through
+  the refactored window byte for byte:
+
+      rdft2   444,294 sound01 fetches   sound1.u0222[0x60000..0x7FFFF]  131,072 bytes
+      rfjet   833,227 sound01 fetches   sound1.u0222[0x44000..0x7FFFF]  245,760 bytes
+
+`make test` and `make verify` are green.
+
+### 22.5 Still to do for one MRA
+
+Unchanged from the plan: the job walker (which now has its source decode), the
+MRA config opcodes for the per-set job-table and stamp addresses, the OSD option
+and its menumask gating, and last the MRA collapse -- with `tb_flash_derive`
+replacing the derived-image sha256 that `check_mra.py` loses when no MRA carries
+a derived image any more.

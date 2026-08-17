@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
+.PHONY: all clean lint lint-top lint-sound capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_decode run-ddr_rom_reader run-rom_loader run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram
+all: run-rom_decode run-ddr_rom_reader run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -73,6 +73,20 @@ $(RTL)/ymf271_tables.vh: $(TOOLS)/gen_ymf271_tables.py
 
 run-rom_loader: obj_dir/Vrom_loader
 	@./obj_dir/Vrom_loader
+
+# The 386's view of MAME's sound01 region, checked against MAME's own scatter
+# rule over every dword of it. Needs no ROM set -- the ROMs are synthetic,
+# because what is being checked is an address mapping. This is the decode the
+# in-core flash derivation will read its source material through, so it is
+# checked at the RTL rather than only through the Python transcription in
+# tools/check_snd01_window.py.
+run-snd_window: obj_dir/Vspi_snd_window
+	@./obj_dir/Vspi_snd_window
+
+obj_dir/Vspi_snd_window: $(RTL)/spi_snd_window.sv $(RTL)/spi_defs.vh \
+                         tb_snd_window.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_snd_window \
+	    $(RTL)/spi_snd_window.sv tb_snd_window.cpp
 
 # The codec on its own: hand vectors from the disassembly, no ROM needed.
 run-rom_decode: obj_dir/Vspi_rom_decode
@@ -216,7 +230,7 @@ Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv
 # T80s.sv here is the Verilator stand-in; Quartus builds the VHDL core instead.
 SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv T80s.sv
 
-CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv \
+CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RTL)/spi_snd_window.sv \
              $(RTL)/spi_io.sv $(RTL)/spi_mainram.sv $(RTL)/spi_reset_sync.sv \
              $(RTL)/spi_dpram.sv $(RTL)/spi_dma.sv $(RTL)/spi_layers.sv \
              $(RTL)/spi_mixer.sv $(RTL)/spi_tile_decrypt.sv \
