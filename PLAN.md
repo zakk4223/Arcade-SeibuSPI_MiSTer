@@ -6904,3 +6904,72 @@ and what the state machine did in the three clocks after each.
 **A caveat on every "clean" run above:** the check is ONE byte. A ritual that
 gets 0x29FE right may have lost some other byte, and only comparing the whole
 save file would show it -- which needs the OSD to be opened by hand.
+
+### 19.13  The byte was never lost. It was programmed with 0xFF
+
+The instrument 19.12 asked for: inside sdram.sv, watch the ch3 writes to the
+one halfword and record what actually goes on the bus, plus what the controller
+does in the four clocks after. It took four builds to get right and the mistakes
+are worth keeping, because each one produced a confident, wrong reading:
+
+* `probe_width` was 71 against a 101-bit concatenation. That does not fail --
+  the field silently truncates -- and it read as 255 writes to a halfword that
+  gets five, and bank 3 for an address in bank 0.
+* The ROM loader fills this whole region with blank flash at download time, one
+  BYTE at a time, through the same channel. Its two writes to the watched
+  halfword arrived first and ate both entry slots, so the panel was reporting
+  the loader's `FFFF` fill and calling it the updater's. The sweep that erases
+  the halfword falls between the two, so arming on it takes the updater's
+  writes and nothing else.
+* The command window was four entries deep and the window five cycles long, so
+  the write itself was shifted out before it could be read.
+* Registering the address compare off `ch3_addr_1` -- itself already a delayed
+  copy -- made it describe the address from BEFORE the request. It had to be
+  registered off something (combinationally it put a 26-bit comparator in the
+  chain driving SDRAM_A and cost 0.087 ns the build did not have), but off the
+  RAW input, so the two are the same vintage.
+
+Then, twelve trials, each a fresh ritual. The watched byte is 10,750 bytes into
+the payload, so it is programmed within seconds of the erase and there is no
+need to sit through seven minutes to learn its fate:
+
+```
+trial  1: ok    dq=FEFE        trial  7: LOST  dq=FFFF
+trial  2: LOST  dq=FFFF        trial  8: LOST  dq=FFFF
+trial  3: ok    dq=FEFE        trial  9: LOST  dq=FFFF
+trial  4: ok    dq=FEFE        trial 10: LOST  dq=FFFF
+trial  5: ok    dq=FEFE        trial 11: LOST  dq=FFFF
+trial  6: LOST  dq=FFFF        trial 12: ok    dq=FEFE
+                               === 7 lost, 5 ok ===
+```
+
+**Perfect correlation, and it says the opposite of what 19.12 concluded.** The
+write is not lost anywhere. It reaches SDRAM with the right address and the
+right byte mask (10, low lane), and carries **0xFFFF where it should carry
+0xFEFE**. The byte was programmed -- with 0xFF, which is also the erased value,
+which is exactly why every earlier measurement read as a write that never
+arrived.
+
+19.12's conclusion was wrong, and wrong in an instructive way: its trace proved
+the ADDRESS and the LANE were right and I took that for the whole request. It
+never recorded the datum of that particular write -- `dbg_w_data` holds the LAST
+write to the halfword, which is the one after it.
+
+**Where it actually is.** `sdr_din` is `{pg_data, pg_data}`, so 0xFFFF on the
+bus means `pg_data` was already 0xFF inside spi_soundflash. Everything below
+that -- the arbiter, the handoff, sdram.sv, the tWR window -- is exonerated, and
+so is the tWR hypothesis 19.12 leaned on. (That hypothesis was not idle: the
+same-bank ACTIVE three clocks after a write DOES happen, and was caught on the
+neighbouring byte in three separate runs. It just is not this.)
+
+That leaves the datum's own path: the Z80 wrote 0xFF, or it was latched as 0xFF
+between the Z80 and the flash. The likeliest candidate is the 386 -> Z80 FIFO:
+a read taken when the FIFO has nothing yet returns all-ones, which corrupts
+exactly one byte and disturbs nothing else -- the Z80 computes the addresses
+itself, so the stream never shifts. It also fits the rate, which is not rare at
+all once measured properly: **seven runs in twelve**, not one byte in two
+million.
+
+**Next instrument:** the datum, upstream. Record what `ext_wd` carries for the
+write to this address, and alongside it the FIFO's occupancy and whether the
+Z80's read of it found anything there.

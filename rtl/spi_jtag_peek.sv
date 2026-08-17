@@ -133,6 +133,26 @@ module spi_jtag_peek
 	input       [7:0] aw_data,
 	input      [25:0] aw_total,
 
+	// The sdram side of the same watch (PLAN.md 19.12), on its own instance
+	// because SNDV is at 494 of the 511 bits altsource_probe allows.
+	input       [7:0] sw_takes,
+	input       [7:0] sw_writes,
+	input       [7:0] sw_same,
+	input       [1:0] sw_wbank,
+	input             sw_wchip,
+	input      [15:0] sw_e0_dq,
+	input       [1:0] sw_e0_dqm,
+	input       [3:0] sw_e0_gap,
+	input       [1:0] sw_e0_ab,
+	input             sw_e0_ac,
+	input      [14:0] sw_e0_after,
+	input      [15:0] sw_e1_dq,
+	input       [1:0] sw_e1_dqm,
+	input       [3:0] sw_e1_gap,
+	input       [1:0] sw_e1_ab,
+	input             sw_e1_ac,
+	input      [14:0] sw_e1_after,
+
 	// SDRAM occupancy, per channel, per 2^21 clk_ram window. Its own probe
 	// because it is a different question from everything on SNDV.
 	input      [94:0] sdr_trans,
@@ -265,6 +285,32 @@ module spi_jtag_peek
 		          nv_bytes, nv_saves, nv_beats,
 		          fw_progs, fw_be, fw_data, fw_erases, fw_er_after, fw_trace,
 		          aw_n, aw_be, aw_data, aw_total}),
+		.source ()
+	);
+
+	// The sdram-side watch. A separate instance for room, and separate from
+	// SNDV for a second reason: it is the only probe whose signals come from
+	// clk_ram, and mixing two clocks into one instance would make a reading
+	// that is half from each.
+	altsource_probe
+	#(
+		.sld_auto_instance_index ("YES"),
+		.sld_instance_index      (8),
+		.instance_id             ("SDRW"),
+		// 101, counted field by field. It was 71 first time out, which does
+		// not fail or warn usefully -- the concatenation is simply truncated
+		// and every field reads as part of its neighbour, which looked like
+		// 255 writes to a halfword that gets three.
+		.probe_width             (107),
+		.source_width            (1),
+		.source_initial_value    ("0"),
+		.enable_metastability    ("NO")
+	)
+	sdrw_issp
+	(
+		.probe  ({sw_takes, sw_writes, sw_same, sw_wbank, sw_wchip,
+		          sw_e0_dq, sw_e0_dqm, sw_e0_gap, sw_e0_ab, sw_e0_ac, sw_e0_after,
+		          sw_e1_dq, sw_e1_dqm, sw_e1_gap, sw_e1_ab, sw_e1_ac, sw_e1_after}),
 		.source ()
 	);
 

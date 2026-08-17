@@ -266,6 +266,55 @@ if {$mode eq "list"} {
         }
         puts "watch trace=$tr  (addr/be, oldest first)"
     }
+} elseif {$mode eq "sdram"} {
+    # The sdram side of the watch (PLAN.md 19.12). What this module actually
+    # put on the bus for the two writes to the watched halfword, and what it
+    # did in the four clocks after each.
+    #
+    # The hypothesis under test: CMD_WRITE goes out with auto-precharge and the
+    # controller can issue the next ACTIVE three clocks later, against a
+    # tWR + tRP nearer four. Within one bank that truncates the write. So the
+    # numbers that matter are `gap` and whether `bank` matches.
+    #
+    # Entry 0 is the byte that goes missing (low lane, mask 10), entry 1 the
+    # one right after it that lands (high lane, mask 01). Same address, same
+    # run: whatever differs is the fault.
+    set p [read_probe_data -instance_index [index_of "SDRW"]]
+    proc fld {p a n} { return [expr 0b[string range $p $a [expr {$a+$n-1}]]] }
+    proc cmdname {c} {
+        switch -- $c {
+            7 { return "NOP " }  3 { return "ACT " }  5 { return "READ" }
+            4 { return "WRIT" }  2 { return "PRE " }  1 { return "RFSH" }
+            default { return [format "?%d  " $c] }
+        }
+    }
+    set takes  [fld $p 0 8]
+    set writes [fld $p 8 8]
+    set same   [fld $p 16 8]
+    set wbank  [fld $p 24 2]
+    set wchip  [fld $p 26 1]
+    puts [format "ch3 watch  = %d taken, %d reached CMD_WRITE, %d followed by a SAME-bank ACTIVE" \
+          $takes $writes $same]
+    puts [format "write bank = %d  chip %d" $wbank $wchip]
+    # Nested braces, not quotes: inside a braced list Tcl does not process
+    # quotes, so the first attempt printed its own source line.
+    foreach {name off} {{entry0, the byte that goes missing} 27
+                        {entry1, the control that lands}     67} {
+        set dq    [fld $p $off 16]
+        set dqm   [fld $p [expr {$off+16}] 2]
+        set gap   [fld $p [expr {$off+18}] 4]
+        set ab    [fld $p [expr {$off+22}] 2]
+        set ac    [fld $p [expr {$off+24}] 1]
+        set after [fld $p [expr {$off+25}] 15]
+        set cmds ""
+        for {set i 4} {$i >= 0} {incr i -1} {
+            append cmds [cmdname [expr {($after >> ($i*3)) & 7}]] " "
+        }
+        puts [format "%s dq=%04X mask=%02b  next ACTIVE %s  bus: %s" \
+              $name $dq $dqm \
+              [expr {$gap ? "+$gap clk, bank $ab chip $ac" : "none within the window"}] \
+              $cmds]
+    }
 } elseif {$mode eq "gdt"} {
     set p [read_probe_data -instance_index [index_of "GDTS"]]
     # probe = {gdt5..gdt0}, MSB first -> gdt0 is the last 32 bits
@@ -535,7 +584,7 @@ if {$mode eq "list"} {
     }
 } else {
     puts "usage: quartus_stp -t tools/jtag_peek.tcl \[list | sums | vitals | sound | sdram |"
-    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\]\]"
+    puts "       rate | dump <addr> <count> | prof <lo> <hi> \[seconds\] | sdram]"
 }
 
 end_insystem_source_probe

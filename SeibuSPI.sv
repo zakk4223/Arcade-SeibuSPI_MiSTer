@@ -445,6 +445,16 @@ wire        sdr_refresh;
 // USE_CH5 was 0 while nothing read PCM samples; the YMF271 does now.
 sdram #(.USE_CH5(1)) sdram
 (
+	// The watch (PLAN.md 19.12).
+	.dbg_s_takes (dbg_sw_takes),  .dbg_s_writes(dbg_sw_writes),
+	.dbg_s_same  (dbg_sw_same),
+	.dbg_s_wbank (dbg_sw_wbank),  .dbg_s_wchip (dbg_sw_wchip),
+	.dbg_s_e0_dq (dbg_sw_e0_dq),  .dbg_s_e0_dqm(dbg_sw_e0_dqm),
+	.dbg_s_e0_gap(dbg_sw_e0_gap), .dbg_s_e0_ab (dbg_sw_e0_ab),
+	.dbg_s_e0_ac (dbg_sw_e0_ac),  .dbg_s_e0_after(dbg_sw_e0_after),
+	.dbg_s_e1_dq (dbg_sw_e1_dq),  .dbg_s_e1_dqm(dbg_sw_e1_dqm),
+	.dbg_s_e1_gap(dbg_sw_e1_gap), .dbg_s_e1_ab (dbg_sw_e1_ab),
+	.dbg_s_e1_ac (dbg_sw_e1_ac),  .dbg_s_e1_after(dbg_sw_e1_after),
 	.init      (~pll_locked),
 	.clk       (clk_ram),
 	.doRefresh (sdr_refresh),
@@ -694,6 +704,12 @@ spi_jtag_peek peek
 	.fw_er_after(dbg_flash_w_er_after), .fw_trace(dbg_flash_w_trace),
 	.aw_n(dbg_arb_w_n), .aw_be(dbg_arb_w_be), .aw_data(dbg_arb_w_data),
 	.aw_total(dbg_arb_d_total),
+	.sw_takes(dbg_sw_takes), .sw_writes(dbg_sw_writes), .sw_same(dbg_sw_same),
+	.sw_wbank(dbg_sw_wbank), .sw_wchip(dbg_sw_wchip),
+	.sw_e0_dq(dbg_sw_e0_dq), .sw_e0_dqm(dbg_sw_e0_dqm), .sw_e0_gap(dbg_sw_e0_gap),
+	.sw_e0_ab(dbg_sw_e0_ab), .sw_e0_ac(dbg_sw_e0_ac), .sw_e0_after(dbg_sw_e0_after),
+	.sw_e1_dq(dbg_sw_e1_dq), .sw_e1_dqm(dbg_sw_e1_dqm), .sw_e1_gap(dbg_sw_e1_gap),
+	.sw_e1_ab(dbg_sw_e1_ab), .sw_e1_ac(dbg_sw_e1_ac), .sw_e1_after(dbg_sw_e1_after),
 	.sdr_trans(sdr_trans),
 	.ctrl(dbg_ctrl),
 	.prof_lo(v_plo), .prof_hi(v_phi), .prof_in(v_pin), .prof_total(v_ptot)
@@ -717,6 +733,12 @@ wire  [7:0] dbg_flash_w_progs, dbg_flash_w_data, dbg_flash_w_erases;
 wire  [1:0] dbg_flash_w_be;
 wire        dbg_flash_w_er_after;
 wire [55:0] dbg_flash_w_trace;
+wire  [7:0] dbg_sw_takes, dbg_sw_writes, dbg_sw_same;
+wire  [1:0] dbg_sw_wbank, dbg_sw_e0_dqm, dbg_sw_e0_ab, dbg_sw_e1_dqm, dbg_sw_e1_ab;
+wire        dbg_sw_wchip, dbg_sw_e0_ac, dbg_sw_e1_ac;
+wire [15:0] dbg_sw_e0_dq, dbg_sw_e1_dq;
+wire  [3:0] dbg_sw_e0_gap, dbg_sw_e1_gap;
+wire [14:0] dbg_sw_e0_after, dbg_sw_e1_after;
 wire  [7:0] dbg_arb_w_n, dbg_arb_w_data;
 wire  [1:0] dbg_arb_w_be;
 wire [25:0] dbg_arb_d_total;

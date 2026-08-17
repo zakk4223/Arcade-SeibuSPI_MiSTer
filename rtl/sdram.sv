@@ -60,6 +60,41 @@ module sdram
 
     input             doRefresh,
 
+    // ---- the watch (PLAN.md 19.12) ------------------------------------
+    // 19.12 put the sample flash's lost byte at this module's door: the write
+    // is issued with the right address and lane, the arbiter latches it, and
+    // it is not in memory afterwards. This is the other side of that door.
+    //
+    // For the first two ch3 WRITES to the watched halfword it records what
+    // went on the bus -- data and byte masks -- and then what this controller
+    // did in the four clocks after each, because STATE_RW1 issues CMD_WRITE
+    // with auto-precharge and can be back at STATE_IDLE three clocks later,
+    // against a tWR + tRP the part wants nearer four. Within one bank that
+    // truncates the write; across banks it is harmless, which is why this
+    // records the BANK of the write and of the next ACTIVE.
+    //
+    // Two entries, because the updater writes that halfword TWICE, one lane
+    // each, and only the first byte goes missing. Same run, same address, one
+    // lands and one does not -- so whatever differs between the two entries is
+    // the fault, and the second entry is the control.
+    output reg  [7:0] dbg_s_takes,    // watched ch3 writes taken in IDLE
+    output reg  [7:0] dbg_s_writes,   // ...that reached CMD_WRITE
+    output reg  [7:0] dbg_s_same,     // ...followed by a SAME-bank ACTIVE
+    output reg  [1:0] dbg_s_wbank,
+    output reg        dbg_s_wchip,
+    output reg [15:0] dbg_s_e0_dq,
+    output reg  [1:0] dbg_s_e0_dqm,   // as driven on A[12:11]; 1 = masked
+    output reg  [3:0] dbg_s_e0_gap,   // clocks from the write to the next ACTIVE
+    output reg  [1:0] dbg_s_e0_ab,    // that ACTIVE's bank
+    output reg        dbg_s_e0_ac,
+    output reg [14:0] dbg_s_e0_after, // the write, then four clocks of bus
+    output reg [15:0] dbg_s_e1_dq,
+    output reg  [1:0] dbg_s_e1_dqm,
+    output reg  [3:0] dbg_s_e1_gap,
+    output reg  [1:0] dbg_s_e1_ab,
+    output reg        dbg_s_e1_ac,
+    output reg [14:0] dbg_s_e1_after,
+
     inout  reg [15:0] SDRAM_DQ,    // 16 bit bidirectional data bus
     output reg [12:0] SDRAM_A,     // 13 bit multiplexed address bus
     output            SDRAM_DQML,  // two byte masks
@@ -147,6 +182,11 @@ localparam STATE_IDLE_5  = 9;
 localparam STATE_RFSH    = 10;
 
 
+// The watched halfword (PLAN.md 19.12): byte 0x2829FE, which is
+// SDR_PCM_BASE + 0x29FE. ch3 addresses arrive as bytes and are used from bit 1
+// up, so this is the byte address shifted down one.
+localparam [26:1] WATCH_HW = 26'h1414FF;
+
 always @(posedge clk) begin
     reg [CAS_LATENCY+BURST_LENGTH+1:0] data_ready_delay1, data_ready_delay2, data_ready_delay3, data_ready_delay4, data_ready_delay5;
 
@@ -195,6 +235,27 @@ always @(posedge clk) begin
 
     reg        doRefresh_1;
 
+    // The watch's own state (PLAN.md 19.12).
+    reg        w_taken;      // the transaction in flight is the watched one
+    reg  [3:0] w_run;        // cycles left in the window after CMD_WRITE
+    reg        w_cur;        // which entry the window is filling
+    reg  [1:0] w_idx;        // entries filled so far, saturating
+    // The ROM loader fills this whole region with blank flash at download
+    // time, one BYTE at a time, through this same channel -- so the first two
+    // byte writes to the watched halfword are its, not the updater's, and they
+    // ate both entries first time out. The sweep that erases the halfword sits
+    // between the two, so arming on it takes the updater's writes and nothing
+    // else. (The loader never writes both masks at once, which is what makes
+    // the sweep distinguishable here.)
+    reg        w_armed;
+    // The address compare, registered off the RAW input alongside ch3_addr_1
+    // so the two are the same vintage. Combinationally in the ch3 branch it put
+    // a 26-bit comparator in the chain driving SDRAM_A and cost the build the
+    // 0.087 ns it did not have; registered off ch3_addr_1 instead it describes
+    // the address from BEFORE the request, and counted 2 writes to a halfword
+    // that gets 5.
+    reg        ch3_watch_r;
+
     ch1_req_1 <= ch1_req;
     ch2_req_1 <= ch2_req;
     ch3_req_1 <= ch3_req;
@@ -212,6 +273,7 @@ always @(posedge clk) begin
     ch5_addr_1 <= ch5_addr[26:1];
 
     doRefresh_1 <= doRefresh;
+    ch3_watch_r <= (ch3_addr[26:1] == WATCH_HW) && ~ch3_rnw;
 
     if (ch1_req != ch1_req_1) ch1_rq <= 1;
     if (ch2_req != ch2_req_1) ch2_rq <= 1;
@@ -262,6 +324,42 @@ always @(posedge clk) begin
     if(data_ready_delay5[0]) ch5_ack <= ch5_req;
 
     SDRAM_DQ <= 16'bZ;
+
+    // The watch window. Ahead of the case statement so that a new CMD_WRITE
+    // arming it beats this cycle's decrement. `w_run` counts 5 down to 1, so
+    // the age of what is on the bus is 5 - w_run: age 0 is the write itself,
+    // and the earliest an ACTIVE can follow is age 3.
+    if (|w_run) begin
+        w_run <= w_run - 4'd1;
+        if (!w_cur) begin
+            dbg_s_e0_after <= {dbg_s_e0_after[11:0], command};
+            if (w_run == 4'd5) begin
+                dbg_s_e0_dq  <= saved_data;
+                dbg_s_e0_dqm <= SDRAM_A[12:11];
+            end
+            if (command == CMD_ACTIVE && dbg_s_e0_gap == 4'd0) begin
+                dbg_s_e0_gap <= 4'd5 - w_run;
+                dbg_s_e0_ab  <= SDRAM_BA;
+                dbg_s_e0_ac  <= chip;
+                if (SDRAM_BA == dbg_s_wbank && chip == dbg_s_wchip)
+                    dbg_s_same <= dbg_s_same + 8'd1;
+            end
+        end
+        else begin
+            dbg_s_e1_after <= {dbg_s_e1_after[11:0], command};
+            if (w_run == 4'd5) begin
+                dbg_s_e1_dq  <= saved_data;
+                dbg_s_e1_dqm <= SDRAM_A[12:11];
+            end
+            if (command == CMD_ACTIVE && dbg_s_e1_gap == 4'd0) begin
+                dbg_s_e1_gap <= 4'd5 - w_run;
+                dbg_s_e1_ab  <= SDRAM_BA;
+                dbg_s_e1_ac  <= chip;
+                if (SDRAM_BA == dbg_s_wbank && chip == dbg_s_wchip)
+                    dbg_s_same <= dbg_s_same + 8'd1;
+            end
+        end
+    end
 
     command <= CMD_NOP;
     case (state)
@@ -366,6 +464,12 @@ always @(posedge clk) begin
                 saved_wr   <= ~ch3_rnw_1;
                 ch         <= 2;
                 ch3_rq     <= 0;
+                if (ch3_watch_r) begin
+                    dbg_s_takes <= dbg_s_takes + 8'd1;
+                    dbg_s_wbank <= ch3_addr_1[24:23];
+                    dbg_s_wchip <= ch3_addr_1[26];
+                    w_taken     <= 1'b1;
+                end
                 if (ch3_rnw_1)
                     {cas_addr[12:9],SDRAM_BA,SDRAM_A,cas_addr[8:0]} <= {2'b00, 1'b1, ch3_addr_1[25:1]};
                 else
@@ -388,6 +492,23 @@ always @(posedge clk) begin
             if(saved_wr) begin
                 command  <= CMD_WRITE;
                 SDRAM_DQ <= saved_data;
+                if (w_taken) begin
+                    dbg_s_writes <= dbg_s_writes + 8'd1;
+                    w_taken      <= 1'b0;
+                    // Only BYTE writes get an entry. The erase sweep writes
+                    // this halfword too, with both masks open, and it arrives
+                    // first -- so counting it would spend one of the two slots
+                    // on it and leave no control. cas_addr[12:11] is ~be, so
+                    // 00 there is the sweep and anything else is a program.
+                    // Later writes are ignored rather than overwriting the
+                    // evidence.
+                    if (cas_addr[12:11] == 2'b00) w_armed <= 1'b1;
+                    if (w_armed && w_idx < 2'd2 && cas_addr[12:11] != 2'b00) begin
+                        w_cur <= w_idx[0];
+                        w_run <= 4'd5;
+                        w_idx <= w_idx + 2'd1;
+                    end
+                end
                 if(ch == 0) ch1_ack  <= ch1_req;
                 if(ch == 1) ch2_ack  <= ch2_req;
                 if(ch == 2) ch3_ack  <= ch3_req;
@@ -409,6 +530,29 @@ always @(posedge clk) begin
     endcase
 
     if (init) begin
+        dbg_s_takes    <= 8'd0;
+        dbg_s_writes   <= 8'd0;
+        dbg_s_same     <= 8'd0;
+        dbg_s_wbank    <= 2'd0;
+        dbg_s_wchip    <= 1'b0;
+        dbg_s_e0_dq    <= 16'd0;
+        dbg_s_e0_dqm   <= 2'd0;
+        dbg_s_e0_gap   <= 4'd0;
+        dbg_s_e0_ab    <= 2'd0;
+        dbg_s_e0_ac    <= 1'b0;
+        dbg_s_e0_after <= 15'd0;
+        dbg_s_e1_dq    <= 16'd0;
+        dbg_s_e1_dqm   <= 2'd0;
+        dbg_s_e1_gap   <= 4'd0;
+        dbg_s_e1_ab    <= 2'd0;
+        dbg_s_e1_ac    <= 1'b0;
+        dbg_s_e1_after <= 15'd0;
+        w_taken        <= 1'b0;
+        w_run          <= 4'd0;
+        w_cur          <= 1'b0;
+        w_idx          <= 2'd0;
+        w_armed        <= 1'b0;
+        ch3_watch_r    <= 1'b0;
         state <= STATE_STARTUP;
         refresh_count <= startup_refresh_max - sdram_startup_cycles;
         refresh_due   <= 1'b0;
