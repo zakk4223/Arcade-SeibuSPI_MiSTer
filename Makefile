@@ -3,7 +3,8 @@
 QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
-.PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 verify
+.PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 \
+        check-derive mras check-clones verify
 
 all: build
 
@@ -69,6 +70,26 @@ check-snd01:
 check-derive:
 	@python3 tools/check_flash_derive.py \
 	    $(if $(ROMS),--all "$(ROMS)",$(if $(ZIP),"$(ZIP)" "$(IMAGE)" $(if $(SET),--set $(SET)),--help))
+
+# Regenerate the clone MRAs from MAME's driver. Every one of them is a rename of
+# its parent's part list plus its own job-table address, so they are generated
+# rather than maintained. The six hand-written cartridge MRAs are the fixtures:
+# gen_mras.py emits each of them too and refuses to write anything if what it
+# emits no longer matches the file that is already on hardware.
+#   make mras
+#   make mras MRAFLAGS=--list      # what is supported, and why the rest is not
+mras:
+	@python3 tools/gen_mras.py $(MRAFLAGS)
+
+# The clone MRAs' one per-set constant, re-derived from the ROMs: find each job
+# table two independent ways, check the region code three ways, then build the
+# flash and require it to be the parent's payload byte for byte. A wrong job
+# table does not fail loudly on hardware -- spi_flash_derive rejects the bad
+# source and the game quietly runs its own six-minute updater instead -- so this
+# is the check that matters. Needs ROMs, so it is not part of `verify`.
+#   make check-clones ROMS=~/Downloads/roms
+check-clones:
+	@python3 tools/gen_mras.py --verify "$(ROMS)"
 
 # Everything that can be checked without a Quartus run or a MiSTer.
 verify: lint check-mra test

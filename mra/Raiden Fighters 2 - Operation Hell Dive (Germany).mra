@@ -8,17 +8,17 @@
 <!-- or (at your option) any later version.                              -->
 
 <misterromdescription>
-    <name>Senkyu (Japan, SPI cartridge)</name>
-    <setname>senkyu</setname>
+    <name>Raiden Fighters 2 - Operation Hell Dive (Germany)</name>
+    <setname>rdft2</setname>
     <rbf>SeibuSPI</rbf>
     <mameversion>0277</mameversion>
-    <year>1995</year>
+    <year>1997</year>
     <manufacturer>Seibu Kaihatsu</manufacturer>
     <players>2</players>
     <joystick>8</joystick>
-    <rotation>horizontal</rotation>
-    <region>Japan</region>
-    <category>Puzzle</category>
+    <rotation>vertical (cw)</rotation>
+    <region>Germany</region>
+    <category>Shooter</category>
 
     <!--
       THE SAMPLE FLASH. The SXX2C cartridge has no sample ROM: the YMF271 reads
@@ -51,27 +51,37 @@
       ROM_LOAD24_* / ROM_LOAD32_* byte scatter in hardware. `make check-mra`
       holds this file, that table and MAME's ROM_START against each other.
 
-      This is a GENERATION A cartridge, which differs from rdft's family in two
-      ways the core cares about:
+      The tail is where this differs from the pre-flashed MRA, and it is in
+      MAME's own region order: sound01's two ROMs, then soundflash1's blank.
 
-        * the program is 1 MB in the UPPER half of the 2 MB region -- four
-          256 KB ROMs at offset 0x100000 -- so the first part is a megabyte of
-          zeroes for the half MAME leaves empty. Nothing is known to read it;
-          filling it means the region matches MAME's rather than holding
-          whatever the previously loaded core left in SDRAM.
-        * the PCM source is 1 MB on ONE byte lane where rdft's is 2 MB on two.
-          spi_cpu.sv's pcmsrc_1lane is that bit.
+        part 14  the PCM source ROM      -> 0x2300000, the source window
+        part 15  the second sound ROM    -> 0x0480000, source AND Z80 program
+        part 16  a BLANK 2 MB flash      -> 0x0280000, what the game programs
 
-      Decryption is the same SEI252 as rdft (MAME's init is init_sei252), so
-      nothing in the graphics path is new.
+      Layout produced in SDRAM (see rtl/spi_defs.vh):
+        0x0000000  2 MB   386 program
+        0x0200000  256 KB Z80 program -- RAM, NOT loaded here. The 386 fills it
+                          through port 0x688 and releases the Z80 with 0x68C.
+        0x0240000  192 KB text tiles
+        0x0280000  2 MB   YMF271 sample flash, blank at boot
+        0x0480000  512 KB the second sound ROM, packed one byte per 386 dword
+        0x0500000  12 MB  background tiles
+        0x1100000  18 MB  sprites, three 6 MB plane-pair chunks
+        0x2300000  2 MB   the PCM source ROM, read through the sound01 window
+                          -- PER-SET, immediately above this set's own 18 MB of
+                          sprites; 37 MB top, so this one needs 64 MB either way
     -->
 
     <!--
       Index 1 is the core's config blob. Byte 0 is the mod byte: bit 0 selects
       the SXX2C board wiring, bits 3:1 the set, and BIT 4 the authentic-flash
-      tail plus the 386's sound01 source window.
+      tail of that set's part table plus the 386's sound01 source window. Bit 4
+      alone does nothing -- it is ANDed with bit 0 in SeibuSPI.sv, because on
+      SXX2E it would open a window with nothing behind it.
 
-      IT MUST COME BEFORE THE index="0" ROM.
+      IT MUST COME BEFORE THE index="0" ROM. Main_MiSTer sends <rom> elements in
+      file order, and an index-1 that follows the image arrives after the loader
+      has already walked its table.
     -->
     <rom index="1">
       <!--
@@ -86,55 +96,73 @@
         batlball 0x00302290, same game, same graphics, same everything
         else. In the RTL that would be a core rebuild per clone.
 
-          job table  0x00302324
+          job table  0x00201b55
           stamp      0x003ffffc   written to flash[0..3] LAST
-          generation 0            A
+          generation 2            B1
 
         All three come out of tools/build_soundflash.py's GAMES table,
         which read them out of the game's own program image; make
         check-mra holds this block against it.
       -->
-      <part>19</part>
+      <part>13</part>
       <part>FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF</part>
-      <part>24 23 30 00</part>
+      <part>55 1B 20 00</part>
       <part>FC FF 3F 00</part>
-      <part>00</part>
+      <part>02</part>
     </rom>
 
-    <rom index="0" address="0x30000000" zip="senkyu.zip" md5="none">
-        <!-- the empty lower half of the program region -->
-        <part repeat="0x100000">00</part>
+    <!--
+      Worth noting what this variant costs rdft2 and rfjet nothing: their
+      pre-flashed images are DERIVED by a decompressor (CODEC_BPE_DPCM) whose
+      format had to be cracked. Here there is no derived image and no codec --
+      the game's own 386 does the decompression, as it does on hardware.
+    -->
 
-        <!-- 386 program: four 256 KB byte lanes at region offset 0x100000 -->
-        <part name="fb_1.211" crc="20a3e5db"/>
-        <part name="fb_2.212" crc="38e90619"/>
-        <part name="fb_3.210" crc="226f0429"/>
-        <part name="fb_4.29"  crc="b46d66b7"/>
+    <rom index="0" address="0x30000000" zip="rdft2.zip" md5="none">
+        <!-- 386 program: four byte lanes -->
+        <part name="prg0.tun" crc="3cb3fdca"/>
+        <part name="prg1.bin" crc="cab55d88"/>
+        <part name="prg2.bin" crc="83758b0e"/>
+        <part name="prg3.bin" crc="084fb5e4"/>
 
-        <!-- text layer: a word plus a byte -->
-        <part name="fb_6.413" crc="b57115c9"/>
-        <part name="fb_5.48"  crc="440a9ae3"/>
+        <!-- text layer: three byte lanes, and the lane order is 1, 0, 2 -->
+        <part name="fix0.u0524" crc="6fdf4cf6"/>
+        <part name="fix1.u0518" crc="69b7899b"/>
+        <part name="fixp.u0514" crc="99a5fece"/>
 
-        <!-- background tiles: ONE D+P group, 3 MB -->
-        <part name="fb_bg-1d.415" crc="eae7a1fc"/>
-        <part name="fb_bg-1p.410" crc="b46e774e"/>
+        <!-- background tiles: 12 MB, two D+P groups 6 MB apart -->
+        <part name="bg-1d.u0535" crc="6143f576"/>
+        <part name="bg-1p.u0537" crc="55e64ef7"/>
+        <part name="bg-2d.u0536" crc="c607a444"/>
+        <part name="bg-2p.u0538" crc="f0830248"/>
 
-        <!-- sprites: 12 MB in three 4 MB plane-pair chunks, SEI252 -->
-        <part name="fb_obj-1.322" crc="29f86f68"/>
-        <part name="fb_obj-2.324" crc="c9e3130b"/>
-        <part name="fb_obj-3.323" crc="f6c3bc49"/>
-
-        <!-- MAME's sound01: the PCM source, then the second sound ROM -->
-        <part name="fb_pcm-1.215" crc="1d83891c"/>
-        <part name="fb_7.216"     crc="874d7b59"/>
+        <!-- sprites: 18 MB in three 6 MB chunks, MAME's order obj3, obj2, obj1 -->
+        <part name="obj3.u0434"  crc="e08f42dc"/>
+        <part name="obj3b.u0433" crc="1b6a523c"/>
+        <part name="obj2.u0431"  crc="7aeadd8e"/>
+        <part name="obj2b.u0432" crc="5d790a5d"/>
+        <part name="obj1.u0429"  crc="c2c50f02"/>
+        <part name="obj1b.u0430" crc="5259321f"/>
 
         <!--
-          The sample flash, BLANK. flash0_blank_region01.u1053 is a real dump
-          and carries the region ID in byte 0 -- 01, Japan, for this set. MAME
-          has no dump for the second E28F008SA because an erased chip has
-          nothing to dump, so it is a megabyte of FF here.
+          Parts 14 and 15: MAME's sound01 region, whole. sound1.u0222 is the
+          same ROM the pre-flashed MRA carries twice -- once sliced and
+          compressed into the flash image, once whole for the Z80 program. Here
+          it is carried once, whole, and serves both purposes: the updater reads
+          its compressed half through the sound01 window and the 386 reads the
+          Z80 program at 0x60000 through the same window.
         -->
-        <part name="flash0_blank_region01.u1053" crc="7ae7ab76"/>
+        <part name="pcm.u0217"    crc="2edc30b5"/>
+        <part name="sound1.u0222" crc="b7bd3703"/>
+
+        <!--
+          Part 16: the sample flash, BLANK. flash0_blank_regionXX.u1053 is a
+          real dump and it carries the region ID in byte 0 -- an erased or
+          mismatched one is the "hardware error 81" the MAME driver header
+          describes. MAME has no dump for the second E28F008SA because an
+          erased chip has nothing to dump, so it is a megabyte of FF here.
+        -->
+        <part name="flash0_blank_region80.u1053" crc="e2adaff5"/>
         <part repeat="0x100000">FF</part>
     </rom>
 
@@ -148,7 +176,7 @@
     <nvram index="2" size="2097152"/>
 
     <!--
-      Same control layout as the other sets; the names map to joystick bits
+      Same control layout as the pre-flashed MRA; the names map to joystick bits
       4 upwards IN ORDER and SeibuSPI.sv decodes them at exactly those positions.
     -->
     <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"

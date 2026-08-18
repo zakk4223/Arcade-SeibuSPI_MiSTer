@@ -222,7 +222,10 @@ localparam CONF_STR = {
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"DEFMRA,/_Arcade/rdfts.mra;",
+	// The MRAs are named after the games now, not the sets, and rdfts is a
+	// clone of rdft in MAME so it sits under _alternatives. This only matters
+	// when the RBF is started directly rather than through an MRA.
+	"DEFMRA,/_Arcade/Raiden Fighters (Germany).mra;",
 	"V,v",`BUILD_DATE
 };
 
@@ -947,7 +950,9 @@ always @(posedge clk_sys) begin
 end
 
 // Joystick bit assignment. Bits 4 and up are the MRA's <buttons names="..."/>
-// list in order, so this and mra/rdfts.mra have to be changed together:
+// list in order, so this and the MRAs have to be changed together -- the
+// hand-written ones in mra/ and the list in tools/gen_mras.py that generates
+// the rest:
 //
 //   [3:0] right, left, down, up
 //   [4]   Shot        [5] Bomb        [6] Button 3

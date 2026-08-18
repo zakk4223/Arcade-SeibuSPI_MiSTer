@@ -86,7 +86,7 @@ SETS = {
     # spr_mode / spr_chunk: sprites are INTERLEAVED in SDRAM (rom_loader
     # M_SPR_ILV), so their scatter mode and destination cannot be derived from
     # MAME's plain ROM_LOAD. Chunk k lands at sprites_base + 2k.
-    "rdfts": dict(mra="rdfts.mra", table="rdfts", mod=0x00, skip=(),
+    "rdfts": dict(mra="_alternatives/_Raiden Fighters (Germany)/Raiden Fighters (Taiwan, single board).mra", table="rdfts", mod=0x00, skip=(),
                   spr_mode="M_SPR_ILV", spr_chunk=0x400000),
     # ONE MRA PER SET. The pre-flashed variants are gone: they could only be
     # built for three of the seven, they needed a derived image and a fresh
@@ -94,13 +94,13 @@ SETS = {
     # ROMs this MRA already carries (PLAN.md 24, 26). What replaces the
     # derived-image check that used to live here is `make check-derive`, which
     # covers seven sets where this covered two.
-    "rdft":  dict(mra="rdft.mra",  table="rdft",  mod=0x11,
+    "rdft":  dict(mra="Raiden Fighters (Germany).mra",  table="rdft",  mod=0x11,
                       skip=("audiocpu",),
                       special={"gun_dogs_pcm.u0217": ("pcmsrc_sei252", "M_LINEAR"),
                                "seibu_8.u0216":      ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "rdft2": dict(mra="rdft2.mra", table="rdft2", mod=0x13,
+    "rdft2": dict(mra="Raiden Fighters 2 - Operation Hell Dive (Germany).mra", table="rdft2", mod=0x13,
                       skip=("audiocpu", "pals"),
                       special={"pcm.u0217":    ("pcmsrc_rdft2", "M_LINEAR"),
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
@@ -111,7 +111,7 @@ SETS = {
     # a pre-flashed one. It is also the first generation-A set here -- 1 MB of
     # PCM source on ONE byte lane -- and the first to use rdfts's text layout
     # on the cartridge board.
-    "viprp1": dict(mra="viprp1.mra", table="viprp1", mod=0x17,
+    "viprp1": dict(mra="Viper Phase 1 (New Version, World).mra", table="viprp1", mod=0x17,
                        skip=("audiocpu",),
                        special={"v_pcm.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "flash0_blank_regionbe.u1053": ("pcm", "M_LINEAR")},
@@ -119,25 +119,60 @@ SETS = {
     # The other two generation-A cartridges. Both have a second sound ROM,
     # which viprp1 does not, and both put their program in the upper half of
     # the region behind a megabyte of zero fill.
-    "senkyu": dict(mra="senkyu.mra", table="senkyu", mod=0x19,
+    "senkyu": dict(mra="Senkyu (Japan, newer).mra", table="senkyu", mod=0x19,
                        skip=("audiocpu",),
                        special={"fb_pcm-1.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "fb_7.216":     ("snd01",  "M_LINEAR"),
                                 "flash0_blank_region01.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "ejanhs": dict(mra="ejanhs.mra", table="ejanhs", mod=0x1B,
+    "ejanhs": dict(mra="E Jong High School (Japan).mra", table="ejanhs", mod=0x1B,
                        skip=("audiocpu",),
                        special={"ej3_pcm1.215": ("pcmsrc_sei252", "M_LINEAR"),
                                 "ejan3_7.216":  ("snd01",  "M_LINEAR"),
                                 "flash0_blank_region01.u1053": ("pcm", "M_LINEAR")},
                        spr_mode="M_SPR_ILV", spr_chunk=0x400000),
-    "rfjet": dict(mra="rfjet.mra", table="rfjet", mod=0x15,
+    "rfjet": dict(mra="Raiden Fighters Jet (Germany).mra", table="rfjet", mod=0x15,
                       skip=("audiocpu", "pals"),
                       special={"pcm-d.u0227":  ("pcmsrc_rfjet", "M_LINEAR"),
                                "sound1.u0222": ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV_R", spr_chunk=0x800000),
 }
+
+
+def expand_clones(drv):
+    """One SETS entry per generated clone MRA, cloned from its parent's.
+
+    A clone walks the SAME part table with the SAME mod byte -- that is the
+    condition gen_mras.classify() enforces before generating anything -- so the
+    only things that move are the MRA path, which ROM_START to read, and the
+    names inside `special`. Those names are positional: the layouts are identical
+    part for part, so the parent's special ROM at index i maps to the clone's ROM
+    at index i. Doing it by position rather than by name is what makes a clone's
+    own blank flash (flash0_blank_region10 against the parent's region01) resolve
+    without a table per set.
+    """
+    import gen_mras
+    sets = gen_mras.parse_driver(drv)
+    supported, _ = gen_mras.classify(sets)
+    out = {}
+    for name, fam in sorted(supported.items()):
+        if name == fam:
+            continue
+        base = SETS[fam]
+        special = {}
+        for p, c in zip(sets[fam]["roms"], sets[name]["roms"]):
+            if p["name"] in base.get("special", {}):
+                special[c["name"]] = base["special"][p["name"]]
+        if len(special) != len(base.get("special", {})):
+            fail("%s: %d of %s's %d special parts did not map by position"
+                 % (name, len(special), fam, len(base["special"])))
+        cfg = dict(base)
+        cfg.update(mra=os.path.join("_alternatives", "_" + sets[fam]["desc"],
+                                    sets[name]["desc"] + ".mra"),
+                   mame=name, special=special, clone_of=fam)
+        out[name] = cfg
+    return out
 
 
 def mame_mode(macro, off):
@@ -304,24 +339,40 @@ def check_derive_cfg(path, setname, data):
     RTL rejects an out-of-range source (spi_flash_derive's err_badjob), which
     turns it into a blank flash and a game that runs its own updater -- safe,
     but silent. So it is checked where it can still be shouted about.
+
+    build_soundflash's GAMES is the authority where it has an entry, because its
+    numbers come with a verified sha256 behind them. A clone's constants are in
+    gen_mras.JOBS instead, and checking the MRA against the table that generated
+    it only catches a hand-edit -- `make check-clones` is what actually re-derives
+    them from the ROMs. Which of the two ran is printed, so the weaker check is
+    never mistaken for the stronger one.
     """
     from build_soundflash import GAMES
+    import gen_mras
     GEN = {"A": 0, "B0": 1, "B1": 2}
-    if setname not in GAMES:
+    if setname in GAMES:
+        g = GAMES[setname]
+        want = (g["job_table"], g["stamp"], GEN[g["gen"]])
+        src = "build_soundflash's GAMES"
+    elif setname in gen_mras.JOBS:
+        fam = gen_mras.family_of(setname)
+        want = (gen_mras.JOBS[setname], gen_mras.STAMP,
+                gen_mras.FAMILY[fam]["gen"])
+        src = "gen_mras.JOBS (make check-clones re-derives it)"
+    else:
         return
     if len(data) < 25:
         fail("%s: index-1 config is %d bytes; the derivation constants need 25 "
              "(job table at 16, stamp at 20, generation at 24)" % (path, len(data)))
     le = lambda o: (data[o] | (data[o+1] << 8) | (data[o+2] << 16) | (data[o+3] << 24))
-    g = GAMES[setname]
-    for name, got, want in (("job table", le(16), g["job_table"]),
-                            ("stamp", le(20), g["stamp"]),
-                            ("generation", data[24], GEN[g["gen"]])):
-        if got != want:
-            fail("%s: index-1 %s is %#x, but build_soundflash says %#x"
-                 % (path, name, got, want))
-    print("  derivation: job table %#010x, stamp %#010x, generation %s"
-          % (le(16), le(20), g["gen"]))
+    for name, got, wanted in (("job table", le(16), want[0]),
+                              ("stamp", le(20), want[1]),
+                              ("generation", data[24], want[2])):
+        if got != wanted:
+            fail("%s: index-1 %s is %#x, but %s says %#x"
+                 % (path, name, got, src, wanted))
+    print("  derivation: job table %#010x, stamp %#010x, generation %d -- against %s"
+          % (le(16), le(20), data[24], src))
 
 
 def parse_loader(path, table, upd=False):
@@ -488,7 +539,8 @@ def check_set(setname, cfg, args):
     drv = os.path.join(args.mame, "src", "mame", "seibu", "seibuspi.cpp")
     mra_path = os.path.join(here, "mra", cfg["mra"])
 
-    print("=== %s (%s table) ===" % (setname, cfg["table"]))
+    print("=== %s (%s table%s) ===" % (setname, cfg["table"],
+          ", clone of %s" % cfg["clone_of"] if cfg.get("clone_of") else ""))
     # The MAME set is the SETS key unless `mame` says otherwise: the
     # authentic-flash MRAs are a second entry for the SAME ROM_START.
     mame = parse_mame(drv, cfg.get("mame", setname), cfg["skip"],
@@ -584,7 +636,11 @@ def check_set(setname, cfg, args):
                      % (idx, el["crc"], rom["name"], rom["crc"]))
             if el["name"] != rom["name"]:
                 fail("part %d: MRA name %r != MAME %r" % (idx, el["name"], rom["name"]))
-            if ent["name"] != rom["name"]:
+            # The table's comments name the PARENT's ROMs, which is the set the
+            # table was written for. A clone renames the same parts, so the
+            # comment cannot match and everything load-bearing -- size, mode,
+            # destination, order -- is checked below regardless.
+            if ent["name"] != rom["name"] and not cfg.get("clone_of"):
                 fail("part %d: rom_loader comment says %r, MAME says %r"
                      % (idx, ent["name"], rom["name"]))
             if ent["size"] != rom["size"]:
@@ -663,18 +719,32 @@ def check_set(setname, cfg, args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", default="all", choices=["all"] + sorted(SETS))
+    ap.add_argument("--set", default="all",
+                    help="a MAME set name, or all (the default). Clones are "
+                         "included in all.")
     ap.add_argument("--mame", default=os.path.expanduser("~/proj/mame"))
     ap.add_argument("--zip", default=None)
+    ap.add_argument("--parents-only", action="store_true",
+                    help="skip the generated clone MRAs")
     args = ap.parse_args()
 
     drv = os.path.join(args.mame, "src", "mame", "seibu", "seibuspi.cpp")
     if not os.path.exists(drv):
         fail("MAME driver not found at %s (pass --mame)" % drv)
 
-    for name in (sorted(SETS) if args.set == "all" else [args.set]):
-        check_set(name, SETS[name], args)
-    print("PASS")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    all_sets = dict(SETS)
+    if not args.parents_only:
+        all_sets.update(expand_clones(drv))
+    if args.set != "all" and args.set not in all_sets:
+        fail("no MRA for %r (have: %s)" % (args.set, ", ".join(sorted(all_sets))))
+
+    names = sorted(all_sets) if args.set == "all" else [args.set]
+    for name in names:
+        check_set(name, all_sets[name], args)
+    print("PASS: %d MRAs (%d hand-written, %d generated)"
+          % (len(names), len([n for n in names if not all_sets[n].get("clone_of")]),
+             len([n for n in names if all_sets[n].get("clone_of")])))
     return 0
 
 

@@ -1,6 +1,6 @@
 # Where this is, and what to do next
 
-Live state as of 2026-08-17. `PLAN.md` is the design record and stays
+Live state as of 2026-08-18. `PLAN.md` is the design record and stays
 chronological; this file is the short answer to "what was I doing". Delete the
 finished parts as they go.
 
@@ -11,7 +11,7 @@ One MRA per set, with the cartridge's sample flash either **built by the core in
 replaced two MRAs per set for three of the seven sets, and no pre-flashed MRA at
 all for the other four.
 
-Five of six steps are committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26.
+All of it is committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26, 30.
 
 | step | state |
 |---|---|
@@ -21,6 +21,15 @@ Five of six steps are committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26.
 | the RTL walker, 7 sets to their reference hashes | done, `make -C sim run-flash-derive` |
 | integrated behind the OSD option | done, derivation verified on hardware |
 | MRAs collapsed to seven, Pre-built default | done |
+| every clone and regional variant, 49 MRAs | done, `make mras` + `make check-clones` |
+
+The last row is `PLAN.md` 30 and it needed no RTL: the collapse had already
+moved the one per-clone constant, the sample-flash job table, into the MRA.
+Six games, 49 sets, named after the games with the clones under
+`mra/_alternatives/`. Only the original seven have been BOOTED -- the 42
+variants are checked offline against MAME, against `rom_loader.sv`'s table and
+against their parents' flash payloads, which covers everything a variant can
+differ in and is still not a boot.
 
 ## The release blocker, and what moved it
 
@@ -68,10 +77,10 @@ described -- but a fit is still worth CHECKING rather than assuming.
 * **The OSD toggle itself is unverified.** `/dev/MiSTer_cmd` has no menu
   command, and Main's `.CFG` is not the raw status word (writing byte 2 bit 6 of
   a 16-byte file did nothing). Everything downstream of `derive_sel` was proved
-  by forcing it high in a throwaway build. To confirm: load `rdft.mra`, switch
-  **Sample Flash** to Ritual, reload, and check it runs the updater; the default
-  (Pre-built) already demonstrably works.
-* **One unexplained observation.** On the +0.163 collapse build, `rdft.mra` on
+  by forcing it high in a throwaway build. To confirm: load `Raiden Fighters
+  (Germany).mra`, switch **Sample Flash** to Ritual, reload, and check it runs
+  the updater; the default (Pre-built) already demonstrably works.
+* **One unexplained observation.** On the +0.163 collapse build, rdft's MRA on
   defaults ran the ritual once. The telemetry build then showed the derivation
   completing correctly on the same MRA, and the flash matching the reference.
   Load a passing build several times before believing it was a one-off --
@@ -89,6 +98,15 @@ described -- but a fit is still worth CHECKING rather than assuming.
   instances. Putting one back means re-instantiating `spi_jtag_peek`, wiring
   whichever watch it is to read, and adding the file to `files.qip` -- and
   expecting the timing to move when you do.
+* **`DEFMRA` points at a file the RBF in `output_files/` has never heard of.**
+  The rename put rdfts under `_alternatives`, so `SeibuSPI.sv` now says
+  `DEFMRA,/_Arcade/Raiden Fighters (Germany).mra`. It is a CONF_STR string and
+  inert until the next compile; it only matters for launching the RBF directly
+  rather than through an MRA. The committed bitstream is still 29.3's seed-1
+  placement, and this is the one edit waiting on the next fit.
+* **A variant has never been booted.** Any of the 42 would do as a first check,
+  and `Raiden Fighters (Japan, earlier)` is the cheapest -- it shares rdft's job
+  table address, so only the region lock and the file names are new.
 * **`tb_sdram` is rdfts-only** by design (`set_id` hardcoded to 0). Fine for
   what it tests; do not waste a run feeding it another set's stream, as I did.
 
@@ -110,7 +128,10 @@ of rot fails loudly the next time a port moves.
 
 ## Commands
 
-    make verify                                  # lint + check-mra + test
+    make verify                                  # lint + check-mra + test (49 MRAs)
+    make mras                                    # regenerate the 42 clone MRAs
+    make mras MRAFLAGS=--list                    # what is supported, and why not the rest
+    make check-clones ROMS=<romdir>              # re-derive every job table from the ROMs
     make map                                     # the real check for SeibuSPI.sv
     make && make timing                          # a compile does NOT mean timing met
 

@@ -8376,3 +8376,126 @@ marginal path in a second domain: it read -0.215 in 18.x, +0.153/+0.278/+0.307
 across other fits, and -0.261 at seed 12 here. A fit of this design closes two
 knife-edge paths at once, so "the compile succeeded" still says nothing and
 `make timing` still has to be run.
+
+## 30. One MRA per MAME set: 42 clones, and the three things a clone needs
+
+Seven MRAs became forty-nine. Nothing in the RTL changed to do it, and the
+reason that is possible rather than lucky is worth writing down: the collapse to
+one MRA per set (26) had already moved the last per-set constant out of the RTL
+and into the MRA, exactly so that a clone would not be a core rebuild. This is
+the section that spends that.
+
+A clone needs three things to hold, and all three are checked rather than
+assumed -- `tools/gen_mras.py` is where the checks live:
+
+**The same ROM layout.** `rom_loader.sv` infers every destination and byte-lane
+rule from the part INDEX, so a set whose `ROM_START` has a different shape loads
+to the wrong address with no error anywhere. `classify()` compares the clone's
+whole (region, macro, offset, size) sequence against its parent's and refuses
+anything that differs at all.
+
+**The same decryption.** MAME's `init_` per set says this, and reading them was
+the surprise: `init_senkyu`, `init_senkyua` and `init_batlball` differ ONLY in
+which address gets a speedup hack, and all three call `init_sei252`. Same for
+`init_viprp1o` against `init_viprp1`. So the seven senkyu-family sets and the
+eleven viper ones are all the parent's decryption despite four distinct `init_`
+names between them -- which is not what the names suggest, and is why this was
+read rather than inferred.
+
+**Its own job table.** The sample-flash derivation reads the updater's job
+records out of the game's own program image, and a clone's program differs, so
+the table moves. That is the ONE per-clone constant, and `SeibuSPI.sv` already
+reads it from index-1 offset 16 (25.x) for precisely this reason.
+
+### 30.1 Finding forty-eight job tables
+
+Two independent methods, and every set had to agree with itself:
+
+* **content** -- the parent's job records, 28 bytes of addresses and lengths,
+  searched for byte-for-byte in the clone's program image. Unambiguous wherever
+  it hits, and it hit on 45 of 48.
+* **struct** -- every offset that reads as a whole job table: sources inside the
+  386's program or `sound01` window, sane lengths, an `FFFFFFFF` terminator, and
+  a payload that fills a 2 MB flash. Exactly one candidate each for `viprp1ot`,
+  `viprp1oj` and `viprp1hk`, the three old-version Viper sets -- whose records
+  legitimately differ from the parent's, because viprp1's second job reads the
+  PROGRAM image and theirs is a different program.
+
+The structural scan is not trusted on its own. **Every one of the 48 sets then
+had to build its parent's payload byte for byte**, and did:
+
+| family | sets | payload ends at | job tables seen |
+|---|---|---|---|
+| senkyu | 8  | 0x1eea12 | 0x302290, 0x30228c, 0x30232c, 0x302324 |
+| viprp1 | 12 | 0x18f200 | 0x200740, 0x200760 |
+| ejanhs | 1  | 0x1ff892 | 0x3026ac |
+| rdft   | 11 | 0x1d9643 | 0x20174d, 0x201761, 0x2017a5 |
+| rdft2  | 11 | 0x1ef334 | 0x201b55 |
+| rfjet  | 5  | 0x1e94ca | 0x20357f, 0x203597 |
+
+A wrong job table is the failure that most needed a check like this, because on
+hardware it does not fail loudly: `spi_flash_derive` rejects the out-of-range
+source, the flash comes up blank, and the game quietly runs its own six-minute
+updater instead. `make check-clones ROMS=<dir>`.
+
+### 30.2 The region code, three ways
+
+Every clone differs in its region lock, and MAME's own header documents the
+codes. Three copies of that byte exist and all three agree on all 48 sets:
+
+    the blank flash ROM's file name    flash0_blank_region10.u1053
+    byte 0 of the program's stamp      PRG 0x1ffffc, low byte of the dword
+    the MRA's <region> element         derived from the first of those
+
+The stamps also confirm the build-ID reading from section 0: `80 4A 4A 36` for
+rdft, `4A 4A 37` for rdft2, `4A 4A 38` for rfjet, `50 5A 31` for senkyu,
+`4A 4A 34` for viprp1, `4D 4A 33` for ejanhs -- the middle bytes are the game,
+the first byte the region, and only the first byte moves between clones.
+
+### 30.3 Six sets this core does not run, with reasons
+
+`rdftua`, `rdftjb`, `rdftam` and `rdftadi` are the SUB2/SUB4 `rdft` carts. They
+carry the program as two bytes plus a WORD, the way rdfts does, one text ROM as
+a word, and no second sound ROM at all -- three ways the layout differs, so they
+need a `rom_loader` table of their own. `rdft2us` (SXX2F), `rfjets` and
+`rfjetsa` (SXX2G) are single boards with a Z80 program ROM and real sample ROMs
+instead of a cartridge tail: another table each, in rdfts's shape. `rdft22kc`
+and `rfjet2kc` are SYS386I, dual MSM6295 instead of the YMF271. They are all in
+`UNSUPPORTED` in the generator with the reason attached, so "why is there no MRA
+for rfjets" has an answer in the file that would have made one.
+
+### 30.4 The hand-written MRAs are the generator's fixtures
+
+The six cartridge parents stay hand-written -- their comments are worth more
+than the uniformity -- and `gen_mras.py` emits each of them anyway on every run
+and compares the part stream and the index-1 bytes against the file that is
+already on hardware. All six match, which is the evidence that the 42 generated
+files are right: the generator reproduces, byte for byte in everything the core
+reads, the MRA `rdft` was verified with. It refuses to write anything if that
+stops being true.
+
+`make check-mra` now covers all 49. Two things had to give for that:
+`expand_clones()` maps the parent's `special` ROM names onto the clone's BY
+POSITION rather than by name, which is what lets a clone's own blank flash
+resolve; and the check that `rom_loader`'s table comment names the same ROM MAME
+does is skipped for clones, because the table was written for the parent and the
+clone renames the same parts. Everything load-bearing -- size, mode,
+destination, order, CRC -- is still checked on every part of every set.
+
+### 30.5 What this does not cover
+
+**Only the seven original sets have been booted.** The 42 variants are checked
+offline: part list against MAME and against the RTL table, every part resolving
+out of a merged set by CRC, derived flash identical to the parent's payload.
+That covers everything a variant CAN differ in, and it is still not the same as
+having run one.
+
+**`DEFMRA` moved and the committed RBF predates it.** The naming rule puts rdfts
+under `_alternatives`, so `SeibuSPI.sv`'s `DEFMRA,/_Arcade/rdfts.mra` named a
+file that no longer exists; it is `Raiden Fighters (Germany).mra` now. That is a
+string in the CONF_STR, inert until the next compile, and it only matters when
+the RBF is started directly rather than through an MRA -- but the RBF in
+`output_files/` is from before it, so 29.3's placement is what is still on disk.
+
+**Save files move with the MRA names again**, as they did in 26. Unused on the
+default path, since Pre-built neither loads nor saves.

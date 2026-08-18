@@ -1,9 +1,10 @@
 # SlopperPI — Seibu SPI / SXX2E for MiSTer
 
-Seven Seibu games on **SXX2E** single-board hardware (MAME set `rdfts`) and on
-the **SPI cartridge** board it shares almost everything with — `rdft`, `rdft2`,
-`rfjet`, `viprp1`, `senkyu` and `ejanhs`. One MRA each; the cartridge's
-first-boot sample reflash is a third of a second, built by the core.
+Six Seibu games on the **SPI cartridge** board — `rdft`, `rdft2`, `rfjet`,
+`viprp1`, `senkyu` and `ejanhs` — and on the **SXX2E** single board they share
+almost everything with (MAME set `rdfts`). **49 MRAs**: one per MAME set,
+counting every clone and regional variant. The cartridge's first-boot sample
+reflash is a third of a second, built by the core.
 
 ## Status
 
@@ -52,19 +53,48 @@ The music itself matches; this is fidelity. `PLAN.md` T-K.
 2. Put the MRA you want from `mra/` in `/media/fat/_Arcade/`.
 3. Put its zip in `/media/fat/games/mame/`.
 
-| MRA | set | zip | download | SDRAM |
-|---|---|---|---|---|
-| `rdfts.mra`  | `rdfts`, SXX2E single board | `rdfts.zip` or `rdft.zip` | 22.3 MB | 32 MB |
-| `rdft.mra`   | `rdft`, SPI cartridge   | `rdft.zip`   | 24.7 MB | 32 MB |
-| `rdft2.mra`  | `rdft2`, SPI cartridge  | `rdft2.zip`  | 36.7 MB | 64 MB |
-| `rfjet.mra`  | `rfjet`, SPI cartridge  | `rfjet.zip`  | 39.7 MB | 64 MB |
-| `viprp1.mra` | `viprp1`, SPI cartridge | `viprp1.zip` | 21.7 MB | 32 MB |
-| `senkyu.mra` | `senkyu`, SPI cartridge | `senkyu.zip` | 20.7 MB | 32 MB |
-| `ejanhs.mra` | `ejanhs`, SPI cartridge | `ejanhs.zip` | 21.5 MB | 32 MB |
+**49 MRAs, six games.** `mra/` holds one file per MAME PARENT set, named the way
+MiSTer names them -- the game's descriptive name, not the set name -- and every
+clone and regional variant sits under `mra/_alternatives/_<parent>/`. Copy
+`_alternatives` across with the rest if you want them; MiSTer reads it in place.
 
-All seven run on hardware. `ejanhs` plays video and sound but **cannot be
-played**: it reads a mahjong panel through MAME's `ejanhs_encode` and this core
-wires the standard SPI joystick ports.
+| MRA in `mra/` | set | zip | download | SDRAM | variants |
+|---|---|---|---|---|---|
+| `Raiden Fighters (Germany).mra` | `rdft`, SPI cartridge | `rdft.zip` | 24.7 MB | 32 MB | 11 |
+| `Raiden Fighters 2 - Operation Hell Dive (Germany).mra` | `rdft2`, SPI cartridge | `rdft2.zip` | 36.7 MB | 64 MB | 10 |
+| `Raiden Fighters Jet (Germany).mra` | `rfjet`, SPI cartridge | `rfjet.zip` | 39.7 MB | 64 MB | 4 |
+| `Viper Phase 1 (New Version, World).mra` | `viprp1`, SPI cartridge | `viprp1.zip` | 21.7 MB | 32 MB | 11 |
+| `Senkyu (Japan, newer).mra` | `senkyu`, SPI cartridge | `senkyu.zip` | 20.7 MB | 32 MB | 7 |
+| `E Jong High School (Japan).mra` | `ejanhs`, SPI cartridge | `ejanhs.zip` | 21.5 MB | 32 MB | 0 |
+
+The `rdft` variants include `rdfts`, the SXX2E **single board** -- 22.3 MB out of
+`rdfts.zip` or `rdft.zip`, and a clone of `rdft` in MAME, so it lives under
+`_alternatives` with the rest: `Raiden Fighters (Taiwan, single board).mra`.
+
+A merged MAME set works for every one of them: MRA parts resolve by CRC first,
+so a clone's ROMs are found in the parent's zip whatever they are named there.
+
+Six sets are on hardware this core does not implement -- the SUB2/SUB4 `rdft`
+carts, the SXX2F/SXX2G single boards, and the two SYS386I sets. Each is listed
+with the reason in `tools/gen_mras.py`; `make mras MRAFLAGS=--list` prints them.
+
+`ejanhs` plays video and sound but **cannot be played**: it reads a mahjong
+panel through MAME's `ejanhs_encode` and this core wires the standard SPI
+joystick ports.
+
+The clone MRAs are generated, not maintained -- each is its parent's part list
+with its own file names, its own region lock and its own sample-flash job-table
+address. `make mras` rewrites them from MAME's driver, and refuses to if it can
+no longer reproduce the six hand-written parents exactly. `make check-clones
+ROMS=<dir>` re-derives every job-table address from the ROMs and checks that the
+flash each variant builds is its parent's payload byte for byte.
+
+**What has actually been run:** the seven sets in the table above and `rdfts`,
+on hardware. The 42 variants are checked offline only -- every part against
+MAME's `ROM_START` and against `rom_loader.sv`'s table, every part resolving out
+of a merged set by CRC, and every derived sample flash identical to its parent's
+payload. That covers everything a variant can differ in, but it is not the same
+as having booted one.
 
 ### The sample flash
 
@@ -300,7 +330,8 @@ longer built (PLAN.md 29). Its status bit, O[20], is left unassigned so an old
 saved `.CFG` cannot turn something else on by accident.
 
 Flip Screen (SW1:1) and Service Mode are on the OSD's DIP page. The bit order
-above is defined by the `<buttons names=...>` list in `mra/rdfts.mra`; the MRA
+above is defined by the `<buttons names=...>` list every MRA carries (they are
+all the same list); the MRA
 and `SeibuSPI.sv` have to be changed together.
 
 ## Credits
