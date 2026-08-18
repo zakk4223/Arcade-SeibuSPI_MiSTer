@@ -190,11 +190,19 @@ described -- but a fit is still worth CHECKING rather than assuming.
   a coin inserted, to see a counter move on screen rather than in a file.
 * **The Cart copy TOGGLE is the one thing left.** The mode itself ran on hardware
   end to end (`PLAN.md` 32.7): four minutes of "NOW UPDATING" with the counter
-  moving 895 -> 424 -> 000, then "UPDATE COMPLETED", and Pre-built playing at once
-  afterwards. What has only ever run in simulation is the 0 -> 1 EDGE -- blanking
-  the stamp and the 1.1 ms self-reset. Select Cart copy in the OSD while the game
-  is running: the board should restart itself within a second and come up copying.
-  There is no way to do that from here, because there is no OSD command.
+  moving 895 -> 424 -> 000, then "UPDATE COMPLETED". All three states are on
+  hardware now: Pre-built plays at once, Cart copy with a blank stamp copies, and
+  Cart copy with the valid `80 4A 4A 36` the game wrote **skips the copy and
+  plays** -- which is what the four-byte save exists for.
+
+  What has only ever run in simulation is the 0 -> 1 EDGE: blanking the stamp and
+  the 1.1 ms self-reset. Select Cart copy in the OSD while the game is running and
+  the board should restart itself within a second and come up copying. There is no
+  way to do that from here -- there is no OSD command, and the `.CFG` route only
+  sets the value at boot.
+
+  The save on the machine is currently `80 4A 4A 36` + the DS2404, so that toggle
+  test is set up: it has something valid to blank.
 * **A variant has never been booted.** Any of the 42 would do as a first check,
   and `Raiden Fighters (Japan, earlier)` is the cheapest -- it shares rdft's job
   table address, so only the region lock and the file names are new.

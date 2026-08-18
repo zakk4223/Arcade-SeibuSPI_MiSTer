@@ -8947,7 +8947,38 @@ sitting there -- which is the branch worth having seen: `flash_live` low means t
 stored stamp is ignored and the derivation's own is used, so a save whose stamp
 says "not programmed" does not drag Pre-built into a copy.
 
+**And the copy PERSISTS.** The stamp in that file advanced on its own:
+
+    07:18   FF FF FF FF     mid-erase, moments after the copy started
+    07:41   80 4A 4A 36     the stamp the game wrote when it finished
+
+`80` is the Germany region code, matching `flash0_blank_region80.u1053` and the
+program's own byte at 0x1FFFFC; `4A 4A 36` is rdft's build ID, which is what
+section 0 read out of the program and what the derivation produces. The file's
+first eight bytes read as `80 4A 4A 36 | 00 4A 4A 36` -- the flash's stamp, then
+the DS2404's copy of the same ID with the region byte zeroed, exactly as MAME has
+it.
+
+With that in place the third state finally ran, and it is the one the whole
+four-byte design exists for: **Cart copy with a valid stored stamp plays at
+once.** `flash_live` high applies the stored stamp to flash[0..3], the game finds
+it matching, skips its updater, and plays on the derived payload. So all three:
+
+| Sample Flash | stored stamp | result |
+|---|---|---|
+| Pre-built | anything, ignored | plays at once |
+| Cart copy | blank or absent | runs the copy, four minutes |
+| Cart copy | valid | plays at once |
+
+One property of that worth naming, because it looks like the old trap and is not:
+in Pre-built the saved stamp is always a VALID one, since the derivation writes it
+and the save reads the region back. So a Pre-built player who opens the OSD ends up
+with exactly the file that used to make Cart copy unreachable. What fixes it is
+32.3's toggle -- the action, not the file. Selecting Cart copy blanks the stamp
+whatever it said.
+
 **What is still not tested** is the toggle itself: the 0 -> 1 edge blanking the
-stamp and resetting the board. Its effect is now demonstrated from the other
-direction, since booting into Cart copy with a blank stamp does run the copy, but
-the edge detector and its 1.1 ms reset have only ever run in simulation.
+stamp and resetting the board. Its effect is demonstrated from both directions now
+-- a blank stamp runs the copy, a valid one skips it -- but the edge detector and
+its 1.1 ms reset have only ever run in simulation, and there is no way to move
+`status[22]` from here.
