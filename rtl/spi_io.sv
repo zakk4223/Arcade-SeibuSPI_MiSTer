@@ -54,6 +54,17 @@ module spi_io
 	output reg        dma_palette,
 	output reg        dma_sprite,
 
+	// DS2404 (rtl/spi_ds2404.sv), which runs on clk_ram: the three write ports
+	// go across as ONE request toggle with the port number beside it, so two
+	// writes cannot be seen out of order, and `ds_stall` holds the 386 off until
+	// the far side acks. 0x6DC comes back as a settled register.
+	output reg        ds_req,
+	output reg  [1:0] ds_port,
+	output reg  [7:0] ds_data,
+	input             ds_ack,
+	input       [7:0] ds_dout,
+	output            ds_stall,
+
 	// Sound (T5)
 	output reg  [7:0] sndfifo_din,
 	output reg        sndfifo_wr,
@@ -99,6 +110,14 @@ module spi_io
 	// no window in which a second byte could be accepted and dropped; only the
 	// release crosses back, and a late release just costs cycles.
 	assign z80dl_stall = dl_pend;
+
+	// The same shape for the DS2404, and for the same reason: a byte is in
+	// flight to another clock domain and a second write would overtake it. The
+	// wait is one or two cycles for everything except a scratchpad copy, which
+	// takes one per byte.
+	reg        ds_pend;
+	reg        ds_ack_s1, ds_ack_s2;
+	assign ds_stall = ds_pend;
 
 	// NOTE: everything this block would have driven lives in the write block
 	// below instead. Quartus rejects a net driven from two always blocks --
@@ -157,10 +176,23 @@ module spi_io
 		dl_ack_s2 <= dl_ack_s1;
 		if (dl_pend && (dl_ack_s2 == z80dl_req)) dl_pend <= 1'b0;
 
+		// The DS2404's, which the write block below re-raises in the same cycle
+		// if it starts another access -- the last assignment wins, as it does
+		// for dl_pend.
+		ds_ack_s1 <= ds_ack;
+		ds_ack_s2 <= ds_ack_s1;
+		if (ds_pend && (ds_ack_s2 == ds_req)) ds_pend <= 1'b0;
+
 		if (reset) begin
 			dl_pos    <= 19'd0;
 			dl_pend   <= 1'b0;
 			z80dl_req <= 1'b0;
+			ds_pend   <= 1'b0;
+			ds_req    <= 1'b0;
+			ds_port   <= 2'd0;
+			ds_data   <= 8'd0;
+			ds_ack_s1 <= 1'b0;
+			ds_ack_s2 <= 1'b0;
 			z80dl_end <= 19'd0;
 			// Held in reset until the 386 releases it. On SXX2E the Z80 runs
 			// from ROM and must not be gated, so this reads as 1 there.
@@ -258,6 +290,7 @@ module spi_io
 					if (be[2]) rf2_layer_bank <= wdata[18:16];  // 0x68E
 				end
 
+
 				// 0x688 z80_prg_transfer_w. MAME drops writes past the end of
 				// the region and stops advancing, so do the same.
 				11'h688: if (be[0] && set_sxx2c && !dl_pos[18]) begin
@@ -270,6 +303,22 @@ module spi_io
 					// kept separately. It is the union of every transfer,
 					// which is exactly the set of bytes that hold real data.
 					if ((dl_pos + 19'd1) > z80dl_end) z80dl_end <= dl_pos + 19'd1;
+				end
+
+				// ---- DS2404 ---------------------------------------------
+				// Three byte ports, each its own dword. The chip is on clk_ram
+				// and this is clk_cpu, so all three go through one toggle.
+				11'h6D0: if (be[0]) begin           // 1-wire reset
+					ds_port <= 2'd0; ds_data <= 8'd0;
+					ds_req  <= ~ds_req; ds_pend <= 1'b1;
+				end
+				11'h6D4: if (be[0]) begin           // data
+					ds_port <= 2'd1; ds_data <= wdata[7:0];
+					ds_req  <= ~ds_req; ds_pend <= 1'b1;
+				end
+				11'h6D8: if (be[0]) begin           // clock
+					ds_port <= 2'd2; ds_data <= 8'd0;
+					ds_req  <= ~ds_req; ds_pend <= 1'b1;
 				end
 
 				default: ;
@@ -289,7 +338,8 @@ module spi_io
 	//        and d1 reads 0 while nothing has come back. Getting d0 backwards
 	//        makes the 386 believe the sound FIFO is permanently full and it
 	//        spins here forever, a few frames into the boot.
-	// 0x6DC  DS2404 data      0x6DD  d0-d2 must read back clear
+	// 0x6DC  DS2404 data, from the chip now and not a hardwired zero
+	// 0x6DD  d0-d2 must read back clear
 	// ------------------------------------------------------------------
 	always @* begin
 		case (dw)
@@ -320,7 +370,10 @@ module spi_io
 			// d1 = _EF of the Z80->386 FIFO: 0 while it is empty. SXX2E has no
 			// such FIFO (m_soundfifo[1] is a nullptr there) so it reads 0.
 			11'h684: rdata = {30'd0, set_sxx2c & ~fifo2_empty, ~sndfifo_full};
-			11'h6DC: rdata = 32'h0000_0000;
+			// 0x6DC is the DS2404's data byte and 0x6DD is the three bits the
+			// game waits to see clear -- the same dword, so one entry covers
+			// both, and MAME's spi_ds2404_unknown_r returns zero for the second.
+			11'h6DC: rdata = {24'd0, ds_dout};
 			default: rdata = 32'h0000_0000;
 		endcase
 	end

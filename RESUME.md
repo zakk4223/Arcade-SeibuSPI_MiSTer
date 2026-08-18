@@ -22,6 +22,7 @@ All of it is committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26, 30.
 | integrated behind the OSD option | done, derivation verified on hardware |
 | MRAs collapsed to seven, Pre-built default | done |
 | every clone and regional variant, 49 MRAs | done, `make mras` + `make check-clones` |
+| the DS2404, and one save file for both devices | done in RTL and sim, NOT on hardware |
 
 The last row is `PLAN.md` 30 and it needed no RTL: the collapse had already
 moved the one per-clone constant, the sample-flash job table, into the MRA.
@@ -30,6 +31,40 @@ Six games, 49 sets, named after the games with the clones under
 variants are checked offline against MAME, against `rom_loader.sv`'s table and
 against their parents' flash payloads, which covers everything a variant can
 differ in and is still not a boot.
+
+## The DS2404 is in, and the save file changed shape
+
+`PLAN.md` 31. The board's RTC and its 512 bytes of bookkeeping SRAM were answering
+zeros; `rtl/spi_ds2404.sv` is a transliteration of MAME's device, which is the
+right specification because the interface is the SEI600's parallel view and not
+1-Wire. It runs on **clk_ram**, not clk_cpu with the rest of the I/O, because its
+SRAM is part of the save file and the save side of MiSTer's nvram cannot be
+stalled; the 386 crosses instead, through one request toggle, and is held off by
+`io_stall` while a byte is in flight.
+
+**The save file is now one stream over two devices**, because an MRA gets one
+`<nvram>` element:
+
+    0x000000..0x1FFFFF   the two sample flash chips
+    0x200000..0x2001FF   the DS2404's SRAM
+
+2,097,664 bytes for a cartridge set, and **512 for rdfts** -- which has an
+`<nvram>` element for the first time, since its samples are a ROM and the tail is
+all there is. The tail is byte-for-byte MAME's own `ds2404` file.
+
+Two consequences worth knowing before testing:
+
+* **Pre-built now loads and saves**, where before it did neither. Only the tail
+  is read back; the flash half is written because the size is fixed and skipped
+  on load because the derivation owns ch3 at that moment. So a Pre-built save is
+  2 MB of which 512 bytes matter.
+* **An old 2 MB `.nvm` still loads its flash half** -- that is why the flash
+  comes first -- with the DS2404 falling back to MAME's zeroed default. Whether
+  Main_MiSTer accepts a short file or rejects the size is NOT verified; if it
+  rejects it, the ritual runs once more and the next save is the new shape.
+
+`make -C sim run-ds2404` and `run-nvram` both pass. Nothing about it has been on
+hardware.
 
 ## The release blocker, and what moved it
 
@@ -104,6 +139,12 @@ described -- but a fit is still worth CHECKING rather than assuming.
   inert until the next compile; it only matters for launching the RBF directly
   rather than through an MRA. The committed bitstream is still 29.3's seed-1
   placement, and this is the one edit waiting on the next fit.
+* **The DS2404 has never been exercised on hardware.** The whole of it is
+  simulation so far. What to watch for: the bookkeeping page in Service Mode
+  accumulating across boots, which is the thing that could not work before, and
+  a save file of 2,097,664 bytes appearing for a cartridge set (512 for rdfts).
+  If the 386 hangs early instead, `io_stall` is the first suspect -- it is new on
+  a path that previously never stalled for anything but the Z80 download.
 * **A variant has never been booted.** Any of the 42 would do as a first check,
   and `Raiden Fighters (Japan, earlier)` is the cheapest -- it shares rdft's job
   table address, so only the region lock and the file names are new.
@@ -123,15 +164,18 @@ four checks that survive the framework modules being absent, and it no longer
 swallows `%Error` lines the way it used to. **For anything in the top-level
 file, `make map` is still the first real check.**
 
-Worth doing: a `make check-tb` that merely BUILDS every testbench, so this class
-of rot fails loudly the next time a port moves.
+**`make check-tb` exists now**, and it earned its keep the same day: adding the
+DS2404's SRAM port to `spi_top` stopped `tb_boot_top` building, exactly as the
+three before it. It is part of `make verify`.
 
 ## Commands
 
-    make verify                                  # lint + check-mra + test (49 MRAs)
+    make verify                                  # lint + check-mra + check-tb + test
+    make check-tb                                # BUILD every bench, run none
     make mras                                    # regenerate the 42 clone MRAs
     make mras MRAFLAGS=--list                    # what is supported, and why not the rest
     make check-clones ROMS=<romdir>              # re-derive every job table from the ROMs
+    make -C sim run-ds2404                       # the DS2404 against MAME's own device
     make map                                     # the real check for SeibuSPI.sv
     make && make timing                          # a compile does NOT mean timing met
 
@@ -153,5 +197,7 @@ The MiSTer at 192.168.1.125 is on a **diagnostic build** (timing-failing).
 Reflash something known-good before using it: `/media/fat/_Arcade/cores/` has
 dated `SeibuSPI.rbf.*` backups.
 
-Save files were renamed with the MRAs (`rdft-update.nvm` -> `rdft.nvm`). They are
-unused on the default path, since Pre-built neither loads nor saves.
+Save files were renamed with the MRAs twice over -- first with the collapse
+(`rdft-update.nvm` -> `rdft.nvm`), then with the descriptive names -- and have now
+changed SHAPE as well: 2,097,664 bytes, the flash then the DS2404's 512. Pre-built
+uses only the tail of it, but it does now use one.

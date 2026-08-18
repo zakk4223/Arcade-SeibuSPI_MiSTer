@@ -331,13 +331,16 @@ pll pll
 // any of it has reached SDRAM; keying the reset off that releases the 386 into
 // an empty image. dl_download stays high until ddr_rom_reader has handed over
 // the last byte, and is identical to ioctl_download for a slow download.
-// The nvram download writes the sample region through ch3, which the running
-// board also uses, so the board is held down for it exactly as it is for the
-// ROM image. It is two megabytes and arrives once, at load.
-// derive_busy is here for the same reason nv_wr_active is: it owns ch3, which
-// the running board also uses. It is a third of a second, once, at load.
+// The nvram download is held down for exactly as long as the ROM image is, and
+// for two reasons that are now separate lines in spi_nvram. `nv_hold` is this
+// one: the file's tail is the DS2404's bookkeeping, and the game must not read
+// it before it has landed. `nv_wr_active` is the other, and it only claims ch3
+// while the FLASH half is being written -- in Pre-built mode there is no flash
+// half and the derivation has the channel instead.
+// derive_busy is here for the same reason: it owns ch3, which the running board
+// also uses. It is a third of a second, once, at load.
 wire reset = RESET | status[0] | buttons[1] | (dl_download & (dl_index == 8'd0))
-           | nv_wr_active | derive_busy | ~pll_locked;
+           | nv_hold | derive_busy | ~pll_locked;
 
 ///////////////////////////  DIP SWITCHES  ///////////////////////
 
@@ -875,16 +878,33 @@ wire        flash_dirty;
 wire [25:0] nv_wr_addr, nv_rd_addr;
 wire [15:0] nv_wr_din;
 wire  [1:0] nv_wr_be;
-wire        nv_wr_req, nv_wr_active, nv_rd_req, nv_rd_ack;
+wire        nv_wr_req, nv_wr_active, nv_hold, nv_rd_req, nv_rd_ack;
+
+// The DS2404's SRAM, between spi_nvram here and the chip inside spi_top. Both
+// are on clk_ram, which is the whole reason the chip is not with the rest of the
+// I/O on clk_cpu -- see spi_ds2404.sv.
+wire  [8:0] ds_nv_addr;
+wire  [7:0] ds_nv_din, ds_nv_dout;
+wire        ds_nv_we, ds_nv_dirty;
 wire [63:0] nv_rd_dout;
 
 spi_nvram nvram
 (
 	.clk        (clk_ram),
 	.reset      (RESET | ~pll_locked),
-	// Pre-built mode has no ritual to record, and loading a save over a freshly
-	// derived image would be the same bytes at best and a stale one at worst.
-	.enable     (mod_byte_r[0] & mod_byte_r[4] & ~derive_en),
+	// Every set the core runs has a DS2404 to remember, so there is always a
+	// file. What varies is its SHAPE, and that is an MRA property rather than an
+	// OSD one -- the size in the <nvram> element is fixed before the menu is
+	// reachable, so it cannot depend on which way Sample Flash is set.
+	.enable     (1'b1),
+	// A cartridge set: 2 MB of flash ahead of the DS2404's 512-byte tail. On
+	// SXX2E the samples are a real ROM and the file is the tail alone.
+	.has_flash  (mod_byte_r[0] & mod_byte_r[4]),
+	// ...and the flash half means something. In Pre-built mode it does not: the
+	// image is derived at every boot, so a save file's copy is the same bytes at
+	// best and a stale one at worst -- and the derivation owns ch3 exactly when
+	// the file arrives.
+	.flash_live (mod_byte_r[0] & mod_byte_r[4] & ~derive_en),
 
 	// Raw ioctl, not the replayed copy -- see the header of spi_nvram.sv.
 	.ioctl_download (ioctl_download),
@@ -907,6 +927,12 @@ spi_nvram nvram
 	.ioctl_upload_index (ioctl_upload_index),
 
 	.flash_dirty (flash_dirty),
+	.sram_dirty  (ds_nv_dirty),
+
+	.sram_addr  (ds_nv_addr),
+	.sram_din   (ds_nv_din),
+	.sram_we    (ds_nv_we),
+	.sram_dout  (ds_nv_dout),
 
 	.wr_addr    (nv_wr_addr),
 	.wr_din     (nv_wr_din),
@@ -914,6 +940,7 @@ spi_nvram nvram
 	.wr_req     (nv_wr_req),
 	.wr_ack     (sdr_rw_ack),
 	.wr_active  (nv_wr_active),
+	.hold       (nv_hold),
 
 	.rd_addr    (nv_rd_addr),
 	.rd_req     (nv_rd_req),
@@ -1034,6 +1061,14 @@ spi_top spi_top
 	// already makes the game skip its updater (18.5), and this says so twice.
 	.jumpers        ((set_upd & ~derive_en_sys) ? 8'hFF : 8'hFC),
 	.flash_dirty    (flash_dirty),
+
+	// The DS2404's SRAM, which spi_nvram carries as the tail of the save file.
+	.ds_nv_addr     (ds_nv_addr),
+	.ds_nv_din      (ds_nv_din),
+	.ds_nv_we       (ds_nv_we),
+	.ds_nv_dout     (ds_nv_dout),
+	.ds_nv_dirty    (ds_nv_dirty),
+
 	.flash_sdr_addr (flash_sdr_addr),
 	.flash_sdr_din  (flash_sdr_din),
 	.flash_sdr_be   (flash_sdr_be),

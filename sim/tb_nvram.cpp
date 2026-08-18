@@ -1,9 +1,15 @@
 //============================================================================
 //  SlopperPI - testbench for spi_nvram
 //
-//  Both directions of the sample flash's save file, against a behavioural
-//  SDRAM: the LOAD writes an ioctl byte stream into the region, and the SAVE
-//  reads it back through the same handshake hps_io uses.
+//  Both directions of the save file, against a behavioural SDRAM and a
+//  behavioural DS2404: the LOAD writes an ioctl byte stream into the sample
+//  region and then into the chip's SRAM, and the SAVE reads both back through
+//  the same handshake hps_io uses.
+//
+//  The file is ONE stream covering TWO devices, because an MRA has one <nvram>
+//  element -- the flash then the 512-byte tail. FLASH_BYTES is shrunk to 4096
+//  here so that the crossing between them is a few thousand cycles in rather
+//  than eighty million.
 //
 //  This exists because the first version went to hardware untested and came
 //  back as a two-megabyte file containing byte 0 twice followed by the first
@@ -25,10 +31,13 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 static const uint32_t PCM_BASE = 0x280000;
-static const uint32_t NV_SIZE  = 0x200000;
+// -GFLASH_BYTES in the Makefile. The RTL default is 0x200000.
+static const uint32_t FLASH_BYTES = 4096;
+static const uint32_t SRAM_BYTES  = 512;
 
 static Vspi_nvram *dut;
 static std::vector<uint8_t> sdram;
@@ -68,9 +77,20 @@ static void sdram_tick() {
     }
 }
 
+// ---------------------------------------------------------------- DS2404 ----
+// Only what spi_nvram can see of it: 512 bytes, a registered read, and a
+// write port. spi_ds2404 has its own testbench.
+static uint8_t sram[SRAM_BYTES];
+
+static void sram_tick() {
+    if (dut->sram_we) sram[dut->sram_addr % SRAM_BYTES] = dut->sram_din;
+    dut->sram_dout = sram[dut->sram_addr % SRAM_BYTES];   // one cycle behind
+}
+
 static void tick() {
     dut->clk = 0; dut->eval();
     sdram_tick();
+    sram_tick();
     dut->clk = 1; dut->eval();
 }
 static void run(int n) { while (n--) tick(); }
@@ -122,12 +142,15 @@ static std::vector<uint8_t> save(size_t n, int word_cycles, int index = 2) {
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vspi_nvram;
-    sdram.assign(PCM_BASE + NV_SIZE, 0);
+    sdram.assign(PCM_BASE + 0x200000, 0);
 
     dut->enable = 1;
+    dut->has_flash = 1;                    // a cartridge set: flash then tail
+    dut->flash_live = 1;                   // ...in Ritual mode
     dut->reset = 1; dut->ioctl_wr = 0; dut->ioctl_rd = 0;
     dut->ioctl_download = 0; dut->ioctl_upload = 0;
-    dut->wr_ack = 0; dut->rd_ack = 0; dut->flash_dirty = 0;
+    dut->wr_ack = 0; dut->rd_ack = 0; dut->flash_dirty = 0; dut->sram_dirty = 0;
+    memset(sram, 0, sizeof(sram));
     run(8);
     dut->reset = 0; run(8);
 
@@ -165,6 +188,129 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < N; i++) if (got[i] != img[i]) bad++;
     if (bad) { printf("FAIL: %d of %zu bytes wrong with a fast host\n", bad, N); errors++; }
     else     printf("save: byte-exact again with the host 3x faster than the SDRAM\n");
+
+    // ---- the whole file, both devices, one stream -------------------------
+    // The crossing is the thing: the tail's bytes come from the DS2404 and not
+    // from the prefetched SDRAM line, and `sram_addr` has to have wrapped to 0
+    // exactly as the count reaches it.
+    {
+        std::vector<uint8_t> file(FLASH_BYTES + SRAM_BYTES);
+        for (size_t i = 0; i < file.size(); i++) file[i] = (uint8_t)(i * 29 + 3);
+        memset(sram, 0, sizeof(sram));
+        load(file);
+        int fbad = 0, sbad = 0;
+        for (size_t i = 0; i < FLASH_BYTES; i++)
+            if (sdram[PCM_BASE + i] != file[i]) fbad++;
+        for (size_t i = 0; i < SRAM_BYTES; i++)
+            if (sram[i] != file[FLASH_BYTES + i]) sbad++;
+        if (fbad || sbad) {
+            printf("FAIL: load split wrong -- %d flash bytes and %d tail bytes\n", fbad, sbad);
+            errors++;
+        } else printf("split: one %zu-byte stream loads the flash half and the "
+                      "DS2404's 512-byte tail\n", file.size());
+
+        std::vector<uint8_t> back = save(file.size(), 40);
+        int bbad = 0;
+        size_t firstbad = file.size();
+        for (size_t i = 0; i < file.size(); i++)
+            if (back[i] != file[i]) { if (i < firstbad) firstbad = i; bbad++; }
+        if (bbad) {
+            printf("FAIL: %d of %zu bytes wrong on the way back, first at %zu "
+                   "(the crossing is at %u)\n", bbad, file.size(), firstbad, FLASH_BYTES);
+            errors++;
+        } else printf("split: and comes back byte-exact across the crossing at "
+                      "%u\n", FLASH_BYTES);
+
+        // Fast host, because the tail has a registered read of its own.
+        back = save(file.size(), 12);
+        bbad = 0;
+        for (size_t i = 0; i < file.size(); i++) if (back[i] != file[i]) bbad++;
+        if (bbad) { printf("FAIL: %d bytes wrong across the crossing with a fast host\n", bbad); errors++; }
+        else      printf("split: byte-exact again with the host 3x faster than the SDRAM\n");
+    }
+
+    // ---- Pre-built: the tail loads, the flash half does not ---------------
+    // The flash is about to be derived, and the derivation is writing ch3 while
+    // this file arrives. So the flash half is dropped and `wr_active` -- which
+    // is what claims ch3 -- must never rise, while `hold` still does: the game
+    // must not read its bookkeeping before the tail has landed.
+    {
+        dut->flash_live = 0;
+        std::vector<uint8_t> keep(FLASH_BYTES);
+        for (size_t i = 0; i < FLASH_BYTES; i++) keep[i] = sdram[PCM_BASE + i];
+        std::vector<uint8_t> file(FLASH_BYTES + SRAM_BYTES);
+        for (size_t i = 0; i < file.size(); i++) file[i] = (uint8_t)(0xA5 ^ (i * 7));
+        memset(sram, 0, sizeof(sram));
+
+        // watch both lines for the whole transfer
+        int saw_wr = 0, saw_hold = 0;
+        dut->ioctl_index = 2; dut->ioctl_download = 1; run(4);
+        for (size_t i = 0; i < file.size(); i++) {
+            int guard = 0;
+            while (dut->ioctl_wait) { tick(); if (++guard > 1000) break; }
+            dut->ioctl_dout = file[i];
+            dut->ioctl_wr = 1; tick(); tick();
+            dut->ioctl_wr = 0; tick();
+            if (dut->wr_active) saw_wr++;
+            if (dut->hold)      saw_hold++;
+        }
+        while (dut->ioctl_wait) tick();
+        dut->ioctl_download = 0; run(8);
+
+        int touched = 0;
+        for (size_t i = 0; i < FLASH_BYTES; i++)
+            if (sdram[PCM_BASE + i] != keep[i]) touched++;
+        int sbad = 0;
+        for (size_t i = 0; i < SRAM_BYTES; i++)
+            if (sram[i] != file[FLASH_BYTES + i]) sbad++;
+        if (saw_wr)  { printf("FAIL: wr_active rose on %d bytes in Pre-built mode\n", saw_wr); errors++; }
+        if (!saw_hold) { printf("FAIL: hold never rose, so the game could read the tail early\n"); errors++; }
+        if (touched) { printf("FAIL: %d bytes of a save file reached the region that is about to be derived\n", touched); errors++; }
+        if (sbad)    { printf("FAIL: %d tail bytes did not land in Pre-built mode\n", sbad); errors++; }
+        if (!saw_wr && saw_hold && !touched && !sbad)
+            printf("pre-built: the flash half is dropped and ch3 never claimed, "
+                   "the 512-byte tail still lands, and the core stays held\n");
+
+        // and only the DS2404 can ask for a save in this mode
+        for (int i = 0; i < 5; i++) { dut->flash_dirty = !dut->flash_dirty; run(20); }
+        int asked = 0;
+        for (int i = 0; i < 3000; i++) { tick(); if (dut->ioctl_upload_req) asked++; }
+        if (asked) { printf("FAIL: the flash asked for a save in Pre-built mode\n"); errors++; }
+        dut->sram_dirty = !dut->sram_dirty;
+        int waited = 0;
+        while (!dut->ioctl_upload_req && waited < 4000) { tick(); waited++; }
+        if (!dut->ioctl_upload_req) { printf("FAIL: a DS2404 store asked for nothing\n"); errors++; }
+        else printf("pre-built: the flash cannot ask for a save, a DS2404 store can\n");
+        (void)save(64, 40);
+        dut->flash_live = 1;
+    }
+
+    // ---- SXX2E: no flash half at all -------------------------------------
+    // The samples are a real ROM there, so the file IS the DS2404's 512 bytes
+    // and the tail sits at offset 0. Same code, one input different.
+    {
+        dut->has_flash = 0;
+        std::vector<uint8_t> file(SRAM_BYTES);
+        for (size_t i = 0; i < SRAM_BYTES; i++) file[i] = (uint8_t)(i ^ 0x3C);
+        memset(sram, 0, sizeof(sram));
+        std::vector<uint8_t> keep(FLASH_BYTES);
+        for (size_t i = 0; i < FLASH_BYTES; i++) keep[i] = sdram[PCM_BASE + i];
+        load(file);
+        int sbad = 0, touched = 0;
+        for (size_t i = 0; i < SRAM_BYTES; i++) if (sram[i] != file[i]) sbad++;
+        for (size_t i = 0; i < FLASH_BYTES; i++)
+            if (sdram[PCM_BASE + i] != keep[i]) touched++;
+        std::vector<uint8_t> back = save(SRAM_BYTES, 40);
+        int bbad = 0;
+        for (size_t i = 0; i < SRAM_BYTES; i++) if (back[i] != file[i]) bbad++;
+        if (sbad || touched || bbad) {
+            printf("FAIL: SXX2E layout -- %d tail bytes in, %d bytes back, "
+                   "%d bytes of sample region touched\n", sbad, bbad, touched);
+            errors++;
+        } else printf("sxx2e: with no flash half the file is 512 bytes at offset "
+                      "0, both ways, and the sample region is left alone\n");
+        dut->has_flash = 1;
+    }
 
     // ---- an upload at someone ELSE's index --------------------------------
     // hps_io's ioctl_upload is global. If this module answered every upload,
@@ -208,29 +354,35 @@ int main(int argc, char **argv) {
         printf("request: one per settled burst, held until taken and not renewed\n");
 
     // ---- enable low: the whole device is inert --------------------------
-    // Pre-built mode (PLAN.md 25) drives `enable` from `set_upd & ~derive_en`,
-    // so the sample flash the core DERIVED is not overwritten by a save file
-    // and no save is asked for. Both halves of that are checked here because
-    // both are load-bearing and neither was covered: `enable` was set to 1 at
-    // the top of this file and never cleared again.
+    // `enable` is "the MRA declared an <nvram> element". Every set the core runs
+    // has a DS2404 to remember, so nothing drives this low today -- what varies
+    // is the SHAPE of the file (has_flash) and whether the flash half is real
+    // (flash_live), both checked above. It stays covered because an MRA from
+    // before any of this exists, or one built with the element left out, must
+    // not have a stray save file written into its sample region.
     //
-    // The save half has a second guard in the core -- flash_dirty is toggled
-    // only by spi_soundflash, which the derivation does not write through --
-    // but a test that leans on the belt without checking the braces is not
-    // testing the thing the code says it relies on.
+    // The baseline is the region as it is NOW, not the first image loaded: the
+    // tests between here and there have rewritten it, and comparing against the
+    // stale copy reported 3,968 bytes of a leak that never happened.
     dut->enable = 0;
-    std::vector<uint8_t> decoy(N);
-    for (size_t i = 0; i < N; i++) decoy[i] = (uint8_t)(i * 53 + 7);
+    std::vector<uint8_t> baseline(N);
+    for (size_t i = 0; i < N; i++) baseline[i] = sdram[PCM_BASE + i];
+    uint8_t sram_before[SRAM_BYTES];
+    memcpy(sram_before, sram, SRAM_BYTES);
+    std::vector<uint8_t> decoy(N + SRAM_BYTES);
+    for (size_t i = 0; i < decoy.size(); i++) decoy[i] = (uint8_t)(i * 53 + 7);
     load(decoy);
     int leaked = 0;
-    for (size_t i = 0; i < N; i++) if (sdram[PCM_BASE + i] != img[i]) leaked++;
+    for (size_t i = 0; i < N; i++) if (sdram[PCM_BASE + i] != baseline[i]) leaked++;
+    for (size_t i = 0; i < SRAM_BYTES; i++) if (sram[i] != sram_before[i]) leaked++;
     if (leaked) {
-        printf("FAIL: %d bytes of a save file reached the sample region with "
+        printf("FAIL: %d bytes of a save file reached the board with "
                "enable low\n", leaked);
         errors++;
     }
 
     for (int i = 0; i < 5; i++) { dut->flash_dirty = !dut->flash_dirty; run(20); }
+    dut->sram_dirty = !dut->sram_dirty; run(20);
     int asked = 0;
     for (int i = 0; i < 4000; i++) { tick(); if (dut->ioctl_upload_req) asked++; }
     if (asked) {
@@ -238,7 +390,8 @@ int main(int argc, char **argv) {
         errors++;
     }
     if (!leaked && !asked)
-        printf("disabled: no load into the region, no save requested\n");
+        printf("disabled: no load into the region or the DS2404, and neither "
+               "device can ask for a save\n");
 
     delete dut;
     if (errors) { printf("\n%d FAILURES\n", errors); return 1; }

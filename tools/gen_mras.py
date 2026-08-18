@@ -458,12 +458,22 @@ def emit(setname, s, fam, sets):
 
     L += ['',
           '    <!--',
-          '      The sample flash, saved to /media/fat/config/nvram/.  Unused on the',
-          '      default path: Pre-built rebuilds the image every boot and neither loads',
-          '      nor saves.  It must stay below the <rom> element -- Main_MiSTer sends it',
-          '      after the index-0 image, which is what lets it land on the blank flash.',
+          '      The save file, in /media/fat/config/nvram/.  ONE element, because an MRA',
+          '      gets one: everything the board remembers is concatenated into it.',
+          '',
+          '        0x000000..0x1FFFFF   the two E28F008SA sample flash chips',
+          '        0x200000..0x2001FF   the DS2404\'s 512 bytes of bookkeeping SRAM',
+          '',
+          '      2,097,664 bytes.  The tail is byte-for-byte MAME\'s own `ds2404` file, so',
+          '      a save can be assembled from MAME\'s soundflash1, soundflash2 and ds2404',
+          '      in that order.  In Pre-built mode the flash half is written but not read',
+          '      back -- the image is derived every boot -- and the DS2404 half is live',
+          '      either way, which is what makes the bookkeeping persist at all.',
+          '',
+          '      It must stay below the <rom> element: Main_MiSTer sends it after the',
+          '      index-0 image, which is what lets it land on the blank flash.',
           '    -->',
-          '    <nvram index="2" size="2097152"/>',
+          '    <nvram index="2" size="2097664"/>',
           '',
           '    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"',
           '             default="A,B,X,Start,Select,R,L" count="3"/>',
@@ -496,6 +506,16 @@ def mra_stream(text):
             b = [int(x, 16) for x in body.split()]
             out.append(("fill", n * len(b), b[0]))
     return out
+
+
+def mra_nvram(text):
+    """The <nvram> element's size, which the core's layout has to agree with."""
+    src = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    m = re.search(r'<nvram\b[^>]*index="(\d+)"[^>]*size="(\d+)"', src)
+    if not m:
+        m = re.search(r'<nvram\b[^>]*size="(\d+)"[^>]*index="(\d+)"', src)
+        return (int(m.group(2)), int(m.group(1))) if m else (None, None)
+    return int(m.group(1)), int(m.group(2))
 
 
 def mra_cfg(text):
@@ -540,6 +560,10 @@ def self_test(sets, out_dir):
             print("  self-test FAIL %s: index-1 config differs" % fam)
             print("    generated %s" % " ".join("%02X" % b for b in gotc[0]))
             print("    file      %s" % " ".join("%02X" % b for b in gotc[1]))
+        if mra_nvram(mine) != mra_nvram(text):
+            ok = False
+            print("  self-test FAIL %s: <nvram> differs -- generated index %s size %s, "
+                  "file index %s size %s" % ((fam,) + mra_nvram(mine) + mra_nvram(text)))
         if ok:
             print("  self-test ok   %s: %d parts and %d config bytes match %s"
                   % (fam, len(got), len(gotc[1]), os.path.basename(path)))

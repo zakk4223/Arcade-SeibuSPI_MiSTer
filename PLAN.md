@@ -8499,3 +8499,142 @@ the RBF is started directly rather than through an MRA -- but the RBF in
 
 **Save files move with the MRA names again**, as they did in 26. Unused on the
 default path, since Pre-built neither loads nor saves.
+
+## 31. The DS2404, and one save file for two devices (2026-08-18)
+
+The board has a Dallas DS2404S -- an RTC and 512 bytes of battery-backed SRAM --
+and the core answered its four ports with zeros. Every game writes to it: MAME's
+own `~/.mame/nvram/rdft/ds2404` opens `00 4A 4A 36`, the game ID with the region
+byte cleared, followed by what reads as the service bookkeeping page. All of that
+was going into a hole.
+
+### 31.1 What to be faithful to
+
+Not the chip. The real DS2404 speaks 1-Wire and the board does not: the SEI600
+presents it to the 386 as four byte ports, and MAME's `ds2404.cpp` says so in a
+FIXME at the top -- it models the parallel view "provided by the Seibu SEI600 for
+the convenience of SPI emulation". So MAME's device IS the specification here,
+and `rtl/spi_ds2404.sv` is a transliteration of it, down to two things that look
+like bugs and are not:
+
+* **The read pointer is set to the address MINUS ONE**, because a read is a
+  clock write followed by a data read and the clock write increments first.
+  Getting this wrong shifts every byte the game reads by one.
+* **The copy happens on the third address byte**, not on a later write. MAME
+  checks `state[state_ptr] == STATE_INIT_COMMAND` after the switch, with the
+  pointer already stepped, so writing the high byte of the address is what arms
+  and completes a command.
+
+Four commands exist: 0xCC skip ROM, 0x0F write scratchpad, 0x55 copy scratchpad,
+0xF0 read memory. MAME calls anything else a fatal error; hardware cannot, so an
+unknown byte is ignored and the machine stays where it is.
+
+### 31.2 Which clock it runs on, and why that was the design decision
+
+`spi_io` is on clk_cpu and the rest of the I/O with it. This is on **clk_ram**,
+with `spi_nvram`, and that is the whole shape of the module:
+
+The SRAM is part of the save file, and **the save side of MiSTer's nvram cannot
+be stalled** -- hps_io takes `ioctl_din` on the same edge it advances its
+address. Putting the memory in the nvram's own domain makes that path a plain
+synchronous read with nothing crossing in it. The 386 is the side that crosses
+instead, and it is the side that can afford to: its accesses are single I/O
+instructions tens of clk_ram cycles apart, and `spi_io` holds it off with a
+`pend` register while one is in flight -- the same shape the Z80 program download
+already used, which is why `spi_cpu`'s input is now called `io_stall` rather than
+`z80dl_stall`.
+
+Three write ports cross as **one request toggle with the port number beside it**,
+not a toggle each. Two toggles could be seen in the same clk_ram cycle or out of
+order; one cannot. The ack comes back when the action is complete, which for a
+scratchpad copy is up to 33 cycles later because the copy runs a byte per cycle.
+
+### 31.3 One file, two devices
+
+An MRA has one `<nvram>` element with one size, so everything the board remembers
+is concatenated into it:
+
+    0x000000..0x1FFFFF   the two E28F008SA sample flash chips
+    0x200000..0x2001FF   the DS2404's 512 bytes
+
+2,097,664 bytes, and **the flash comes first** for two reasons. The tail is then
+what moves on a set with no flash -- SXX2E's samples are a real ROM, so rdfts's
+file is those 512 bytes at offset 0 and nothing else, which is one input to
+`spi_nvram` (`has_flash`) rather than a second layout. And an existing 2 MB save
+from before this still loads its flash half, with the DS2404 falling back to
+MAME's zeroed default, instead of being read one device out of step.
+
+`has_flash` is deliberately an MRA property and not an OSD one: the size in the
+element is fixed before the menu is reachable, so it cannot depend on which way
+Sample Flash is set.
+
+**The tail is byte-for-byte MAME's own `ds2404` file**, so a save can be
+assembled from MAME's `soundflash1`, `soundflash2` and `ds2404` in that order and
+read straight in.
+
+### 31.4 Pre-built mode had to change, and one line of it is load-bearing
+
+Before this, Pre-built drove the whole nvram module's `enable` low: no load, no
+save, nothing. That cannot stand now, because the DS2404 is worth saving whatever
+fills the flash. So `enable` is always high and two narrower things took over:
+
+* **`flash_live`** -- false in Pre-built. The flash half of a LOAD is dropped on
+  the floor. The obvious reason is that the image is about to be derived anyway,
+  so those bytes are identical at best and stale at worst. The load-bearing
+  reason is the other one: **the derivation is writing ch3 at exactly that
+  moment**, and `sdr_rw_*` is a priority mux with the nvram in front of it. 21.4
+  already paid for a priority mux over that handshake starving a master
+  silently; this would have been the same bug with a save file as the trigger.
+* **`hold` split from `wr_active`.** `wr_active` claims ch3, and now only while
+  the flash half is actually being written. `hold` is the core's reset, and it
+  covers the WHOLE load including the tail -- the game must not read its
+  bookkeeping before the file has landed in the chip.
+
+The cost of the compromise, stated plainly: **in Pre-built mode a save file is
+2,097,664 bytes of which only the last 512 are read back.** The flash half is
+written because the size is fixed and the upload cannot be shortened. It is a
+worse trade than two elements would be, and MRAs do not have two elements.
+
+### 31.5 The testbench, and the test that only tested itself
+
+`sim/tb_ds2404.cpp` puts a transliteration of MAME's device beside the RTL and
+drives both. It found nothing in the RTL and one thing in itself, which is worth
+recording because it is the shape of mistake this kind of test invites.
+
+The first RTC test wrote five bytes to the scratchpad at 0x202, copied them to
+0x202, and compared against **the array it had just written**. It failed, and the
+RTL was right: write-scratchpad takes its offset from the address's low five bits
+(`m_offset = m_address & 0x1f`), so filling at 0x202 puts the bytes at
+scratchpad 2..6 -- while the copy always reads the scratchpad from 0. Five bytes
+nobody wrote get copied. MAME does exactly the same thing. The fix was to fill at
+0x200, where the offset is 0, and to compare against the reference rather than
+against an expectation. **A comparison against your own belief is not a test of
+two implementations.**
+
+Also covered, because each is a plausible way to get this wrong: the 33rd
+scratchpad byte being dropped rather than wrapping over the first (MAME's
+`m_offset` walks to 32 and the guard drops it, so the RTL counter is six bits and
+not five), the hole at 0x200/0x201 reading zero, the copy path reaching the RTC
+bytes, reset clearing the state machine while all 512 SRAM bytes survive, and a
+load NOT toggling `nv_dirty` -- a save file arriving must not immediately ask to
+be saved back.
+
+`tb_nvram` grew the other half: the crossing between the two devices in one
+stream, Pre-built dropping the flash half while `hold` still rises and
+`wr_active` never does, and the SXX2E shape. `FLASH_BYTES` is a parameter now so
+the testbench can shrink the flash half to 4 KB and reach the crossing in a few
+thousand cycles instead of eighty million.
+
+### 31.6 What is not modelled
+
+**The RTC starts at zero.** MAME seeds its 40-bit counter from the host clock
+against a 1995-01-01 reference; there is no clock here, so it counts from
+power-on, the way a board whose battery has gone would. It ticks at 256 Hz as
+MAME's does.
+
+**The RTC is not saved**, because MAME does not save it either --
+`ds2404_device::nvram_write` stores `m_sram` and nothing else. That is what keeps
+the tail byte-identical to MAME's file.
+
+**Read-scratchpad (0xAA) does not exist**, in either. MAME has the state and no
+command that reaches it.

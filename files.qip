@@ -24,6 +24,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb4.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_soundflash.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_nvram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ds2404.sv
 
 # NOT BUILT, deliberately. rtl/spi_debug.sv (the vital signs panel),
 # rtl/spi_jtag_peek.sv (the ISSP probes), rtl/spi_romcheck.sv (the checksum

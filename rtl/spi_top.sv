@@ -41,6 +41,16 @@ module spi_top
 	input             flash_sdr_ack,
 	output            flash_dirty,
 
+	// The DS2404's 512 bytes of bookkeeping SRAM, which are the TAIL of the save
+	// file (rtl/spi_nvram.sv). The chip is board hardware so it lives in here;
+	// the nvram is framework glue so it lives at the top; this is where the two
+	// meet. Same clock domain as spi_nvram, deliberately -- see spi_ds2404.sv.
+	input       [8:0] ds_nv_addr,
+	input       [7:0] ds_nv_din,
+	input             ds_nv_we,
+	output      [7:0] ds_nv_dout,
+	output            ds_nv_dirty,
+
 	// Freeze the CPU: the picture stops changing while the video engines keep
 	// running, so a frame can be studied at leisure. Driven from a controller
 	// button at the top level. This is the ONLY debug control left in the
@@ -239,7 +249,9 @@ module spi_top
 		.dbg_c_pair (),
 		.dbg_c_addr (),
 		.dbg_c_hit  (),
-		.z80dl_stall (z80dl_stall),
+		// Any I/O write still in flight to another clock domain: the Z80
+		// program download, and now the DS2404's ports.
+		.io_stall    (z80dl_stall | ds_stall),
 		// Only the sets with a second sound ROM read sound1.u0222's window, and
 		// only their loader tables put anything behind it -- see spi_cpu.sv's
 		// map. rdft's Z80 program is inside `maincpu` instead and rdfts has a
@@ -384,7 +396,45 @@ module spi_top
 		.sndfifo_wr       (sndfifo_wr),
 		.sndfifo_full     (sndfifo_full),
 		.coin_latch       (coin_latch),
-		.coin_latch_rd    (coin_latch_rd)
+		.coin_latch_rd    (coin_latch_rd),
+
+		.ds_req           (ds_req),
+		.ds_port          (ds_port),
+		.ds_data          (ds_data),
+		.ds_ack           (ds_ack),
+		.ds_dout          (ds_dout),
+		.ds_stall         (ds_stall)
+	);
+
+	// ------------------------------------------------------------------
+	// The DS2404: an RTC and 512 bytes of battery-backed SRAM, which is where
+	// the games keep their bookkeeping. It answered zeros until now.
+	//
+	// On clk_ram rather than clk_cpu with the rest of the I/O, because its SRAM
+	// is the tail of the save file and the save side of MiSTer's nvram cannot be
+	// stalled. The 386 is the side that crosses, and spi_io holds it off with
+	// ds_stall while a byte is in flight. See spi_ds2404.sv.
+	// ------------------------------------------------------------------
+	wire       ds_req, ds_ack, ds_stall;
+	wire [1:0] ds_port;
+	wire [7:0] ds_data, ds_dout;
+
+	spi_ds2404 ds2404
+	(
+		.clk      (clk_ram),
+		.reset    (reset),
+
+		.req      (ds_req),
+		.port     (ds_port),
+		.din      (ds_data),
+		.ack      (ds_ack),
+		.dout     (ds_dout),
+
+		.nv_addr  (ds_nv_addr),
+		.nv_din   (ds_nv_din),
+		.nv_we    (ds_nv_we),
+		.nv_dout  (ds_nv_dout),
+		.nv_dirty (ds_nv_dirty)
 	);
 
 	// ------------------------------------------------------------------

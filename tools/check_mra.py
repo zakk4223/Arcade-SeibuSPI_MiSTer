@@ -39,6 +39,11 @@ import re
 import sys
 import zipfile
 
+# rtl/spi_nvram.sv. The save file is one stream over two devices, because an MRA
+# has one <nvram> element: the flash chips, then the DS2404's SRAM as the tail.
+FLASH_BYTES = 0x200000
+SRAM_BYTES  = 0x200
+
 # rtl/spi_defs.vh
 BASES = {
     "prg":     0x0000000,
@@ -534,6 +539,39 @@ def check_flash(cfg, table, zippath):
     print("  rebuilt flash matches the image MAME's own flash devices hold")
 
 
+def check_nvram(path, mod):
+    """The <nvram> element against the layout spi_nvram.sv implements.
+
+    One element, because an MRA gets one: the sample flash and the DS2404's SRAM
+    are concatenated into a single file, flash first. So the size is not free --
+    it says which of the two shapes the core will split the stream into, and a
+    wrong one silently loads the tail into the wrong place. The core takes
+    `has_flash` from the same mod byte checked above, so both come from here.
+    """
+    src = read_mra(path)
+    m = re.search(r'<nvram\b([^>]*)/?>', src)
+    has_flash = bool((mod or 0) & 0x01) and bool((mod or 0) & 0x10)
+    want = (SRAM_BYTES + FLASH_BYTES) if has_flash else SRAM_BYTES
+    if not m:
+        fail("%s: no <nvram> element, but every set has a DS2404 to remember "
+             "(%d bytes expected)" % (path, want))
+    attrs = m.group(1)
+    idx = re.search(r'index="(\d+)"', attrs)
+    size = re.search(r'size="(\d+)"', attrs)
+    if not idx or int(idx.group(1)) != 2:
+        fail("%s: <nvram> is at index %s; spi_nvram.sv answers index 2 only"
+             % (path, idx.group(1) if idx else "unset"))
+    if not size:
+        fail("%s: <nvram> has no size=" % path)
+    if int(size.group(1)) != want:
+        fail("%s: <nvram size=%s>, but a set with%s a sample flash needs %d "
+             "(%s)" % (path, size.group(1), "" if has_flash else "out", want,
+                       "0x200000 flash + 0x200 DS2404 SRAM" if has_flash
+                       else "0x200 DS2404 SRAM, no flash half"))
+    print("  nvram: %d bytes -- %s" % (want, "2 MB sample flash then the "
+          "DS2404's 512-byte tail" if has_flash else "the DS2404's 512 bytes alone"))
+
+
 def check_set(setname, cfg, args):
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     drv = os.path.join(args.mame, "src", "mame", "seibu", "seibuspi.cpp")
@@ -572,6 +610,7 @@ def check_set(setname, cfg, args):
     # ROMs only that variant loads.
     if cfg["mod"] & 0x10:
         check_derive_cfg(mra_path, cfg.get("mame", setname), cfg_bytes)
+    check_nvram(mra_path, mod_byte)
 
     roms = [r for r in mame if not r.get("skipped")]
     skipped = [r for r in mame if r.get("skipped")]

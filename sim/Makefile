@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
+.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_decode run-ddr_rom_reader run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram
+all: run-rom_decode run-ddr_rom_reader run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram run-ds2404
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -94,6 +94,16 @@ run-snd_window: obj_dir/Vspi_snd_window
 # an authentic-flash SDRAM image, so it is not in `all` -- the offline twin is
 # `make check-derive ROMS=...`, which does the same walk in Python.
 #   make -C sim run-flash-derive SDRAM=/tmp/rdft2-upd.bin SET=rdft2
+# BUILD every testbench, run none of them. Three of these had silently stopped
+# building when their modules grew ports (PLAN.md 21.6, 22.3, 28) and a fourth --
+# tb_boot_top -- did it again the moment spi_top grew the DS2404's SRAM port, so
+# the rot is not a one-off: a bench that fails to build looks exactly like one
+# nobody ran. Everything in `all` is covered by running it; these are the ones
+# that need ROMs or an image and so cannot be.
+check-tb: obj_dir/Vtb_boot_top obj_dir/Vtb_sdram_top obj_dir/Vtb_video_top \
+          obj_dir/Vspi_romcheck obj_dir/Vspi_flash_derive obj_dir/Vspi_snd_window
+	@echo "every testbench builds"
+
 run-flash-derive: obj_dir/Vspi_flash_derive
 	@./obj_dir/Vspi_flash_derive $(SDRAM) $(SET)
 
@@ -325,8 +335,18 @@ run-nvram: obj_dir/Vspi_nvram
 	@./obj_dir/Vspi_nvram
 
 obj_dir/Vspi_nvram: $(RTL)/spi_nvram.sv $(RTL)/spi_defs.vh tb_nvram.cpp lint.vlt
-	$(VERILATOR) $(VFLAGS) -GQUIET_BITS=8 --top-module spi_nvram \
+	$(VERILATOR) $(VFLAGS) -GQUIET_BITS=8 -GFLASH_BYTES=4096 --top-module spi_nvram \
 	    $(RTL)/spi_nvram.sv tb_nvram.cpp
+
+# The DS2404's 512 bytes of bookkeeping SRAM, against a transliteration of
+# MAME's own device. TICK_DIV is turned right down so the RTC ticks in tens of
+# cycles rather than in half a million.
+run-ds2404: obj_dir/Vspi_ds2404
+	@./obj_dir/Vspi_ds2404
+
+obj_dir/Vspi_ds2404: $(RTL)/spi_ds2404.sv tb_ds2404.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) -GTICK_DIV=64 --top-module spi_ds2404 \
+	    $(RTL)/spi_ds2404.sv tb_ds2404.cpp
 
 run-romcheck: obj_dir/Vspi_romcheck
 	@./obj_dir/Vspi_romcheck $(SDRAM)

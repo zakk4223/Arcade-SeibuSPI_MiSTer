@@ -4,7 +4,7 @@ QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
 .PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 \
-        check-derive mras check-clones verify
+        check-derive check-tb mras check-clones verify
 
 all: build
 
@@ -34,6 +34,13 @@ timing:
 
 lint:
 	@$(MAKE) -C sim lint
+
+# BUILD every testbench without running any. Three of them had silently stopped
+# building when their modules grew ports, and tb_boot_top did it again the moment
+# spi_top grew the DS2404's SRAM port -- a bench that fails to build looks exactly
+# like one nobody ran. Cheap enough to be part of `verify`.
+check-tb:
+	@$(MAKE) -C sim check-tb
 
 test:
 	@$(MAKE) -C sim
@@ -92,7 +99,7 @@ check-clones:
 	@python3 tools/gen_mras.py --verify "$(ROMS)"
 
 # Everything that can be checked without a Quartus run or a MiSTer.
-verify: lint check-mra test
+verify: lint check-mra check-tb test
 
 clean:
 	rm -rf db incremental_db output_files

@@ -82,7 +82,9 @@ module spi_cpu
 	input             clk,          // clk_cpu, 28.636364 MHz
 	input             reset,
 	input             cpu_en,       // 0 = stall the CPU (pause, throttle)
-	input             z80dl_stall,  // SXX2C: a Z80 download byte is in flight
+	// An I/O write is still in flight to another clock domain and the 386 has to
+	// wait: the SXX2C Z80 program download, or a DS2404 port.
+	input             io_stall,
 	input             snd01_en,     // cartridge: decode sound1.u0222's window
 	input             pcmsrc_en,    // authentic flash: decode the PCM source too
 	// Generation A (senkyu, ejanhs, viprp1) puts a 1 MB PCM source ROM on ONE
@@ -419,12 +421,13 @@ module spi_cpu
 	// This is a correctness fix for tearing, NOT the cause of the empty sprite
 	// list: MAME's capture shows the game does not clear the buffer after
 	// triggering (main RAM at 0x37000 still holds the list at end of frame).
-	// z80dl_stall is the SXX2C Z80 program download: the 386 pushes 256 KB a
-	// byte at a time and each byte is a full SDRAM write, so the CPU waits
-	// rather than risk a dropped byte. Same shape as the DMA hold above, and
-	// the same justification -- the real board stops the 386 for this too.
+	// io_stall is an I/O write still in flight to clk_ram, where a second write
+	// would overtake it: the SXX2C Z80 program download, which pushes 256 KB a
+	// byte at a time with each byte a full SDRAM write, or a DS2404 port. The
+	// CPU waits rather than risk a dropped byte. Same shape as the DMA hold
+	// above, and the same justification -- the real board stops the 386 too.
 	wire mem_accept = cpu_valid && !cpu_inta && cpu_en && !dma_own && !dma_req
-	                  && !z80dl_stall && (state == S_IDLE);
+	                  && !io_stall && (state == S_IDLE);
 	assign cpu_ready = cpu_inta ? inta_ready : mem_accept;
 
 	// Guard against a zero burstcount, which would underflow the counter.

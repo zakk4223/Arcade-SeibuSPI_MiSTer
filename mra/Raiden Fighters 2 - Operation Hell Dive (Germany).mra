@@ -41,8 +41,13 @@
                              afterwards, because MiSTer asks the core for its
                              nvram only while that menu is up.
 
-      Pre-built saves nothing and loads nothing, deliberately: the image is
-      rebuilt every boot, so there is no save file to go stale.
+      Pre-built does not read the flash half of the save file back, deliberately:
+      the image is rebuilt every boot, so a stored copy is the same bytes at best
+      and a stale one at worst -- and the derivation is writing that region
+      through the same SDRAM channel at exactly the moment the file arrives.
+      It still SAVES the whole file, because the size below is fixed and the
+      upload cannot be shortened, and it loads the DS2404's 512-byte tail either
+      way: the bookkeeping is worth keeping whatever fills the flash.
     -->
 
     <!--
@@ -167,13 +172,29 @@
     </rom>
 
     <!--
-      The sample flash, saved to /media/fat/config/nvram/. Index 2 because 0 is
-      the ROM image, 1 the core's config blob and 254 the DIP switches; the size
-      is the two E28F008SA chips exactly. Main_MiSTer sends this file AFTER the
+      The save file, in /media/fat/config/nvram/. Index 2 because 0 is the ROM
+      image, 1 the core's config blob and 254 the DIP switches.
+
+      ONE element, because an MRA gets one, so everything the board remembers is
+      concatenated into it:
+
+        0x000000..0x1FFFFF   the two E28F008SA sample flash chips
+        0x200000..0x2001FF   the DS2404's 512 bytes of bookkeeping SRAM
+
+      2,097,664 bytes. The flash comes first so that the tail is what moves on a
+      set with no flash at all: SXX2E's samples are a real ROM, so its file is
+      those 512 bytes and nothing else.
+
+      The tail is byte-for-byte MAME's own `ds2404` nvram file, so a save can be
+      assembled from MAME's soundflash1, soundflash2 and ds2404 in that order.
+
+      In Pre-built mode the flash half is written but not read back -- the image
+      is derived every boot -- while the DS2404 half is live either way, which is
+      what makes the bookkeeping persist. Main_MiSTer sends this file AFTER the
       index-0 image, which is what lets it land on top of the blank flash that
-      image carries -- so it must stay below the <rom> element here.
+      image carries, so it must stay below the <rom> element here.
     -->
-    <nvram index="2" size="2097152"/>
+    <nvram index="2" size="2097664"/>
 
     <!--
       Same control layout as the pre-flashed MRA; the names map to joystick bits

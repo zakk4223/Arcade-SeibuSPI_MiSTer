@@ -139,6 +139,17 @@ module tb_boot_top
 		.flash_sdr_ack (flash_sdr_req),
 		.flash_dirty   (),
 
+		// The DS2404's SRAM port, which spi_nvram drives at the top level and
+		// nothing drives here. Tied off rather than left unconnected for the
+		// reason the comment above gives: PINMISSING is an error, so an
+		// unconnected port stops this file BUILDING. Nothing in the boot
+		// sequence reads the chip's bookkeeping, so a quiet port is honest.
+		.ds_nv_addr    (9'd0),
+		.ds_nv_din     (8'd0),
+		.ds_nv_we      (1'b0),
+		.ds_nv_dout    (),
+		.ds_nv_dirty   (),
+
 		.sdr_prg_addr (sdr_prg_addr),
 		.sdr_prg_dout (sdr_prg_dout),
 		.sdr_prg_req  (sdr_prg_req),
