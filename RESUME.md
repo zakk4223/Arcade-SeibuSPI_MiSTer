@@ -42,26 +42,33 @@ SRAM is part of the save file and the save side of MiSTer's nvram cannot be
 stalled; the 386 crosses instead, through one request toggle, and is held off by
 `io_stall` while a byte is in flight.
 
-**The save file is now one stream over two devices**, because an MRA gets one
-`<nvram>` element:
+**The save file is 516 bytes** (`PLAN.md` 32), one stream over two devices
+because an MRA gets one `<nvram>` element:
 
-    0x000000..0x1FFFFF   the two sample flash chips
-    0x200000..0x2001FF   the DS2404's SRAM
+    0x000..0x003   the sample flash's REGION STAMP, and nothing else of it
+    0x004..0x203   the DS2404's SRAM
 
-2,097,664 bytes for a cartridge set, and **512 for rdfts** -- which has an
-`<nvram>` element for the first time, since its samples are a ROM and the tail is
-all there is. The tail is byte-for-byte MAME's own `ds2404` file.
+**512 for rdfts**, which has an `<nvram>` element for the first time -- its samples
+are a ROM, so there is no stamp to keep and the tail sits at offset 0. The tail is
+byte-for-byte MAME's own `ds2404` file.
 
-Two consequences worth knowing before testing:
+It saved all 2 MB for one day and that was enough to find two things wrong with
+it: the OSD felt unresponsive on every open, because Main reads the file back
+whenever it polls; and the mode was a TRAP, because one OSD visit in Pre-built
+saved a stamp that said "already programmed" and the cart copy could then never be
+seen again. Both are gone. What persists now is the FACT of the copy, four bytes
+of it, and the 2 MB payload is derived at every boot in either mode.
 
-* **Pre-built now loads and saves**, where before it did neither. Only the tail
-  is read back; the flash half is written because the size is fixed and skipped
-  on load because the derivation owns ch3 at that moment. So a Pre-built save is
-  2 MB of which 512 bytes matter.
-* **An old 2 MB `.nvm` still loads its flash half** -- that is why the flash
-  comes first -- with the DS2404 falling back to MAME's zeroed default. Whether
-  Main_MiSTer accepts a short file or rejects the size is NOT verified; if it
-  rejects it, the ritual runs once more and the next save is the new shape.
+**Both modes derive.** What the option picks is whether the region stamp goes with
+the payload: Pre-built writes it and the game plays at once, Cart copy leaves it
+blank and the game spends six minutes programming a flash that is already correct.
+**Switching INTO Cart copy blanks the stamp and restarts the board** -- boot is the
+only moment the game looks -- so it is always reachable. Switching back does
+nothing.
+
+**A 2,097,664-byte save from the day before is not compatible**: its first four
+bytes still read as the stamp, but the 512 after them are flash payload rather than
+the DS2404. Delete any that exist; there were none on the machine.
 
 `make -C sim run-ds2404` and `run-nvram` both pass.
 
@@ -90,13 +97,15 @@ a command takes its own cycle now, and the 386 cannot tell.
 Both of the first two versions simulate identically -- the bench waits for the
 ack, as the 386 does -- so nothing but a fit was ever going to find either.
 
-    setup worst  +0.340   sdram|ch1_rq -> sdram|SDRAM_A[8]
-    clk_ram      +0.340   clk_cpu  +1.188   clk_sys  +1.814   pll_hdmi +0.425
-    hold worst   +0.169   TNS 0.000 everywhere, 0 critical warnings
+    setup worst  +0.230   sdram|ch4_rq -> sdram|SDRAM_A[8]
+    clk_ram      +0.230   clk_cpu  +1.915   clk_sys  +1.851   pll_hdmi +0.428
+    hold worst   +0.205   TNS 0.000 everywhere, 0 critical warnings
 
-Better than 29.3's +0.254, and nothing of the DS2404's appears in the worst 25.
-The endpoint is sdram.sv's again, and it has moved from `command[1]` to
-`SDRAM_A[8]` -- 28.5's point about that wandering, not improving.
+That is the fit WITH section 32's Cart copy rework in it (31.8 read +0.340 before
+it, on the same convergence point with a different signal named). Nothing of the
+DS2404's or the nvram's appears in the worst 25; the endpoint is sdram.sv's, and
+which of its request flags is "the" worst there has now been three different ones
+in three fits -- 28.5's routing limit, not a path getting worse.
 
 ## The release blocker, and what moved it
 
@@ -180,10 +189,16 @@ described -- but a fit is still worth CHECKING rather than assuming.
     2. Open the OSD once afterwards, which is the only thing that makes Main ask
        for the nvram, and check that
        `/media/fat/config/nvram/Raiden Fighters (Germany).nvm` appears at
-       **2,097,664 bytes**. Its last 512 are the chip; the 2 MB ahead of them is
-       the derived flash, written but never read back.
+       **516 bytes**. Its last 512 are the chip; the four ahead of them are the
+       flash's stamp.
   Until then what is established is that the core is HEALTHY with the DS2404 in
   it, not that the chip remembers anything.
+* **Cart copy has never been exercised on hardware.** What to try, in order:
+  select it in the OSD (the board should reset itself within a second), watch for
+  the game's own "NOW UPDATING" and the six-minute copy, let it finish, open the
+  OSD once so the 516 bytes are saved, then reload and check it does NOT copy
+  again. Then toggle to Cart copy a second time and check that it DOES -- that
+  reachability is the whole point of `PLAN.md` 32.
 * **A variant has never been booted.** Any of the 42 would do as a first check,
   and `Raiden Fighters (Japan, earlier)` is the cheapest -- it shares rdft's job
   table address, so only the region lock and the file names are new.

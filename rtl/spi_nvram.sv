@@ -6,35 +6,42 @@
 //  "NOW UPDATING" ending on a halt screen that wants a power cycle (PLAN.md
 //  18.4). This is the save file that makes it happen once.
 //
-//  ONE FILE, TWO DEVICES. An MRA has a single <nvram> element with a single
-//  size, so everything the board remembers is concatenated into it:
+//  ONE FILE, TWO DEVICES, and 516 BYTES OF IT. An MRA has a single <nvram>
+//  element with a single size, so everything the board remembers is concatenated:
 //
-//      0x000000 .. 0x1FFFFF   the two E28F008SA sample flash chips
-//      0x200000 .. 0x2001FF   the DS2404's 512 bytes of bookkeeping SRAM
+//      0x000 .. 0x003   the sample flash's REGION STAMP, and nothing else of it
+//      0x004 .. 0x203   the DS2404's 512 bytes of bookkeeping SRAM
 //
-//  The flash comes FIRST so that the tail is what moves when a set has no flash:
-//  on SXX2E the samples are a real ROM, so its file is 512 bytes and the SRAM is
-//  at offset 0. `has_flash` says which layout this MRA declared, and it is a
-//  property of the MRA and not of the OSD -- the size in the file has to be
+//  Those four bytes are the whole of what the flash needs to remember. They are
+//  what the game tests to decide the flash is already programmed, so they are the
+//  flag that says whether its six-minute updater runs -- and the two megabytes
+//  behind them are DERIVED at every boot in a third of a second, which makes
+//  storing them pointless twice over. This used to save all 2 MB, and it cost a
+//  visibly unresponsive OSD every time the menu was opened, because Main reads
+//  the file back whenever it polls. PLAN.md 32.
+//
+//  It is a fake, deliberately: the flash is not persisted, only the fact that the
+//  game once filled it. What the player sees is the same either way.
+//
+//  The stamp comes FIRST so that the tail is what moves when a set has no flash
+//  at all: on SXX2E the samples are a real ROM, so its file is 512 bytes and the
+//  SRAM sits at offset 0. `has_flash` says which layout this MRA declared, and it
+//  is a property of the MRA and not of the OSD -- the size in the file has to be
 //  fixed before the core knows which way Sample Flash is set.
 //
-//  The 512-byte tail is byte-for-byte MAME's own `ds2404` nvram file, so a save
-//  can be assembled from MAME's two soundflash files and its ds2404, in that
-//  order, and read straight in.
+//  The 512-byte tail is byte-for-byte MAME's own `ds2404` nvram file.
 //
 //  Both directions of MiSTer's arcade `<nvram>` mechanism, on index NV_INDEX:
 //
 //    LOAD  Main_MiSTer sends the file as an ordinary ioctl download at that
-//          index, after the ROM image. The flash half goes straight into the
-//          sample region, over the blank flash the MRA just loaded; the tail
-//          goes into the DS2404.
+//          index, after the ROM image. The stamp goes to flash[0..3], over the
+//          blank flash the MRA just loaded; the tail goes into the DS2404.
 //
-//          In Pre-built mode the flash half is SKIPPED and only the tail is
-//          applied. Two reasons, and the second is the load-bearing one: the
-//          image is about to be derived anyway, so the bytes are at best
-//          identical and at worst stale -- and the derivation is writing ch3 at
-//          that moment, which this would otherwise take from it. `wr_active` is
-//          what holds ch3, and it is only raised for the flash half.
+//          In Pre-built mode the stamp is SKIPPED, because the derivation writes
+//          the real one and a restored copy could only be the same bytes or a
+//          stale set. In Cart copy mode it is APPLIED, and it is the whole
+//          mechanism: a restored stamp means the ritual has been done and the
+//          game skips its updater, a blank one means it runs.
 //
 //    SAVE  the core raises ioctl_upload_req; Main sees it the next time it
 //          polls (which is when the OSD is open -- menu.cpp's
@@ -55,10 +62,10 @@ module spi_nvram
 	// of two clk_ram cycles: 24 is about 0.15 s. The testbench turns it down
 	// rather than simulating fifty million cycles.
 	parameter QUIET_BITS = 24,
-	// The flash half of the save file: the two E28F008SA chips. A parameter for
-	// the testbench's sake -- it shrinks the half so that the crossing into the
-	// DS2404's tail is a few thousand cycles away rather than eighty million.
-	parameter int FLASH_BYTES = 32'h0020_0000
+	// The flash's share of the save file: its four-byte region stamp. A parameter
+	// only so a testbench can widen it and check the crossing into the tail at
+	// some other offset; the real layout is cheap enough to test as it stands.
+	parameter int STAMP_BYTES = 4
 )
 (
 	input             clk,          // clk_ram, with the arbiters
@@ -67,12 +74,12 @@ module spi_nvram
 	// to remember, so this is no longer the "authentic flash only" gate it was
 	// -- what varies now is the SHAPE of the file, not whether there is one.
 	input             enable,
-	// This MRA's file carries the 2 MB flash half ahead of the DS2404's tail.
-	// An MRA property, fixed before the OSD is reachable: on SXX2E the samples
-	// are a ROM and the file is 512 bytes of SRAM and nothing else.
+	// This MRA's file carries the flash's stamp ahead of the DS2404's tail. An
+	// MRA property, fixed before the OSD is reachable: on SXX2E the samples are a
+	// ROM and the file is 512 bytes of SRAM and nothing else.
 	input             has_flash,
-	// ...and the flash half is REAL rather than about to be re-derived. False in
-	// Pre-built mode, where the load skips those bytes and never touches ch3.
+	// ...and the stored stamp is the one to use, rather than the one the
+	// derivation is about to write. True in Cart copy mode only.
 	input             flash_live,
 
 	// ---- ioctl, straight from hps_io (clk_sys; edge-detected here) --------
@@ -155,8 +162,15 @@ module spi_nvram
 	// the two shapes this MRA declared; the MRA's size= must match, and
 	// tools/check_mra.py holds the two against each other.
 	localparam [25:0] SRAM_BYTES = 26'h000_0200;
-	wire [25:0] tail_base = has_flash ? FLASH_BYTES[25:0] : 26'd0;
+	wire [25:0] tail_base = has_flash ? STAMP_BYTES[25:0] : 26'd0;
 	wire [25:0] nv_size   = tail_base + SRAM_BYTES;
+	// The offset into the SRAM, on each side. These are SUBTRACTIONS and were
+	// once the low nine bits of the counter, which worked only because both
+	// tail bases used to be 512-aligned -- 0x200000 and 0. A four-byte stamp
+	// ahead of the tail is not, and the shortcut silently rotated all 512 bytes
+	// by four. `up_cnt + 1` because the save side reads one byte ahead.
+	wire  [8:0] dl_tail = dl_off[8:0] - tail_base[8:0];
+	wire  [8:0] up_tail = up_cnt[8:0] + 9'd1 - tail_base[8:0];
 
 	assign ioctl_upload_index = NV_INDEX;
 
@@ -203,8 +217,8 @@ module spi_nvram
 	reg        fetching;
 	reg        fetch_nxt;   // this fetch fills nxt rather than cur
 
-	// The flash half comes out of the prefetched SDRAM line; the tail comes
-	// straight out of the DS2404. `sram_addr` is kept equal to up_cnt's low nine
+	// The stamp comes out of the prefetched SDRAM line -- one line covers all
+	// four bytes -- and the tail comes straight out of the DS2404. `sram_addr` is kept equal to up_cnt's low nine
 	// bits, so `sram_dout` -- registered, one cycle behind -- is already the byte
 	// the HPS will ask for next.
 	wire in_tail = (up_cnt >= tail_base);
@@ -249,9 +263,8 @@ module spi_nvram
 			dl_run <= !rom_busy;
 			if (!rom_busy && ioctl_wr_rise && (dl_off < nv_size)) begin
 				if (dl_off < tail_base) begin
-					// The flash half, through ch3 -- unless the image is about
-					// to be derived, in which case these bytes are dropped on
-					// the floor rather than raced against the derivation.
+					// The stamp, through ch3. Dropped in Pre-built, where the
+					// derivation writes the real one a moment later.
 					if (flash_live) begin
 						wr_addr    <= SDR_PCM_BASE + {dl_off[25:1], 1'b0};
 						wr_din     <= {ioctl_dout, ioctl_dout};
@@ -261,9 +274,7 @@ module spi_nvram
 					end
 				end
 				else begin
-					// The tail. `tail_base` is 512-aligned either way, so the
-					// low nine bits ARE the offset into the SRAM.
-					sram_addr <= dl_off[8:0];
+					sram_addr <= dl_tail;
 					sram_din  <= ioctl_dout;
 					sram_we   <= 1'b1;
 				end
@@ -326,10 +337,10 @@ module spi_nvram
 		// there so a one-cycle skew between the two cannot resurrect the bug.
 		if (up_run && ioctl_rd_rise && !upload_start) begin
 			up_cnt    <= up_cnt + 26'd1;
-			// Track it, so that the byte AFTER this one is already being read
-			// out of the SRAM. It wraps to 0 exactly as up_cnt crosses into the
-			// tail, because both bases are 512-aligned.
-			sram_addr <= up_cnt[8:0] + 9'd1;
+			// Track it, so that the byte AFTER this one is already being read out
+			// of the SRAM. Before the crossing it counts nonsense that nothing
+			// looks at, and it reaches 0 exactly as up_cnt reaches tail_base.
+			sram_addr <= up_tail;
 			if (up_cnt[2:0] == 3'b111) begin
 				// Crossing into the line that was prefetched.
 				cur       <= nxt;
@@ -364,8 +375,8 @@ module spi_nvram
 
 		if (enable) begin
 			// Either device having moved is a reason to ask. The flash is only
-			// worth saving when its half of the file is real -- in Pre-built mode
-			// the derivation writes the whole region at boot and that is not news.
+			// worth saving when its stamp is the stored one -- in Pre-built mode
+			// the derivation writes it at every boot and that is not news.
 			if ((flash_live && (flash_dirty != dirty_d))
 			    || (sram_dirty != sdirty_d)) begin
 				dirty_seen <= 1'b1;

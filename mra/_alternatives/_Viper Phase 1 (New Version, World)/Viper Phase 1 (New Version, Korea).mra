@@ -54,9 +54,13 @@
         20..23     stamp      0x003ffffc
         24         generation 0
 
-      The sample flash itself is an OSD option, "Sample Flash": Pre-built (the
-      default) has the core build the image out of SDRAM in about a third of a
-      second, Ritual has the game program its own flash over about six minutes.
+      The sample flash is an OSD option, "Sample Flash".  Both settings have
+      the core derive the 2 MB payload out of SDRAM in about a third of a
+      second; what the option picks is whether the region STAMP goes with it.
+      Pre-built writes it and the game plays at once.  Cart copy leaves it
+      blank, so the game spends about six minutes programming a flash that is
+      already correct -- and SWITCHING to Cart copy blanks the stamp and
+      restarts the board, because boot is the only moment the game looks.
     -->
     <rom index="1">
       <part>17</part>
@@ -99,21 +103,24 @@
 
     <!--
       The save file, in /media/fat/config/nvram/.  ONE element, because an MRA
-      gets one: everything the board remembers is concatenated into it.
+      gets one, so what the board remembers is concatenated into it -- and it
+      is 516 bytes, not two megabytes:
 
-        0x000000..0x1FFFFF   the two E28F008SA sample flash chips
-        0x200000..0x2001FF   the DS2404's 512 bytes of bookkeeping SRAM
+        0x000..0x003   the sample flash's REGION STAMP, and nothing else of it
+        0x004..0x203   the DS2404's 512 bytes of bookkeeping SRAM
 
-      2,097,664 bytes.  The tail is byte-for-byte MAME's own `ds2404` file, so
-      a save can be assembled from MAME's soundflash1, soundflash2 and ds2404
-      in that order.  In Pre-built mode the flash half is written but not read
-      back -- the image is derived every boot -- and the DS2404 half is live
-      either way, which is what makes the bookkeeping persist at all.
+      Those four bytes are what the game tests to decide the flash is already
+      programmed, so they are the whole flag that says whether its six-minute
+      updater runs.  The two megabytes behind them are DERIVED at every boot in
+      a third of a second, so storing them bought nothing and cost a visibly
+      unresponsive OSD -- Main reads the file back every time it polls.
+
+      The tail is byte-for-byte MAME's own `ds2404` file.
 
       It must stay below the <rom> element: Main_MiSTer sends it after the
       index-0 image, which is what lets it land on the blank flash.
     -->
-    <nvram index="2" size="2097664"/>
+    <nvram index="2" size="516"/>
 
     <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
              default="A,B,X,Start,Select,R,L" count="3"/>

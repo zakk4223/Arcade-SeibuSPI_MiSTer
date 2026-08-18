@@ -221,6 +221,8 @@ int main(int argc, char **argv) {
 
     dut = new Vspi_flash_derive;
     dut->reset = 1; dut->start = 0;
+    dut->stamp_en = 1;                  // Pre-built: payload and stamp
+    dut->start_blank = 0;
     dut->job_table    = cfg->job_table;
     dut->stamp_addr   = cfg->stamp;
     dut->gen          = cfg->gen;
@@ -299,5 +301,62 @@ int main(int argc, char **argv) {
         return 1;
     }
     printf("PASS: %s matches the image MAME's own flash devices hold\n", setname);
+
+    // ---- Cart copy: the same payload, and no stamp ------------------------
+    // The mode the OSD's Sample Flash option selects. The game has to find a
+    // flash it must program itself, so the four stamp bytes must be left exactly
+    // as the MRA loaded them -- here the 0xFF the region was filled with.
+    {
+        std::vector<uint8_t> prebuilt(sdram.begin() + SDR_PCM_BASE,
+                                      sdram.begin() + SDR_PCM_BASE + FLASH_SIZE);
+        for (uint32_t i = 0; i < FLASH_SIZE; i++) sdram[SDR_PCM_BASE + i] = 0xFF;
+        dut->reset = 1; for (int i = 0; i < 8; i++) tick();
+        dut->reset = 0; for (int i = 0; i < 8; i++) tick();
+        dut->stamp_en = 0;
+        dut->start = 1; tick(); dut->start = 0;
+        while (!dut->done && !dut->err_overrun && !dut->err_badjob &&
+               cycles < LIMIT * 2) tick();
+        if (!dut->done) { printf("FAIL: the stamp_en=0 walk did not finish\n"); return 1; }
+        int stamped = 0, payload_bad = 0;
+        for (int i = 0; i < 4; i++) if (sdram[SDR_PCM_BASE + i] != 0xFF) stamped++;
+        for (uint32_t i = 4; i < FLASH_SIZE; i++)
+            if (sdram[SDR_PCM_BASE + i] != prebuilt[i]) payload_bad++;
+        if (stamped || payload_bad) {
+            printf("FAIL: stamp_en=0 wrote %d of the 4 stamp bytes and got %d "
+                   "payload bytes wrong\n", stamped, payload_bad);
+            return 1;
+        }
+        printf("PASS: %s with stamp_en low -- the same %u payload bytes and the "
+               "stamp left erased, which is what makes the game run its own "
+               "updater\n", setname, FLASH_SIZE - 4);
+    }
+
+    // ---- the blank write the OSD toggle uses ------------------------------
+    // Byte 0 keeps the region code, because an erased one is the mainboard's
+    // "hardware error 81"; bytes 1..3 are erased, which is what a blank
+    // cartridge flash is dumped as.
+    {
+        uint8_t region = sdram[cfg->stamp - 0x00200000];
+        // Start from a PROGRAMMED stamp, since that is the state the toggle has
+        // to undo -- Pre-built wrote one a moment ago.
+        for (int i = 0; i < 4; i++)
+            sdram[SDR_PCM_BASE + i] = sdram[cfg->stamp - 0x00200000 + i];
+        uint64_t before = writes;
+        dut->reset = 1; for (int i = 0; i < 8; i++) tick();
+        dut->reset = 0; for (int i = 0; i < 8; i++) tick();
+        dut->start_blank = 1; tick(); dut->start_blank = 0;
+        uint64_t guard = cycles + 100000;
+        while (!dut->done && cycles < guard) tick();
+        if (!dut->done) { printf("FAIL: start_blank did not finish\n"); return 1; }
+        uint8_t *f = &sdram[SDR_PCM_BASE];
+        if (f[0] != region || f[1] != 0xFF || f[2] != 0xFF || f[3] != 0xFF) {
+            printf("FAIL: blank stamp is %02X %02X %02X %02X, want %02X FF FF FF\n",
+                   f[0], f[1], f[2], f[3], region);
+            return 1;
+        }
+        printf("PASS: start_blank leaves %02X FF FF FF in %llu writes -- the "
+               "region kept, the build ID erased\n", region,
+               (unsigned long long)(writes - before));
+    }
     return 0;
 }

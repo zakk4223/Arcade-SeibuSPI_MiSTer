@@ -335,7 +335,7 @@ run-nvram: obj_dir/Vspi_nvram
 	@./obj_dir/Vspi_nvram
 
 obj_dir/Vspi_nvram: $(RTL)/spi_nvram.sv $(RTL)/spi_defs.vh tb_nvram.cpp lint.vlt
-	$(VERILATOR) $(VFLAGS) -GQUIET_BITS=8 -GFLASH_BYTES=4096 --top-module spi_nvram \
+	$(VERILATOR) $(VFLAGS) -GQUIET_BITS=8 --top-module spi_nvram \
 	    $(RTL)/spi_nvram.sv tb_nvram.cpp
 
 # The DS2404's 512 bytes of bookkeeping SRAM, against a transliteration of

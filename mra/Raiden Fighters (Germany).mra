@@ -26,28 +26,33 @@
       along with the ROMs the game's updater reads to fill them. What fills
       them is an OSD option, "Sample Flash":
 
-        Pre-built (default)  The core builds the image itself, out of SDRAM, in
-                             about a third of a second. Same job table, same
+      BOTH settings derive the 2 MB payload out of SDRAM in about a third of a
+      second. What the option picks is whether the region STAMP goes with it,
+      because that is the only thing the game tests:
+
+        Pre-built (default)  Payload and stamp. The game finds a programmed
+                             flash and plays at once. Same job table, same
                              sources, same bytes as the game's own updater --
                              checked against the image MAME's flash devices
-                             hold, on all seven sets. Nothing to wait for and
-                             nothing to save.
+                             hold, on all seven sets.
 
-        Ritual               The game programs its own flash, the way the real
-                             cartridge does at first boot. It takes about six
-                             minutes, ends on "UPDATE COMPLETED. PLEASE TURN
-                             THE POWER BACK ON" -- reset the core then -- and
-                             it only persists if you OPEN THE OSD ONCE
-                             afterwards, because MiSTer asks the core for its
-                             nvram only while that menu is up.
+        Cart copy            Payload only. The game finds a blank stamp and
+                             spends about six minutes programming a flash whose
+                             contents are already correct, the way the real
+                             cartridge does at first boot. It ends on "UPDATE
+                             COMPLETED. PLEASE TURN THE POWER BACK ON".
 
-      Pre-built does not read the flash half of the save file back, deliberately:
-      the image is rebuilt every boot, so a stored copy is the same bytes at best
-      and a stale one at worst -- and the derivation is writing that region
-      through the same SDRAM channel at exactly the moment the file arrives.
-      It still SAVES the whole file, because the size below is fixed and the
-      upload cannot be shortened, and it loads the DS2404's 512-byte tail either
-      way: the bookkeeping is worth keeping whatever fills the flash.
+                             SWITCHING to it blanks the stamp and restarts the
+                             board, because boot is the only moment the game
+                             looks -- so the copy can always be seen again.
+                             Switching back does nothing: Pre-built writes the
+                             real stamp at the next boot anyway.
+
+      Pre-built ignores the stamp in the save file, deliberately: it writes the
+      real one from the program image a moment later, so a stored copy could only
+      be the same bytes or a stale set. Cart copy uses it, and that is the whole
+      mechanism -- a restored stamp means the copy has been done and the game
+      skips its updater. The DS2404's 512-byte tail is live either way.
     -->
 
     <!--
@@ -164,26 +169,28 @@
       The save file, in /media/fat/config/nvram/. Index 2 because 0 is the ROM
       image, 1 the core's config blob and 254 the DIP switches.
 
-      ONE element, because an MRA gets one, so everything the board remembers is
-      concatenated into it:
+      ONE element, because an MRA gets one, so what the board remembers is
+      concatenated into it -- and it is 516 bytes, not two megabytes:
 
-        0x000000..0x1FFFFF   the two E28F008SA sample flash chips
-        0x200000..0x2001FF   the DS2404's 512 bytes of bookkeeping SRAM
+        0x000..0x003   the sample flash's REGION STAMP, and nothing else of it
+        0x004..0x203   the DS2404's 512 bytes of bookkeeping SRAM
 
-      2,097,664 bytes. The flash comes first so that the tail is what moves on a
-      set with no flash at all: SXX2E's samples are a real ROM, so its file is
-      those 512 bytes and nothing else.
+      Those four bytes are what the game tests to decide the flash is already
+      programmed, so they are the whole flag that says whether its own updater
+      runs. The two megabytes behind them are DERIVED at every boot in a third of
+      a second, which made storing them pointless twice over -- and expensive:
+      Main reads the save file back every time it polls, so a 2 MB one made the
+      OSD visibly unresponsive on every open.
 
-      The tail is byte-for-byte MAME's own `ds2404` nvram file, so a save can be
-      assembled from MAME's soundflash1, soundflash2 and ds2404 in that order.
+      The stamp comes first so that the tail is what moves on a set with no flash
+      at all: SXX2E's samples are a real ROM, so its file is those 512 bytes and
+      nothing else. The tail is byte-for-byte MAME's own `ds2404` nvram file.
 
-      In Pre-built mode the flash half is written but not read back -- the image
-      is derived every boot -- while the DS2404 half is live either way, which is
-      what makes the bookkeeping persist. Main_MiSTer sends this file AFTER the
-      index-0 image, which is what lets it land on top of the blank flash that
-      image carries, so it must stay below the <rom> element here.
+      Main_MiSTer sends this file AFTER the index-0 image, which is what lets it
+      land on top of the blank flash that image carries, so it must stay below
+      the <rom> element here.
     -->
-    <nvram index="2" size="2097664"/>
+    <nvram index="2" size="516"/>
 
     <!--
       Same control layout as the pre-flashed MRA; the names map to joystick bits

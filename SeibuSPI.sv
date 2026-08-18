@@ -216,7 +216,7 @@ localparam CONF_STR = {
 	// per set, defaulting to the ritual would have made those three boot in
 	// six minutes where they used to boot in seconds. It also means the
 	// common path does not depend on this option being touched at all.
-	"H1O[22],Sample Flash,Pre-built,Ritual;",
+	"H1O[22],Sample Flash,Pre-built,Cart copy;",
 	"-;",
 	"DIP;",
 	"-;",
@@ -339,8 +339,11 @@ pll pll
 // half and the derivation has the channel instead.
 // derive_busy is here for the same reason: it owns ch3, which the running board
 // also uses. It is a third of a second, once, at load.
+// copy_reset is the OSD's Sample Flash option being moved to Cart copy: the
+// stamp is blanked and the board restarted, because boot is the only moment the
+// game looks at it. See the block around `blank_start` below.
 wire reset = RESET | status[0] | buttons[1] | (dl_download & (dl_index == 8'd0))
-           | nv_hold | derive_busy | ~pll_locked;
+           | nv_hold | derive_busy | copy_reset | ~pll_locked;
 
 ///////////////////////////  DIP SWITCHES  ///////////////////////
 
@@ -463,15 +466,26 @@ end
 // ymf271_synth's accumulator and general[1] closed at -2.906 with TNS -409.
 // A static signal with consumers in two domains wants a copy in each, not a
 // move.
+// The OSD's Sample Flash option: 0 = Pre-built (the default), 1 = Cart copy.
+// What it selects is documented where the derivation is instantiated below.
+wire       cart_copy     = status[22];
+
 reg  [7:0] mod_byte_r    = 8'd0;
 reg [31:0] cfg_job_r     = 32'd0;
 reg [31:0] cfg_stamp_r   = 32'd0;
 reg  [1:0] cfg_gen_r     = 2'd0;
+reg        cart_copy_s   = 1'b0;
+reg        cart_copy_r   = 1'b0;
 always @(posedge clk_ram) begin
 	mod_byte_r  <= mod_byte;
 	cfg_job_r   <= cfg_job_table;
 	cfg_stamp_r <= cfg_stamp;
 	cfg_gen_r   <= cfg_gen;
+	// Not static, this one: the OSD moves it while the board is running, and its
+	// EDGE is what triggers a re-blank. Two flops, because it is a real crossing
+	// rather than a settled value.
+	cart_copy_s <= cart_copy;
+	cart_copy_r <= cart_copy_s;
 end
 
 wire       set_sxx2c   = mod_byte[0];
@@ -765,27 +779,98 @@ always @* case (set_id)
 	default:   pcmsrc_base = SDR_PCMSRC_SEI252;
 endcase
 
-wire derive_sel = ~status[22];   // 0 = Pre-built, the default
-// Two copies for the same reason as above. The clk_ram one drives the
-// derivation, the nvram gate and ch3; the clk_sys one drives JP1, which spi_sound
-// reads. Both are the same static condition, computed from their own domain's
-// registers so neither becomes a crossing.
-wire derive_en     = mod_byte_r[0] & mod_byte_r[4] & derive_sel & (|cfg_job_r);
-wire derive_en_sys = mod_byte[0]   & mod_byte[4]   & derive_sel & (|cfg_job_table);
+// BOTH MODES DERIVE, which is the change PLAN.md 32 is about. The payload is two
+// megabytes the save file no longer stores, so it has to be rebuilt at every boot
+// either way, and what `cart_copy` actually selects is whether the region STAMP is
+// written with it:
+//
+//   Pre-built   payload + stamp. The game finds a programmed flash and plays.
+//   Cart copy   payload only. The game finds the blank stamp its MRA loaded, or
+//               the one the save file restored if the copy has been done before,
+//               and runs its own six-minute updater over a payload that is
+//               already correct.
+//
+// It is a fake and it is meant to be: what persists across boots is the fact of
+// the copy, four bytes of it, not its two megabytes.
+//
+// Computed from the clk_ram copies of the config, because that is the domain the
+// derivation, the nvram gate and ch3 all live in. JP1 used to need a clk_sys twin
+// of this; it follows `cart_copy` now, which is already a clk_sys signal.
+wire derive_en = mod_byte_r[0] & mod_byte_r[4] & (|cfg_job_r);
 
 wire [25:0] drv_addr;
 wire [15:0] drv_din;
 wire  [1:0] drv_be;
 wire        drv_req, drv_rnw, drv_done, drv_overrun, drv_badjob;
 
-// One shot per download. Toggling the OSD option afterwards does not re-run it
-// -- the sources are still resident, but a half-written flash would be worse
-// than either state, so the option is read once and a change needs a reload.
+// The stamp goes with the payload in Pre-built and is left alone in Cart copy.
+wire stamp_en = ~cart_copy_r;
+
+// ---------------------------------------------------------------------------
+// Switching INTO Cart copy un-programs the flash and restarts the board
+// ---------------------------------------------------------------------------
+// Without this the mode is a trap, and it was one: boot Pre-built, open the OSD,
+// and Main takes a save whose stamp says the flash is programmed -- after which
+// selecting Cart copy could never show the copy again, because the game skips its
+// updater on a stamp that matches. So the CHANGE into Cart copy is an action, not
+// just a setting: blank the stamp and reset the board, which is what the game
+// tests at boot and the only moment it tests it.
+//
+// The blank write is `start_blank` on the derivation -- four bytes rather than the
+// walk's third of a second -- and it reuses the walk's own write path, so nothing
+// new touches ch3. While it runs, drv_done is low, which puts derive_busy up and
+// holds the board down exactly as the boot derivation does.
+//
+// Coming back the other way does NOTHING, deliberately: Pre-built writes the real
+// stamp at the next boot anyway, so there is nothing to undo.
+// The window is a COUNTER and not a wait on the derivation's `done`, on purpose.
+// The blank write is four SDRAM writes and a couple of reads -- a few hundred
+// cycles against this 131,072 -- and a counter cannot fail to expire. Waiting on
+// `done` could: if it never arrived, the reset would stay asserted and the board
+// would be held down forever, which is the shape of the wedge PLAN.md's
+// MiSTer_cmd note is about. The board is independently held while `drv_done` is
+// low anyway, through derive_busy, so nothing is lost by bounding this.
+reg        blank_start, blank_armed;
+reg [16:0] blank_cnt;
+reg        cart_copy_d;
+// The reset the toggle asserts: ~1.1 ms at clk_ram, so the 386 sees a proper
+// reset and not a few microseconds of one.
+wire       copy_reset = |blank_cnt;
+
 reg  derive_started;
 wire derive_busy = derive_en & derive_started & ~drv_done & ~drv_overrun & ~drv_badjob;
 always @(posedge clk_ram) begin
 	if (RESET | ~pll_locked | ~rom_ready) derive_started <= 1'b0;
 	else if (rom_ready)                   derive_started <= 1'b1;
+end
+
+always @(posedge clk_ram) begin
+	blank_start <= 1'b0;
+	if (RESET | ~pll_locked | ~rom_ready) begin
+		// Take the option's value without acting on it: a saved .CFG that comes
+		// up in Cart copy must not read as a change.
+		cart_copy_d <= cart_copy_r;
+		blank_armed <= 1'b0;
+		blank_cnt   <= 17'd0;
+	end
+	else begin
+		// Only watch the option once the boot derivation is out of the way.
+		if (derive_done) blank_armed <= 1'b1;
+
+		// `derive_en` because the blank write goes through the derivation, and on
+		// a set that has none -- SXX2E, whose samples are a ROM -- there would be
+		// nothing to answer and the option is hidden from the OSD anyway.
+		if (blank_armed && derive_en && (cart_copy_r != cart_copy_d)) begin
+			cart_copy_d <= cart_copy_r;
+			if (cart_copy_r) begin          // ...into Cart copy, and only that way
+				blank_start <= 1'b1;
+				blank_cnt   <= '1;
+			end
+		end
+		else if (!blank_armed || !derive_en) cart_copy_d <= cart_copy_r;
+
+		if (|blank_cnt) blank_cnt <= blank_cnt - 17'd1;
+	end
 end
 // Done means "the board may start": either it finished, or it failed, or it
 // was never going to run. A failure leaves the flash blank, which is safe --
@@ -804,6 +889,8 @@ spi_flash_derive derive
 	.clk          (clk_ram),
 	.reset        (RESET | ~pll_locked | ~derive_en),
 	.start        (derive_en & rom_ready & ~derive_started),
+	.stamp_en     (stamp_en),
+	.start_blank  (blank_start),
 
 	.job_table    (cfg_job_r),
 	.stamp_addr   (cfg_stamp_r),
@@ -897,14 +984,14 @@ spi_nvram nvram
 	// OSD one -- the size in the <nvram> element is fixed before the menu is
 	// reachable, so it cannot depend on which way Sample Flash is set.
 	.enable     (1'b1),
-	// A cartridge set: 2 MB of flash ahead of the DS2404's 512-byte tail. On
-	// SXX2E the samples are a real ROM and the file is the tail alone.
+	// A cartridge set: the flash's four stamp bytes ahead of the DS2404's
+	// 512-byte tail. On SXX2E the samples are a real ROM and the file is the tail
+	// alone.
 	.has_flash  (mod_byte_r[0] & mod_byte_r[4]),
-	// ...and the flash half means something. In Pre-built mode it does not: the
-	// image is derived at every boot, so a save file's copy is the same bytes at
-	// best and a stale one at worst -- and the derivation owns ch3 exactly when
-	// the file arrives.
-	.flash_live (mod_byte_r[0] & mod_byte_r[4] & ~derive_en),
+	// ...and the STORED stamp is the one to use. Only in Cart copy: Pre-built
+	// writes the real one from the program image a moment later, so restoring a
+	// copy could only be the same bytes or a stale set.
+	.flash_live (mod_byte_r[0] & mod_byte_r[4] & cart_copy_r),
 
 	// Raw ioctl, not the replayed copy -- see the header of spi_nvram.sv.
 	.ioctl_download (ioctl_download),
@@ -1059,7 +1146,7 @@ spi_top spi_top
 	// which is what section 0 measured under MAME's own default of Update.
 	// JP1. Pre-built mode sends the not-update position: the matching stamp
 	// already makes the game skip its updater (18.5), and this says so twice.
-	.jumpers        ((set_upd & ~derive_en_sys) ? 8'hFF : 8'hFC),
+	.jumpers        ((set_upd & cart_copy) ? 8'hFF : 8'hFC),
 	.flash_dirty    (flash_dirty),
 
 	// The DS2404's SRAM, which spi_nvram carries as the tail of the save file.

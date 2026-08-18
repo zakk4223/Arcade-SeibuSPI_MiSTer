@@ -88,9 +88,9 @@
       The save file, in /media/fat/config/nvram/. 512 bytes: the DS2404's
       bookkeeping SRAM, and nothing else.
 
-      The cartridge MRAs declare 2,097,664 here -- 2 MB of sample flash, then
-      these same 512 bytes as the tail. SXX2E's samples are a real ROM, so
-      there is no flash half and the tail sits at offset 0 instead. rom_loader's
+      The cartridge MRAs declare 516 here -- the sample flash's four-byte region
+      stamp, then these same 512 bytes as the tail. SXX2E's samples are a real
+      ROM, so there is no stamp to keep and the tail sits at offset 0 instead. rom_loader's
       mod byte is what tells the core which of the two shapes to expect
       (spi_nvram.sv's `has_flash`), and `make check-mra` holds the size here
       against it.

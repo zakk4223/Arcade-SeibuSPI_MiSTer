@@ -7,9 +7,10 @@
 //  the same handshake hps_io uses.
 //
 //  The file is ONE stream covering TWO devices, because an MRA has one <nvram>
-//  element -- the flash then the 512-byte tail. FLASH_BYTES is shrunk to 4096
-//  here so that the crossing between them is a few thousand cycles in rather
-//  than eighty million.
+//  element: the sample flash's four-byte region stamp, then the DS2404's 512.
+//  516 bytes, and the two megabytes of payload behind that stamp are not in it --
+//  they are derived at every boot, and saving them cost a visibly unresponsive
+//  OSD. PLAN.md 32.
 //
 //  This exists because the first version went to hardware untested and came
 //  back as a two-megabyte file containing byte 0 twice followed by the first
@@ -35,8 +36,9 @@
 #include <vector>
 
 static const uint32_t PCM_BASE = 0x280000;
-// -GFLASH_BYTES in the Makefile. The RTL default is 0x200000.
-static const uint32_t FLASH_BYTES = 4096;
+// The real layout, not a shrunken one: the flash contributes its stamp and
+// nothing else, so the whole file fits in a test that runs in a second.
+static const uint32_t FLASH_BYTES = 4;      // spi_nvram's STAMP_BYTES
 static const uint32_t SRAM_BYTES  = 512;
 
 static Vspi_nvram *dut;
@@ -156,8 +158,10 @@ int main(int argc, char **argv) {
 
     // A stride coprime with 8, so a line that is fetched twice or never
     // advanced cannot hide behind repeating values -- which is exactly how the
-    // hardware bug presented.
-    const size_t N = 4096;
+    // hardware bug presented. The prefetch this was written for is still in the
+    // save path, so it is still exercised: the region is read a line at a time
+    // whether the file takes four bytes of it or two million.
+    const size_t N = FLASH_BYTES;
     std::vector<uint8_t> img(N);
     for (size_t i = 0; i < N; i++) img[i] = (uint8_t)(i * 37 + 11);
 
@@ -206,8 +210,8 @@ int main(int argc, char **argv) {
         if (fbad || sbad) {
             printf("FAIL: load split wrong -- %d flash bytes and %d tail bytes\n", fbad, sbad);
             errors++;
-        } else printf("split: one %zu-byte stream loads the flash half and the "
-                      "DS2404's 512-byte tail\n", file.size());
+        } else printf("split: one %zu-byte stream loads the flash's 4-byte stamp and "
+                      "the DS2404's 512-byte tail\n", file.size());
 
         std::vector<uint8_t> back = save(file.size(), 40);
         int bbad = 0;
@@ -218,8 +222,9 @@ int main(int argc, char **argv) {
             printf("FAIL: %d of %zu bytes wrong on the way back, first at %zu "
                    "(the crossing is at %u)\n", bbad, file.size(), firstbad, FLASH_BYTES);
             errors++;
-        } else printf("split: and comes back byte-exact across the crossing at "
-                      "%u\n", FLASH_BYTES);
+        } else printf("split: and comes back byte-exact across the crossing at %u, which "
+                      "is NOT 512-aligned -- the offset into the tail is a "
+                      "subtraction, not the counter's low bits\n", FLASH_BYTES);
 
         // Fast host, because the tail has a registered read of its own.
         back = save(file.size(), 12);
@@ -268,8 +273,8 @@ int main(int argc, char **argv) {
         if (touched) { printf("FAIL: %d bytes of a save file reached the region that is about to be derived\n", touched); errors++; }
         if (sbad)    { printf("FAIL: %d tail bytes did not land in Pre-built mode\n", sbad); errors++; }
         if (!saw_wr && saw_hold && !touched && !sbad)
-            printf("pre-built: the flash half is dropped and ch3 never claimed, "
-                   "the 512-byte tail still lands, and the core stays held\n");
+            printf("pre-built: the stamp is dropped and ch3 never claimed, the "
+                   "512-byte tail still lands, and the core stays held\n");
 
         // and only the DS2404 can ask for a save in this mode
         for (int i = 0; i < 5; i++) { dut->flash_dirty = !dut->flash_dirty; run(20); }
@@ -307,8 +312,8 @@ int main(int argc, char **argv) {
             printf("FAIL: SXX2E layout -- %d tail bytes in, %d bytes back, "
                    "%d bytes of sample region touched\n", sbad, bbad, touched);
             errors++;
-        } else printf("sxx2e: with no flash half the file is 512 bytes at offset "
-                      "0, both ways, and the sample region is left alone\n");
+        } else printf("sxx2e: with no stamp the file is 512 bytes at offset 0, both "
+                      "ways, and the sample region is left alone\n");
         dut->has_flash = 1;
     }
 

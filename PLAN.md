@@ -8763,3 +8763,122 @@ longer means what it said -- landed after that fit was launched, so it was
 recompiled to confirm rather than assumed: a local variable inside an always
 block cannot change a netlist, and this project's own notes are the reason not to
 leave that as an assertion.
+
+## 32. Faking the save file: 516 bytes, and Cart copy as an action (2026-08-18)
+
+Section 31 shipped a 2,097,664-byte save file and two problems came back with it
+from actually using the thing:
+
+**The OSD felt unresponsive on every open.** Main reads the nvram back whenever it
+polls for it, which is every time that menu comes up, and two megabytes off an SD
+card through the SPI link is long enough to feel.
+
+**The mode was a trap.** Boot in Pre-built, open the OSD once, and Main takes a
+save whose stamp says the flash is programmed. After that, selecting Ritual could
+never show the ritual again -- the game skips its updater on a stamp that matches,
+and the stamp was in the save file. The option was unreachable in one direction.
+
+### 32.1 What actually has to persist is four bytes
+
+The flash's first four bytes are its region stamp, and they are the whole of what
+the game tests to decide the flash is already good -- the updater writes them
+LAST, precisely so that an interrupted job cannot look finished (17.x, 18.5). Two
+megabytes of payload sit behind that flag, and the core derives all of them at
+every boot in a third of a second regardless.
+
+So storing the payload was pointless twice over: it is rebuilt anyway, and
+rebuilding it is faster than reading it back. The save file is now
+
+    0x000 .. 0x003   the sample flash's region stamp
+    0x004 .. 0x203   the DS2404's 512 bytes of bookkeeping SRAM
+
+**516 bytes.** It is a fake and it is meant to be: what persists is the FACT of
+the copy, not its contents. Nothing a player can see differs.
+
+### 32.2 Both modes derive now, and the option only picks the stamp
+
+That is the reframing the small file forces, and it is simpler than what it
+replaced. `spi_flash_derive` gained a `stamp_en`:
+
+| Sample Flash | payload | stamp | what the game does |
+|---|---|---|---|
+| Pre-built | derived | derived | finds a programmed flash, plays at once |
+| Cart copy | derived | left alone | finds a blank stamp, programs 2 MB it already has |
+
+In Cart copy the four stamp bytes come from the save file instead, which is the
+entire mechanism: a restored stamp means the copy has been done, a blank one means
+it runs. On a set with no save file yet the bytes are the ones the MRA loaded --
+the blank flash ROM's own region byte and three erased bytes, which is what a
+fresh cartridge holds.
+
+### 32.3 Switching INTO Cart copy is an action, not a setting
+
+Boot is the only moment the game looks at the stamp, so a mode change while it is
+running cannot mean anything on its own. The 0 -> 1 edge therefore blanks the
+stamp and restarts the board. That is what makes the option reachable in both
+directions, which was the complaint.
+
+The blank write is a second entry point on the derivation, `start_blank`: straight
+to the stamp path, writing **byte 0 as fetched and bytes 1..3 as 0xFF**. Byte 0
+stays real on purpose -- an erased region byte is the mainboard's "hardware error
+81", which MAME's own header warns about and which is why the blank flash ROM is a
+real dump rather than a fill. Four writes, microseconds, and it reuses the walk's
+own write path so nothing new touches ch3.
+
+Coming back the other way does nothing, deliberately: Pre-built writes the real
+stamp at the next boot anyway, so there is nothing to undo.
+
+**The reset window is a counter, not a wait on `done`.** 131,072 clk_ram cycles,
+about 1.1 ms, which is a couple of hundred times the write's worth of cycles. A
+counter cannot fail to expire; a wait on `done` can, and a reset that never
+released would hold the board down forever -- the shape of wedge the MiSTer_cmd
+note in this file is about. The board is independently held while `drv_done` is low
+through `derive_busy`, so bounding it loses nothing.
+
+### 32.4 One bug, caught by a test that had stopped being able to miss it
+
+`spi_nvram` indexed the DS2404's tail with the counter's low nine bits, on the
+grounds that "tail_base is 512-aligned either way" -- true when the flash's share
+was 0x200000 and true when it was 0. A four-byte stamp ahead of the tail is
+neither, and the shortcut silently rotated all 512 bytes by four. It is a
+subtraction now.
+
+What is worth recording is why it was caught immediately: with the flash's share
+down to four bytes, the crossing between the two devices is at offset 4, so the
+testbench no longer needs `FLASH_BYTES` shrunk to reach it -- **the real layout is
+now the cheap one to test end to end**, and the case that used to need a special
+build is the default. The `-GFLASH_BYTES=4096` override is gone.
+
+`tb_flash_derive` grew the other two: `stamp_en` low produces the same 2,097,148
+payload bytes with the stamp left erased, and `start_blank` leaves `80 FF FF FF`
+in four writes. Both against rdft's real image, beside the hash that already
+matched MAME's flash devices.
+
+### 32.5 Consequences
+
+**'Ritual' is 'Cart copy'** in the OSD.
+
+**JP1 follows the mode directly now** (`set_upd & cart_copy`), where it followed
+the derivation's enable before. The enable no longer distinguishes the modes.
+
+**A 2,097,664-byte save from 31.x is not compatible** -- the first four bytes
+still read as the stamp, but the 512 after them are flash payload rather than the
+DS2404, so the bookkeeping would come back as garbage once before being
+overwritten. There were none on the machine to worry about; the file name has not
+changed, so delete any that exist.
+
+### 32.6 The fit
+
+    setup worst  +0.230   sdram|ch4_rq -> sdram|SDRAM_A[8]
+    clk_ram      +0.230   clk_cpu  +1.915   clk_sys  +1.851   pll_hdmi +0.428
+    hold worst   +0.205   TNS 0.000 on every clock, 0 critical warnings
+
+    registers 31,010 -> 31,034     (+24: two synchroniser flops and a counter)
+
+Nothing of `cart_copy`, the blank sequencer or the nvram appears in the worst 25.
+
+clk_ram came in at +0.230 where 31.8 read +0.340, and the endpoint moved from
+`ch1_rq` to `ch4_rq` -- both the same convergence point in sdram.sv, and both the
+placement lottery 28.5 describes rather than anything these 24 registers did. It
+is the third different "worst signal" at that point in three fits, which is the
+signature of a routing limit and not of a path that got worse.

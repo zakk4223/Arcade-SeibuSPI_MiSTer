@@ -98,16 +98,20 @@ as having booted one.
 
 ### The save file
 
-One `<nvram>` element, because an MRA gets one, so everything the board remembers
-is concatenated into it:
+One `<nvram>` element, because an MRA gets one, so what the board remembers is
+concatenated into it — and it is **516 bytes**:
 
-    0x000000..0x1FFFFF   the two E28F008SA sample flash chips
-    0x200000..0x2001FF   the DS2404's 512 bytes of bookkeeping SRAM
+    0x000..0x003   the sample flash's REGION STAMP, and nothing else of it
+    0x004..0x203   the DS2404's 512 bytes of bookkeeping SRAM
 
-**2,097,664 bytes** for a cartridge set, and **512 for `rdfts`** -- its samples
-are a real ROM, so there is no flash half and the tail sits at offset 0. The tail
-is byte-for-byte MAME's own `ds2404` nvram file, so a save can be assembled from
-MAME's `soundflash1`, `soundflash2` and `ds2404` in that order.
+**512 for `rdfts`** — its samples are a real ROM, so there is no stamp to keep and
+the tail sits at offset 0. The tail is byte-for-byte MAME's own `ds2404` nvram file.
+
+Those four bytes are the flash's region stamp, which is the whole of what the game
+tests to decide its own updater has already run. The 2 MB of samples behind them
+are **derived at every boot** in a third of a second, so storing them bought
+nothing and cost a visibly unresponsive OSD — Main reads the save file back every
+time that menu opens. What persists is the fact of the copy, not its contents.
 
 The DS2404 is the RTC and battery-backed SRAM the games keep their bookkeeping in
 -- audit totals, and the game ID the region lock is checked against. The core
@@ -115,11 +119,18 @@ answered its ports with zeros until now, so those totals reset every boot; they
 persist from here. `rtl/spi_ds2404.sv`, checked against a transliteration of
 MAME's own device (`make -C sim run-ds2404`).
 
-**Pre-built mode loads and saves too**, where before it did neither. Only the
-512-byte tail is read back -- the flash image is derived at every boot, and a save
-file's copy of it would be racing the derivation for the SDRAM channel it writes
-through -- but the file is still the full size, because the size in the MRA is
-fixed and the upload cannot be shortened.
+**Both settings derive the samples.** What **OSD → Sample Flash** picks is whether
+the region stamp goes with them:
+
+- **Pre-built** (default) — payload and stamp. The game finds a programmed flash
+  and plays at once.
+- **Cart copy** — payload only. The game finds a blank stamp and spends about six
+  minutes programming a flash whose contents are already correct, the way the real
+  cartridge does at first boot.
+
+**Switching to Cart copy blanks the stamp and restarts the board**, because boot is
+the only moment the game looks at it — so the copy can always be seen again.
+Switching back does nothing: Pre-built writes the real stamp at the next boot.
 
 ### The sample flash
 
@@ -128,20 +139,17 @@ programs itself at first boot, and every cartridge MRA above ships them blank
 along with the ROMs the game's updater reads. **OSD → Sample Flash** picks what
 fills them:
 
-- **Pre-built** (default) — the core builds the image itself out of SDRAM in
-  about a third of a second. Same job table, same sources, same bytes as the
-  game's own updater: it reads the table out of the 386's program image and
-  walks it, so nothing about it is per-set except two addresses the MRA carries.
-  Verified byte-for-byte against the image MAME's own flash devices hold, on all
-  seven sets. Nothing to wait for, and the save file's flash half is written
-  but never read back -- see above.
-- **Ritual** — the game programs its own flash, as the real cartridge does. It
-  takes about six minutes, ends on "UPDATE COMPLETED. PLEASE TURN THE POWER BACK
-  ON" (reset the core then), and persists only if you **open the OSD once**
-  afterwards — MiSTer asks the core for its nvram only while that menu is up.
+The core derives the 2 MB payload either way: same job table, same sources, same
+bytes as the game's own updater, read out of the 386's program image at run time,
+verified byte-for-byte against the image MAME's own flash devices hold on all seven
+sets. Nothing about it is per-set except two addresses the MRA carries. What the
+option changes is only the region stamp, as described under **The save file**
+above — and with it, whether the game runs its own six-minute copy.
 
-A save from before this change still loads its flash half, which is why the flash
-comes first; the DS2404 then falls back to MAME's zeroed default.
+**Cart copy** ends on "UPDATE COMPLETED. PLEASE TURN THE POWER BACK ON"; reset the
+core then, and **open the OSD once** so the four bytes are saved — MiSTer asks the
+core for its nvram only while that menu is up. Until they are saved, the copy runs
+again at the next boot.
 
 There used to be two MRAs per set for this, and for three of the seven sets
 only. `viprp1` could never have a pre-flashed one at all: its payload's second

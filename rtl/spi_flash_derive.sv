@@ -81,6 +81,21 @@ module spi_flash_derive
 	// One pulse to start. Everything below must already be in SDRAM.
 	input             start,
 
+	// Write the region stamp at the end of the walk, or leave flash[0..3] as the
+	// MRA loaded it -- which for a cartridge MRA is the blank flash's own byte 0
+	// plus three erased bytes, exactly what a fresh cartridge holds. Low in Cart
+	// copy mode, where the point is for the GAME to find an unprogrammed stamp
+	// and run its own updater over the payload this just wrote. See PLAN.md 32.
+	input             stamp_en,
+
+	// A second entry point that writes ONLY the stamp, and writes it blank:
+	// byte 0 fetched as usual, bytes 1..3 forced to 0xFF. This is what the OSD
+	// toggle into Cart copy uses to un-program a flash the derivation had
+	// already stamped, and it takes microseconds rather than the walk's third of
+	// a second. Byte 0 is kept real on purpose -- an erased region byte is the
+	// mainboard's "hardware error 81" (MAME's seibuspi.cpp header).
+	input             start_blank,
+
 	// Per-set, and from the MRA rather than a table here: a clone has its own
 	// job-table address (senkyu 0x00302324, batlball 0x00302290) because its
 	// program differs, so baking these in would make every clone an RTL change.
@@ -239,6 +254,7 @@ module spi_flash_derive
 	reg [21:0] pos;
 	reg  [7:0] wbyte;
 	reg        stamping;
+	reg        blanking;      // this stamp write is the blank one
 
 	reg [25:0] grp_held;
 	reg        have_grp;
@@ -413,6 +429,7 @@ module spi_flash_derive
 			sbyte_v     <= 1'b0;
 			bvalid_r    <= 1'b0;
 			stamping    <= 1'b0;
+			blanking    <= 1'b0;
 		end
 		else begin
 			// The decoder's input handshake, independent of the walk state.
@@ -454,7 +471,25 @@ module spi_flash_derive
 				jb          <= 2'd0;
 				sbyte_v     <= 1'b0;
 				bvalid_r    <= 1'b0;
+				blanking    <= 1'b0;
 				state       <= S_JOBB;
+			end
+			else if (start_blank) begin
+				// Straight to the stamp path, with the payload left alone.
+				esi         <= stamp_addr;
+				esi_settled <= 1'b0;
+				pos         <= 22'd0;
+				stamping    <= 1'b1;
+				blanking    <= 1'b1;
+				stamp_i     <= 3'd0;
+				done        <= 1'b0;
+				err_overrun <= 1'b0;
+				err_badjob  <= 1'b0;
+				have_grp    <= 1'b0;
+				have_byte   <= 1'b0;
+				sbyte_v     <= 1'b0;
+				bvalid_r    <= 1'b0;
+				state       <= S_STAMPB;
 			end
 
 			S_J0: begin
@@ -491,14 +526,24 @@ module spi_flash_derive
 					// a reset part-way through never leaves a flash that the
 					// game would mistake for a finished one.
 					if (j_src == 32'hFFFF_FFFF) begin
-						esi      <= stamp_addr;
-						esi_settled <= 1'b0;
-						stamping <= 1'b1;
-						pos      <= 22'd0;
-						stamp_i  <= 3'd0;
-						sbyte_v  <= 1'b0;
-						bvalid_r <= 1'b0;
-						state    <= S_STAMPB;
+						if (!stamp_en) begin
+							// Cart copy: the payload is written and the stamp is
+							// not, so the game finds a flash it has to program
+							// itself. The bytes it will test are the ones the
+							// MRA loaded, or the ones the save file restored.
+							done  <= 1'b1;
+							state <= S_DONE;
+						end
+						else begin
+							esi      <= stamp_addr;
+							esi_settled <= 1'b0;
+							stamping <= 1'b1;
+							pos      <= 22'd0;
+							stamp_i  <= 3'd0;
+							sbyte_v  <= 1'b0;
+							bvalid_r <= 1'b0;
+							state    <= S_STAMPB;
+						end
 					end
 					// A source outside the 386's program image or its sound01
 					// region is not a job, and neither is a table longer than
@@ -570,7 +615,10 @@ module spi_flash_derive
 				state <= S_DONE;
 			end
 			else if (sbyte_v) begin
-				wbyte   <= sbyte_r;
+				// Blanking keeps byte 0, the region code, and erases the three
+				// build-ID bytes after it. That is the state a blank cartridge
+				// flash is dumped in, and an erased byte 0 would be error 81.
+				wbyte   <= (blanking && (stamp_i != 3'd0)) ? 8'hFF : sbyte_r;
 				esi     <= esi + 32'd1;
 				esi_settled <= 1'b0;
 				stamp_i <= stamp_i + 3'd1;

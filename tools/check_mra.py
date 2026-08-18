@@ -40,8 +40,10 @@ import sys
 import zipfile
 
 # rtl/spi_nvram.sv. The save file is one stream over two devices, because an MRA
-# has one <nvram> element: the flash chips, then the DS2404's SRAM as the tail.
-FLASH_BYTES = 0x200000
+# has one <nvram> element -- and the flash's share of it is its four-byte region
+# stamp, not its two megabytes. Those four bytes are the flag the game tests to
+# decide its updater has already run; the payload is derived at every boot.
+FLASH_BYTES = 4
 SRAM_BYTES  = 0x200
 
 # rtl/spi_defs.vh
@@ -566,9 +568,9 @@ def check_nvram(path, mod):
     if int(size.group(1)) != want:
         fail("%s: <nvram size=%s>, but a set with%s a sample flash needs %d "
              "(%s)" % (path, size.group(1), "" if has_flash else "out", want,
-                       "0x200000 flash + 0x200 DS2404 SRAM" if has_flash
-                       else "0x200 DS2404 SRAM, no flash half"))
-    print("  nvram: %d bytes -- %s" % (want, "2 MB sample flash then the "
+                       "4-byte flash stamp + 0x200 DS2404 SRAM" if has_flash
+                       else "0x200 DS2404 SRAM, no flash stamp"))
+    print("  nvram: %d bytes -- %s" % (want, "the flash's 4-byte stamp then the "
           "DS2404's 512-byte tail" if has_flash else "the DS2404's 512 bytes alone"))
 
 
