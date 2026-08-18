@@ -255,6 +255,13 @@ module spi_flash_derive
 	reg  [7:0] wbyte;
 	reg        stamping;
 	reg        blanking;      // this stamp write is the blank one
+	// `start_blank` is LATCHED rather than acted on where it arrives, and both
+	// halves of that are load-bearing. The walk ends in S_DONE and stays there --
+	// so a request has to survive being made in a state that is not S_IDLE -- and
+	// the pulse is one cycle wide, so it has to survive the cycle S_DONE spends
+	// getting back to S_IDLE as well. Without the latch the OSD toggle reset the
+	// board and blanked nothing, which looks exactly like the toggle not working.
+	reg        blank_pend;
 
 	reg [25:0] grp_held;
 	reg        have_grp;
@@ -430,8 +437,13 @@ module spi_flash_derive
 			bvalid_r    <= 1'b0;
 			stamping    <= 1'b0;
 			blanking    <= 1'b0;
+			blank_pend  <= 1'b0;
 		end
 		else begin
+			// Any state, so a request made while the walk is parked is kept. The
+			// S_IDLE arm below clears it, and a clear in the same cycle as a set
+			// wins because it comes later in this block.
+			if (start_blank) blank_pend <= 1'b1;
 			// The decoder's input handshake, independent of the walk state.
 			if (in_valid && in_ready) have_byte <= 1'b0;
 
@@ -474,8 +486,9 @@ module spi_flash_derive
 				blanking    <= 1'b0;
 				state       <= S_JOBB;
 			end
-			else if (start_blank) begin
+			else if (blank_pend) begin
 				// Straight to the stamp path, with the payload left alone.
+				blank_pend  <= 1'b0;
 				esi         <= stamp_addr;
 				esi_settled <= 1'b0;
 				pos         <= 22'd0;
@@ -668,6 +681,11 @@ module spi_flash_derive
 				if (!stamping) bytes_out <= bytes_out + 22'd1;
 				state <= ret_w;
 			end
+
+			// Not terminal: the walk rests in S_IDLE with `done` still set, so a
+			// later request -- the OSD toggle's blank -- is seen at all. It used
+			// to sit here forever, which is why that toggle did nothing.
+			S_DONE: state <= S_IDLE;
 
 			default: state <= S_DONE;
 

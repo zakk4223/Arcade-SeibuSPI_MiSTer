@@ -203,11 +203,11 @@ localparam CONF_STR = {
 	"P1O[10],Orientation,Vert,Horz;",
 	"P1O[11],Rotation,CCW,CW;",
 	"-;",
-	// O[20] was the Vital Signs Panel. The panel and the rest of the telemetry
-	// are no longer in the synthesised net (PLAN.md 29); the bit is left unused
-	// rather than reassigned, so a saved .CFG from an older build cannot turn
-	// something else on by accident.
-	"O[21],Freeze Button (Btn 3),Off,On;",
+	// O[20] was the Vital Signs Panel and O[21] the Freeze Button switch. Both
+	// are gone -- the panel with the telemetry (PLAN.md 29), the switch because
+	// pausing is a BOUND BUTTON now (PLAN.md 33) rather than a menu setting. The
+	// bits are left unused rather than reassigned, so a saved .CFG from an older
+	// build cannot turn something else on by accident.
 	// H1: hidden when status_menumask bit 1 is set, which is ~set_sxx2c. SXX2E
 	// has a mask ROM where the cartridge has a flash chip, so there is nothing
 	// to build and nothing to choose.
@@ -596,30 +596,39 @@ wire        rom_ready;
 
 wire [25:0] ldr_addr;
 // ---------------------------------------------------------------------------
-// Freeze the CPU from a controller button. It stays in the release build: the
-// video engines keep running (only spi_cpu's cpu_en is gated), so a frozen
-// frame stays on screen.
-//
-// It used to fire on ANY button of either pad, which made the game unplayable
-// the moment anyone pressed shot. It needs an option enabled, and only button 3
-// triggers it.
-//
-// The option is its own, separate from the vital signs panel it was once gated
-// on -- that was useless for the job this exists for, since turning the panel
-// on REPLACED the picture with the telemetry screen. The panel is gone now and
-// this is the only debug control left in the net.
+// PAUSE, on a bound button of its own
 // ---------------------------------------------------------------------------
-wire dbg_freeze_en = status[21];
-wire any_btn   = dbg_freeze_en & (joystick_p1[6] | joystick_p2[6]);
-reg  any_btn_d, freeze_tgl;
+// Only spi_cpu's cpu_en is gated, so the video engines keep running and the
+// frozen frame stays on screen rather than going black.
+//
+// It is joystick bit 11, the eighth name in the MRA's <buttons> list, and NOT
+// button 3: four of the seven sets are MAME's spi_3button and use that as a game
+// button. It used to be button 3 behind an OSD switch, which is a worse deal
+// twice over -- pausing needed a trip through the menu first, and on those four
+// sets the same press was also a game input.
+//
+// Two earlier shapes of this, both worse: it fired on ANY button of either pad,
+// which made the game unplayable the moment anyone pressed shot; and the switch
+// that replaced that was once shared with the vital signs panel, which REPLACED
+// the picture with a telemetry screen and so could not show a frozen frame at all.
+//
+// The music keeps playing, deliberately-untouched rather than deliberately-kept:
+// the Z80 and the YMF271 are on clk_sys and nothing here gates them. The 386
+// stops feeding the sound FIFO, so what carries on is whatever the Z80's current
+// loop plays.
+// ---------------------------------------------------------------------------
+wire pause_btn = joystick_p1[11] | joystick_p2[11];
+reg  pause_btn_d, freeze_tgl;
 always @(posedge clk_sys) begin
-	any_btn_d <= any_btn;
-	if (any_btn && !any_btn_d) freeze_tgl <= ~freeze_tgl;
-	if (!dbg_freeze_en) freeze_tgl <= 1'b0;
+	pause_btn_d <= pause_btn;
+	if (pause_btn && !pause_btn_d) freeze_tgl <= ~freeze_tgl;
+	// A reset always resumes: coming up paused would look like a dead core, and
+	// the OSD's own Reset is in `reset` too.
+	if (reset) freeze_tgl <= 1'b0;
 end
 
 // The JTAG source register used to OR into this; with spi_jtag_peek out of the
-// net the button is the only way to freeze.
+// net the button is the only way to pause.
 wire freeze = freeze_tgl;
 
 wire [15:0] ldr_din;
@@ -1071,6 +1080,7 @@ end
 //   [3:0] right, left, down, up
 //   [4]   Shot        [5] Bomb        [6] Button 3
 //   [7]   Start       [8] Coin        [9] Service Coin   [10] Test
+//   [11]  Pause -- not a board input at all, see the block above
 //
 // This used to read [7] as coin and [8] as start, which did not line up with
 // the MRA at all -- the MRA named eight entries with two placeholders in the

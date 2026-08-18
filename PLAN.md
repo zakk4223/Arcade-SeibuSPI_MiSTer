@@ -8982,3 +8982,86 @@ stamp and resetting the board. Its effect is demonstrated from both directions n
 -- a blank stamp runs the copy, a valid one skips it -- but the edge detector and
 its 1.1 ms reset have only ever run in simulation, and there is no way to move
 `status[22]` from here.
+
+### 32.8 The toggle blanked nothing, and the test had said it did
+
+Reported from the machine: selecting Cart copy resets the board, and the copy does
+not run. Which is the half-working failure -- the sequencer in SeibuSPI.sv was
+doing its job and the blank write never happened.
+
+**S_DONE was terminal.** `spi_flash_derive`'s case statement has no `S_DONE:` arm,
+so it fell through `default: state <= S_DONE` and stayed there. The boot derivation
+parks the walk in S_DONE, and `start_blank` was only sampled in S_IDLE. The
+request was never seen by anything.
+
+Two lines fix it, and the second is not optional:
+
+    S_DONE: state <= S_IDLE;                    // rest in S_IDLE, `done` still set
+    if (start_blank) blank_pend <= 1'b1;        // latched, in any state
+
+The latch is needed even with the first line, because `start_blank` is one cycle
+wide and S_DONE spends a cycle getting back to S_IDLE: the pulse would be gone by
+the time anything could act on it. Without the latch this would "sometimes work",
+depending on where the walk happened to be sitting, which is worse than not
+working.
+
+**The suspicion in the report was that the reset came too early.** It did not --
+the window is 131,072 clk_ram cycles against a write that takes four SDRAM
+transactions -- but it was the right question to ask of a symptom that looks like
+a race.
+
+#### What the test was doing wrong, which is the part worth keeping
+
+32.4's `start_blank` test passed against a module that could not do this at all,
+twice over:
+
+1. **It reset the DUT before pulsing.** That forces the state machine to S_IDLE.
+   Nothing on hardware does that, so the test drove an entry path that only the
+   test could reach.
+2. **It waited on the wrong edge.** `done` is ALREADY HIGH when the request is
+   made -- the walk before it left it there -- so `while (!done)` waited for
+   nothing and read the stamp before a byte had moved. Fixing (1) alone made the
+   test fail for this second reason, which briefly looked like the RTL fix not
+   working.
+
+Both are the same mistake in different clothes: driving a mechanism under
+conditions the real system never presents. It is the third time this session --
+the RTC test comparing against its own expectation (31.5), and the two-flop payload
+synchroniser that simulated identically to the one-flop one (31.7). A testbench
+that cannot fail for the reason the hardware fails is not covering it.
+
+The test now pulses one cycle from wherever the previous walk left the machine,
+with no reset, and waits for `done` to FALL and then rise. Negative-checked by
+putting S_DONE back: it fails with `80 4A 4A 36` still in place, which is exactly
+what the board did.
+
+## 33. Pause is a bound button, not a menu setting (2026-08-18)
+
+The freeze was an OSD switch plus button 3, and both halves of that were wrong for
+what it is actually used for. Pausing needed a trip through the menu to arm it
+first, and on four of the seven sets -- rdft, rdfts, senkyu and viprp1, MAME's
+`spi_3button` -- button 3 is a GAME input, so the same press did two things.
+
+It is a bound button of its own now: **joystick bit 11, the eighth name in the
+MRA's `<buttons>` list**, defaulting to Y. No OSD item, no arming, and nothing it
+shares with the board.
+
+    [4] Shot   [5] Bomb   [6] Button 3   [7] Start
+    [8] Coin   [9] Service Coin   [10] Test   [11] Pause
+
+Bit 11 rather than an unused low bit because the names map to bits 4 upwards IN
+ORDER, so appending to the list is what picks the bit. `O[21]` joins `O[20]` as
+unassigned rather than being reused, for the same reason 29.1 gave: a saved `.CFG`
+from an older build must not turn something else on.
+
+What it does is unchanged and worth restating, because "pause" promises more than
+this delivers: only `spi_cpu`'s `cpu_en` is gated. The video engines keep running,
+which is the point -- a frozen frame stays on screen instead of going black, and
+that is what makes it the tool for a rendering fault. **The music keeps playing**,
+which is untouched rather than chosen: the Z80 and the YMF271 are on clk_sys and
+nothing here gates them, so what carries on is whatever loop the Z80 was in when
+the 386 stopped feeding its FIFO. Muting or stopping them would be a separate
+change.
+
+A reset always resumes. Coming up paused would be indistinguishable from a dead
+core, and the OSD's own Reset is in `wire reset` too.

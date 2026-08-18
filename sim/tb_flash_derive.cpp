@@ -193,6 +193,19 @@ static void tick() {
     cycles++;
 }
 
+// Wait for a blank write to finish. `done` is ALREADY HIGH when the request is
+// made -- the walk before it left it there -- so waiting for it to be high waits
+// for nothing and reads the stamp before a single byte has moved. Wait for it to
+// FALL, then to rise. The RTL sequencer in SeibuSPI.sv hit the same subtlety and
+// answered it by not depending on `done` at all.
+static bool blank_and_wait() {
+    dut->start_blank = 1; tick(); dut->start_blank = 0;
+    uint64_t guard = cycles + 100000;
+    while (dut->done && cycles < guard) tick();      // ...it took the request
+    while (!dut->done && cycles < guard) tick();     // ...and it has finished
+    return dut->done;
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     if (argc < 3) {
@@ -302,6 +315,30 @@ int main(int argc, char **argv) {
     }
     printf("PASS: %s matches the image MAME's own flash devices hold\n", setname);
 
+    // ---- the blank write from where the walk actually RESTS ----------------
+    // This is the OSD toggle's path and it must be driven the way the toggle
+    // drives it: a one-cycle pulse, no reset first, with the walk parked exactly
+    // where the boot derivation left it. Done any other way it passes against a
+    // module that cannot do it at all -- which is what happened. The first
+    // version of this test reset the DUT before start_blank, which forces the
+    // state machine back to S_IDLE; on hardware nothing does that, S_DONE was
+    // terminal, and the toggle reset the board and blanked nothing.
+    {
+        uint8_t region = sdram[cfg->stamp - 0x00200000];
+        uint64_t before = writes;
+        if (!blank_and_wait()) { printf("FAIL: the blank never finished\n"); return 1; }
+        uint8_t *f = &sdram[SDR_PCM_BASE];
+        if (f[0] != region || f[1] != 0xFF || f[2] != 0xFF || f[3] != 0xFF) {
+            printf("FAIL: blank from the parked state left %02X %02X %02X %02X, "
+                   "want %02X FF FF FF -- the request never reached S_IDLE\n",
+                   f[0], f[1], f[2], f[3], region);
+            return 1;
+        }
+        printf("PASS: start_blank from where the walk RESTS leaves %02X FF FF FF "
+               "in %llu writes, one-cycle pulse and no reset\n", region,
+               (unsigned long long)(writes - before));
+    }
+
     // ---- Cart copy: the same payload, and no stamp ------------------------
     // The mode the OSD's Sample Flash option selects. The game has to find a
     // flash it must program itself, so the four stamp bytes must be left exactly
@@ -331,31 +368,27 @@ int main(int argc, char **argv) {
                "updater\n", setname, FLASH_SIZE - 4);
     }
 
-    // ---- the blank write the OSD toggle uses ------------------------------
-    // Byte 0 keeps the region code, because an erased one is the mainboard's
-    // "hardware error 81"; bytes 1..3 are erased, which is what a blank
-    // cartridge flash is dumped as.
+    // ---- undoing a PROGRAMMED stamp, which is what the toggle is for -------
+    // Pre-built wrote a real stamp; selecting Cart copy has to take it away. Again
+    // no reset and a one-cycle pulse, from wherever the previous walk left the
+    // machine.
     {
         uint8_t region = sdram[cfg->stamp - 0x00200000];
-        // Start from a PROGRAMMED stamp, since that is the state the toggle has
-        // to undo -- Pre-built wrote one a moment ago.
         for (int i = 0; i < 4; i++)
             sdram[SDR_PCM_BASE + i] = sdram[cfg->stamp - 0x00200000 + i];
         uint64_t before = writes;
-        dut->reset = 1; for (int i = 0; i < 8; i++) tick();
-        dut->reset = 0; for (int i = 0; i < 8; i++) tick();
-        dut->start_blank = 1; tick(); dut->start_blank = 0;
-        uint64_t guard = cycles + 100000;
-        while (!dut->done && cycles < guard) tick();
-        if (!dut->done) { printf("FAIL: start_blank did not finish\n"); return 1; }
+        if (!blank_and_wait()) { printf("FAIL: start_blank did not finish\n"); return 1; }
         uint8_t *f = &sdram[SDR_PCM_BASE];
         if (f[0] != region || f[1] != 0xFF || f[2] != 0xFF || f[3] != 0xFF) {
-            printf("FAIL: blank stamp is %02X %02X %02X %02X, want %02X FF FF FF\n",
-                   f[0], f[1], f[2], f[3], region);
+            printf("FAIL: a programmed stamp survived the blank as "
+                   "%02X %02X %02X %02X\n", f[0], f[1], f[2], f[3]);
             return 1;
         }
-        printf("PASS: start_blank leaves %02X FF FF FF in %llu writes -- the "
-               "region kept, the build ID erased\n", region,
+        printf("PASS: a programmed %02X %02X %02X %02X is blanked back to "
+               "%02X FF FF FF in %llu writes\n",
+               region, sdram[cfg->stamp - 0x00200000 + 1],
+               sdram[cfg->stamp - 0x00200000 + 2],
+               sdram[cfg->stamp - 0x00200000 + 3], region,
                (unsigned long long)(writes - before));
     }
     return 0;

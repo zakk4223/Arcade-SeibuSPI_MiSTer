@@ -112,8 +112,8 @@
       down rather than latched. It is also on the DIP page below for setups
       with no spare pad button.
     -->
-    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test"
-             default="A,B,X,Start,Select,R,L" count="3"/>
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test,Pause"
+             default="A,B,X,Start,Select,R,L,Y" count="3"/>
 
     <!--
       SW1:1 is the board's only DIP. The game reads it from INPUTS bit 15 and

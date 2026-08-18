@@ -350,26 +350,30 @@ thing.
 | 8 | Coin | Select |
 | 9 | Service Coin | R |
 | 10 | Test (held, not latched) | L |
+| 11 | **Pause** | Y |
 
 Keyboard: `1`/`2` start, `5`/`6` coin, `9` service coin, `F2` test.
 
+**Pause** is bit 11 and not button 3, because four of the seven sets are MAME's
+`spi_3button` and use button 3 as a game input. It toggles: press to freeze, press
+again to resume. Only the 386 stops — the video engines keep running, so the frozen
+frame stays on screen and can be studied or captured at leisure, which also makes
+it the tool to reach for on a rendering fault. The music carries on, since the Z80
+and the YMF271 are not gated; what you hear is whatever loop the Z80 was in when
+the 386 stopped feeding it.
+
 ## Debugging aids
 
-One OSD option, off by default:
-
-- **Freeze Button (Btn 3)** — Button 3 toggles a CPU freeze. The video engines
-  keep running, so the frame stays on screen and can be studied or captured at
-  leisure. This is the one to use for a rendering fault.
-
-There used to be a second, **Vital Signs Panel**, which replaced the picture
-with a telemetry screen. The panel and the rest of the instrumentation are no
-longer built (PLAN.md 29). Its status bit, O[20], is left unassigned so an old
-saved `.CFG` cannot turn something else on by accident.
+None in the OSD. Two options used to be there and both are gone: the **Vital
+Signs Panel**, which replaced the picture with a telemetry screen, went with the
+rest of the instrumentation (`PLAN.md` 29); and the **Freeze Button** switch is
+now the Pause button above (`PLAN.md` 33), which needs no menu trip and does not
+double as a game input. Their status bits, O[20] and O[21], are left unassigned so
+an old saved `.CFG` cannot turn something else on by accident.
 
 Flip Screen (SW1:1) and Service Mode are on the OSD's DIP page. The bit order
-above is defined by the `<buttons names=...>` list every MRA carries (they are
-all the same list); the MRA
-and `SeibuSPI.sv` have to be changed together.
+above is defined by the `<buttons names=...>` list every MRA carries (they are all
+the same list); the MRA and `SeibuSPI.sv` have to be changed together.
 
 ## Credits
 

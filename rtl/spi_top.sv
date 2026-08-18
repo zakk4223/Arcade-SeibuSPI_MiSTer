@@ -51,13 +51,15 @@ module spi_top
 	output      [7:0] ds_nv_dout,
 	output            ds_nv_dirty,
 
-	// Freeze the CPU: the picture stops changing while the video engines keep
-	// running, so a frame can be studied at leisure. Driven from a controller
-	// button at the top level. This is the ONLY debug control left in the
-	// synthesised net; everything else that used to hang off `dbg_mask` -- the
-	// per-layer force-off bits, the vital signs panel, the JTAG counters --
-	// went with the instrumentation. Their modules are still in rtl/, just not
-	// instantiated. See PLAN.md 29.
+	// PAUSE: gate the 386 while the video engines keep running, so the frozen
+	// frame stays on screen and can be studied at leisure. Driven from a bound
+	// controller button at the top level -- joystick bit 11, the MRA's eighth
+	// button name, not an OSD switch and not button 3 (PLAN.md 33).
+	//
+	// It is also the only debug control left in the synthesised net: everything
+	// else that used to hang off `dbg_mask` -- the per-layer force-off bits, the
+	// vital signs panel, the JTAG counters -- went with the instrumentation. Their
+	// modules are still in rtl/, just not instantiated. See PLAN.md 29.
 	input             freeze,
 
 	// SDRAM ch1: 386 program ROM
