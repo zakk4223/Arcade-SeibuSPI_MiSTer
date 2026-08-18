@@ -8638,3 +8638,103 @@ the tail byte-identical to MAME's file.
 
 **Read-scratchpad (0xAA) does not exist**, in either. MAME has the state and no
 command that reaches it.
+
+### 31.7 It failed timing, and the fix was a flop count that had to be argued
+
+The first fit of all this FAILED, on the crossing it added and nothing else:
+
+    setup  -0.605   spi_io|ds_data[2]  ->  spi_ds2404|address[12]
+    hold   -0.320   spi_io|ds_data[5]  ->  spi_ds2404|pad_rtl_1_bypass[21]
+
+Both are the same mistake: the payload was used COMBINATIONALLY on the receiving
+side. `ds_data` is a clk_cpu register, and from it the path ran through the state
+machine's port decode, the command decode, and the `{a2,a1} - 1` subtract into
+`address`, all inside one clk_ram period and all across a clock boundary. clk_ram
+is 4x clk_cpu off the same PLL, so TimeQuest times the transfer rather than
+cutting it -- and the hold failure says the capture edge can also be too SOON,
+which is the part a setup-only reading of this would have missed.
+
+The fix is one flop on the payload, and the count is the whole point.
+
+`port` and `din` change on the same clk_cpu edge as `req`, and spi_io then holds
+them until the ack. So the only sample that can be wrong is the one taken at the
+first clk_ram edge after they moved, where a flop's difference in arrival decides
+it. Numbering the edges from there: at edge 1 `req_s1` latches the new toggle
+while `din_s1` may still see the old byte; at edge 2 `din_s1` re-samples a
+long-settled `din`; at edge 3 `req_s3` catches up, so `req_edge` was true in the
+cycle before and the action lands here -- reading `din_s1`, which by then holds
+the new byte and carries no metastability.
+
+**Two flops on the payload would have been worse, not safer.** `din_s2` carries
+edge 1's uncertain sample forward into exactly the cycle the action uses. The
+rule, which is easy to get backwards: a payload travelling beside a toggle must
+be SHALLOWER than the toggle's detection point, not deeper. Both versions
+simulate identically -- the testbench waits for the ack, as the 386 does -- so
+this is not something a bench was ever going to catch.
+
+`0x6DC` got the same treatment in the other direction: `spi_io` registers
+`ds_dout` on clk_cpu instead of feeding a clk_ram register straight into the
+386's read mux. The byte is settled for thousands of cycles either way, but the
+timed path is now a single hop and a value that moves in another domain is out of
+a combinational bus.
+
+That fixed the hold violation outright -- worst hold went to +0.239, and the
+crossing left the report -- and took setup from -0.605 to **-0.198**. Which was
+the useful part of the second fit, because the remaining path was no longer a
+crossing at all:
+
+    setup  -0.198   spi_ds2404|din_s1[4]  ->  spi_ds2404|address[14]
+    setup  -0.194   spi_ds2404|sptr[1]    ->  spi_ds2404|address[14]
+
+Entirely inside the module, entirely on clk_ram: the port case, then the command
+case, then the INIT decode, then `{a2,a1} - 1`, and `address[14]` is the far end
+of that subtract's borrow chain. A decode and a 16-bit subtract do not fit one
+clk_ram period when they are in series.
+
+So **arming a command takes its own cycle now.** The request cycle decodes the
+byte and NAMES the command; the cycle after it sets the pointer up from `a1` and
+`a2`, which are registers by then. The decode runs from the incoming byte, the
+arithmetic runs from registers, and neither is in the other's path. It costs one
+clk_ram cycle per command, which the 386 cannot observe -- the ack it is stalled
+on arrives 8.7 ns later than it would have, against an I/O instruction that takes
+hundreds of nanoseconds.
+
+Three fits for one small module, and the shape of the sequence is worth keeping:
+the first failure was a clock crossing, the second was ordinary combinational
+depth wearing the first one's clothes -- the SAME endpoint, `address[14]`, the far
+end of the subtract's borrow chain -- and only fixing the crossing made the second
+one visible.
+
+### 31.8 The number, and it is better than 29.3's
+
+    setup worst  +0.340   sdram|ch1_rq -> sdram|SDRAM_A[8]
+    clk_ram      +0.340   clk_cpu  +1.188   clk_sys  +1.814   pll_hdmi +0.425
+    hold worst   +0.169   TNS 0.000 on every clock, 0 critical warnings
+
+**Nothing of the DS2404's is in the worst 25.** The design's convergence point is
+back to being sdram.sv's alone, and it reads +0.340 where 29.3 recorded +0.254 --
+a different placement, and note the endpoint has moved from `command[1]` to
+`SDRAM_A[8]` again. 28.5's reading of that stands: which signal is "the" worst
+there wanders between fits because the point is routing-limited, not because a
+particular path got better.
+
+`ascal` came in at +0.425, its usual range, and did not need a seed hunt this
+time.
+
+What the whole chip costs now, against 29.2's figures:
+
+    registers  30,745 -> 31,010      ALMs 81% (33,923/41,910)   LABs 96% (4,036/4,191)
+
+265 registers for an RTC, a state machine and two synchronisers, because the 512
+bytes and the 32-byte scratchpad are block RAM: four inferred `altsyncram`
+instances, two per array, since each has a read port for the game and a second
+for the save file. As registers the SRAM alone would have been 4,096 of them, and
+LABs are at 96% -- 29.2's whole point was that this design is placed into nearly
+every LAB it has, and it is not the place to spend a seventh of the register
+count on a memory.
+
+The rename that goes with the split -- `start_copy` became `armed`, because it no
+longer means what it said -- landed after that fit was launched, so it was
+recompiled to confirm rather than assumed: a local variable inside an always
+block cannot change a netlist, and this project's own notes are the reason not to
+leave that as an assertion.

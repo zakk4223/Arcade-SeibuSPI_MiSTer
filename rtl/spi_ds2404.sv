@@ -159,14 +159,54 @@ module spi_ds2404
 	reg        copying;
 	reg  [7:0] copy_i;
 	reg [15:0] copy_addr;
+
+	// ------------------------------------------------------------------
+	// Arming a command takes its own cycle. Decoding the byte and then setting
+	// the read pointer from it -- the port case, the command case, the INIT
+	// decode and `{a2,a1} - 1` -- did not fit one clk_ram period: -0.198 ns on
+	// `din_s1 -> address[14]`, the far end of the subtract's borrow chain. Split
+	// in two, the decode runs from the incoming byte and the arithmetic runs from
+	// registers, and neither is in the other's path.
+	//
+	// It costs one clk_ram cycle per command, which the 386 cannot observe: the
+	// ack it is stalled on now comes from this cycle instead of the one before,
+	// 8.7 ns later, against an I/O instruction that takes hundreds.
+	// ------------------------------------------------------------------
+	reg  [3:0] arm;               // the command to set up, S_IDLE = nothing to do
 	wire       copy_sram = copying && (copy_addr < 16'h0200);
 	wire       copy_rtc  = copying && (copy_addr >= 16'h0202) && (copy_addr <= 16'h0206);
 
 	// ------------------------------------------------------------------
 	// The request crossing: synchronise the toggle, then act on its edge.
+	//
+	// The PAYLOAD gets ONE flop, and the count is the argument rather than a
+	// habit. `port` and `din` change on the same clk_cpu edge as `req`, and
+	// spi_io then holds them until the ack, so the only sample that can be wrong
+	// is one taken at the FIRST clk_ram edge after they moved -- where a flop's
+	// difference in arrival decides it. Number the edges from there:
+	//
+	//   edge 1   req_s1 latches the new req; din_s1 MAY still see the old byte
+	//   edge 2   req_s2 <= req_s1;  din_s1 re-samples din, now long settled
+	//   edge 3   req_s3 <= req_s2, so req_edge (s2^s3) is true in the cycle
+	//            before this one, and the action lands here reading din_s1
+	//
+	// So one flop is read a cycle after its uncertain sample was overwritten,
+	// and there is no metastability exposure left in it. TWO flops would be
+	// WORSE, not safer: din_s1 carries edge 1's uncertain sample forward into
+	// exactly the cycle the action uses. For a payload that travels beside a
+	// toggle, the payload must be SHALLOWER than the toggle's detection point.
+	//
+	// It also fixes the timing this crossing failed on. Used raw, `din` reached
+	// the state machine's decode and the address subtract inside one clk_ram
+	// period across a clock crossing: -0.605 ns setup, and -0.320 ns HOLD into
+	// the scratchpad's write data, because clk_ram is 4x clk_cpu off the same PLL
+	// and the analyser times the transfer rather than cutting it. Registered
+	// here, the crossing is one flop-to-flop hop and the rest is clk_ram's own.
 	// ------------------------------------------------------------------
 	reg        req_s1, req_s2, req_s3;
 	wire       req_edge = req_s2 ^ req_s3;
+	reg  [7:0] din_s1;
+	reg  [1:0] port_s1;
 
 	integer k;
 	initial begin
@@ -188,11 +228,13 @@ module spi_ds2404
 		automatic logic [2:0] ns;
 		automatic logic [7:0] na1, na2, nend;
 		automatic logic [3:0] cur_st;
-		automatic logic       start_copy;
+		automatic logic       armed;
 		automatic integer     i;
 		req_s1 <= req;
 		req_s2 <= req_s1;
 		req_s3 <= req_s2;
+		din_s1  <= din;
+		port_s1 <= port;
 
 		// ---- the SRAM's ports ----------------------------------------
 		// A load wins over the game, which costs nothing: the two cannot
@@ -232,6 +274,27 @@ module spi_ds2404
 			end
 		end
 
+		// ---- setting up a command that was decoded last cycle --------
+		else if (arm != S_IDLE) begin
+			case (arm)
+			S_READ_MEM:  address <= {a2, a1} - 16'd1;
+			S_WRITE_PAD: begin
+				address <= {a2, a1};
+				offset  <= {1'b0, a1[4:0]};
+			end
+			S_COPY_PAD: begin
+				// The copy runs from the NEXT cycle and acks when it is done.
+				copying   <= 1'b1;
+				copy_i    <= 8'd0;
+				copy_addr <= {a2, a1};
+				address   <= {a2, a1};
+			end
+			default: ;
+			endcase
+			arm <= S_IDLE;
+			if (arm != S_COPY_PAD) ack <= req_s2;
+		end
+
 		// ---- a request from the 386 ----------------------------------
 		else if (req_edge) begin
 			for (i = 0; i < 8; i = i + 1) nst[i] = st[i];
@@ -240,9 +303,9 @@ module spi_ds2404
 			na2        = a2;
 			nend       = end_off;
 			cur_st     = st[sptr];
-			start_copy = 1'b0;
+			armed = 1'b0;
 
-			case (port)
+			case (port_s1)
 			P_RESET: begin
 				// _1w_reset_w: back to waiting for a ROM command.
 				nst[0] = S_IDLE;
@@ -257,11 +320,11 @@ module spi_ds2404
 			P_DATA: case (cur_st)
 				S_IDLE:
 					// rom_cmd(): 0xCC skip ROM is the only one there is.
-					if (din == 8'hCC) begin
+					if (din_s1 == 8'hCC) begin
 						nst[0] = S_COMMAND;
 						ns     = 3'd0;
 					end
-				S_COMMAND: case (din)
+				S_COMMAND: case (din_s1)
 					8'h0F: begin                      // write scratchpad
 						nst[0] = S_ADDRESS1; nst[1] = S_ADDRESS2;
 						nst[2] = S_INIT;     nst[3] = S_WRITE_PAD;
@@ -280,11 +343,11 @@ module spi_ds2404
 					end
 					default: ;                        // MAME calls this fatal
 				endcase
-				S_ADDRESS1: begin na1  = din; ns = sptr + 3'd1; end
-				S_ADDRESS2: begin na2  = din; ns = sptr + 3'd1; end
-				S_OFFSET:   begin nend = din; ns = sptr + 3'd1; end
+				S_ADDRESS1: begin na1  = din_s1; ns = sptr + 3'd1; end
+				S_ADDRESS2: begin na2  = din_s1; ns = sptr + 3'd1; end
+				S_OFFSET:   begin nend = din_s1; ns = sptr + 3'd1; end
 				S_WRITE_PAD: if (offset < 6'd32) begin
-					pad[offset[4:0]] <= din;
+					pad[offset[4:0]] <= din_s1;
 					offset           <= offset + 6'd1;
 				end
 				default: ;
@@ -292,24 +355,14 @@ module spi_ds2404
 			default: ;
 			endcase
 
-			// The state the byte just consumed leads to, acted on NOW.
+			// The state the byte just consumed leads to. MAME acts on it in the
+			// same call; here it is NAMED now and set up next cycle, which is
+			// what keeps the decode and the arithmetic out of one another's
+			// path. `a1`, `a2` and `end_off` are stored at this edge, so the
+			// cycle that reads them back sees the bytes this command was given.
 			if (nst[ns] == S_INIT) begin
-				case (nst[ns + 3'd1])
-				S_READ_MEM:  address <= {na2, na1} - 16'd1;
-				S_WRITE_PAD: begin
-					address <= {na2, na1};
-					offset  <= {1'b0, na1[4:0]};
-				end
-				S_COPY_PAD: begin
-					// The copy runs from the next cycle, and `ack` waits for it.
-					copying    <= 1'b1;
-					copy_i     <= 8'd0;
-					copy_addr  <= {na2, na1};
-					address    <= {na2, na1};
-					start_copy = 1'b1;
-				end
-				default: ;
-				endcase
+				arm        <= nst[ns + 3'd1];
+				armed      = 1'b1;          // ...so this cycle does not ack
 				ns = ns + 3'd1;
 			end
 
@@ -318,8 +371,9 @@ module spi_ds2404
 			a1      <= na1;
 			a2      <= na2;
 			end_off <= nend;
-			// Everything but a copy finishes in this cycle.
-			if (!start_copy) ack <= req_s2;
+			// A byte that armed nothing is done with; one that armed a command
+			// is acked by the cycle that sets it up, or by the copy that follows.
+			if (!armed) ack <= req_s2;
 		end
 
 		if (reset) begin
@@ -333,11 +387,14 @@ module spi_ds2404
 			copying   <= 1'b0;
 			copy_i    <= 8'd0;
 			copy_addr <= 16'd0;
+			arm       <= S_IDLE;
 			ack       <= 1'b0;
 			dout      <= 8'd0;
 			req_s1    <= 1'b0;
 			req_s2    <= 1'b0;
 			req_s3    <= 1'b0;
+			din_s1    <= 8'd0;
+			port_s1   <= 2'd0;
 			// The RTC restarts at power-on; the SRAM and nv_dirty do NOT.
 			rtc       <= 40'd0;
 			tick_cnt  <= '0;

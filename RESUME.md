@@ -66,6 +66,26 @@ Two consequences worth knowing before testing:
 `make -C sim run-ds2404` and `run-nvram` both pass. Nothing about it has been on
 hardware.
 
+**It took three fits.** The first FAILED on the new crossing and nothing else:
+`spi_io|ds_data -> spi_ds2404|address` at -0.605 setup and -0.320 HOLD into the
+scratchpad's write data, because the payload was used combinationally on the
+receiving side. It is one flop deep now -- ONE, and `PLAN.md` 31.7 argues the
+count, because two would carry the uncertain sample into the cycle the action
+uses. The second fit then failed at -0.198 on the SAME endpoint with the crossing
+gone: the decode and a 16-bit subtract in series inside one clk_ram period. Arming
+a command takes its own cycle now, and the 386 cannot tell.
+
+Both of the first two versions simulate identically -- the bench waits for the
+ack, as the 386 does -- so nothing but a fit was ever going to find either.
+
+    setup worst  +0.340   sdram|ch1_rq -> sdram|SDRAM_A[8]
+    clk_ram      +0.340   clk_cpu  +1.188   clk_sys  +1.814   pll_hdmi +0.425
+    hold worst   +0.169   TNS 0.000 everywhere, 0 critical warnings
+
+Better than 29.3's +0.254, and nothing of the DS2404's appears in the worst 25.
+The endpoint is sdram.sv's again, and it has moved from `command[1]` to
+`SDRAM_A[8]` -- 28.5's point about that wandering, not improving.
+
 ## The release blocker, and what moved it
 
 **The instrumentation is out of the net** (`PLAN.md` 29). `spi_debug`,
@@ -133,12 +153,11 @@ described -- but a fit is still worth CHECKING rather than assuming.
   instances. Putting one back means re-instantiating `spi_jtag_peek`, wiring
   whichever watch it is to read, and adding the file to `files.qip` -- and
   expecting the timing to move when you do.
-* **`DEFMRA` points at a file the RBF in `output_files/` has never heard of.**
-  The rename put rdfts under `_alternatives`, so `SeibuSPI.sv` now says
-  `DEFMRA,/_Arcade/Raiden Fighters (Germany).mra`. It is a CONF_STR string and
-  inert until the next compile; it only matters for launching the RBF directly
-  rather than through an MRA. The committed bitstream is still 29.3's seed-1
-  placement, and this is the one edit waiting on the next fit.
+* **`DEFMRA` is `Raiden Fighters (Germany).mra` now**, since the naming rule put
+  rdfts under `_alternatives`. It only matters for launching the RBF directly
+  rather than through an MRA, and it IS in the current bitstream -- the DS2404
+  work rebuilt it. 29.3's seed-1 placement is no longer what is on disk; 31.8's
+  is, and it is a better fit.
 * **The DS2404 has never been exercised on hardware.** The whole of it is
   simulation so far. What to watch for: the bookkeeping page in Service Mode
   accumulating across boots, which is the thing that could not work before, and

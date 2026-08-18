@@ -119,6 +119,14 @@ module spi_io
 	reg        ds_ack_s1, ds_ack_s2;
 	assign ds_stall = ds_pend;
 
+	// 0x6DC's byte comes the other way across the same crossing. It is settled
+	// for thousands of cycles -- the chip only moves it two cycles after a port
+	// write, and the 386 cannot issue the OUT and the IN that reads it any closer
+	// together -- but registering it here rather than feeding clk_ram's own
+	// register into the CPU's read mux keeps the timed path a single hop, and
+	// keeps a byte that changes in another domain out of a combinational bus.
+	reg  [7:0] ds_dout_r;
+
 	// NOTE: everything this block would have driven lives in the write block
 	// below instead. Quartus rejects a net driven from two always blocks --
 	// "Can't resolve multiple constant drivers" -- and Verilator's -Wall does
@@ -181,6 +189,7 @@ module spi_io
 		// for dl_pend.
 		ds_ack_s1 <= ds_ack;
 		ds_ack_s2 <= ds_ack_s1;
+		ds_dout_r <= ds_dout;
 		if (ds_pend && (ds_ack_s2 == ds_req)) ds_pend <= 1'b0;
 
 		if (reset) begin
@@ -193,6 +202,7 @@ module spi_io
 			ds_data   <= 8'd0;
 			ds_ack_s1 <= 1'b0;
 			ds_ack_s2 <= 1'b0;
+			ds_dout_r <= 8'd0;
 			z80dl_end <= 19'd0;
 			// Held in reset until the 386 releases it. On SXX2E the Z80 runs
 			// from ROM and must not be gated, so this reads as 1 there.
@@ -373,7 +383,7 @@ module spi_io
 			// 0x6DC is the DS2404's data byte and 0x6DD is the three bits the
 			// game waits to see clear -- the same dword, so one entry covers
 			// both, and MAME's spi_ds2404_unknown_r returns zero for the second.
-			11'h6DC: rdata = {24'd0, ds_dout};
+			11'h6DC: rdata = {24'd0, ds_dout_r};
 			default: rdata = 32'h0000_0000;
 		endcase
 	end
