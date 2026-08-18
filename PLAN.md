@@ -8882,3 +8882,72 @@ clk_ram came in at +0.230 where 31.8 read +0.340, and the endpoint moved from
 placement lottery 28.5 describes rather than anything these 24 registers did. It
 is the third different "worst signal" at that point in three fits, which is the
 signature of a routing limit and not of a path that got worse.
+
+### 32.7 On hardware, and the DS2404 verified against MAME by accident
+
+The whole of Cart copy ran on the board, and one thing fell out of it that section
+31 had listed as needing a human.
+
+**Getting into the mode without an OSD.** `/dev/MiSTer_cmd` has no menu command --
+checked against the dispatch table in the binary this time rather than from
+memory: `fb_cmd`, `video_mode`, `load_core`, `screenshot`, `scaled`, `load_file`,
+`volume`, `mute`, `unmute`, and nothing else. But `/media/fat/config/rdft.CFG` is
+**sixteen bytes of the status word verbatim**, 128 bits of it, and writing byte 2
+bit 6 (`status[22]`) brings the core up in Cart copy. 25.x recorded an attempt at
+exactly this as "did nothing"; it works, and the difference is most likely that
+the file now exists under the core's own name.
+
+That selects the MODE at boot. It does not test the TOGGLE, which needs
+`status[22]` to move while the core runs.
+
+**The copy runs, and finishes.**
+
+    07:18   NOW UPDATING. PLEASE WAIT A MOMENT.        895
+    07:20   ...                                        424
+    07:23   UPDATE COMPLETED. AFTER SWITCHING OFF THE  000
+            POWER, RETURN 'JP1' TO ITS ORIGINAL
+            POSITION AND THEN TURN THE POWER BACK ON.
+
+Four minutes, the counter moving the whole way. So `stamp_en` low does what it is
+for: the derivation writes the payload, leaves flash[0..3] alone, and the game
+finds an unprogrammed cartridge. The JP1 line at the end is the game asking for
+the jumper this core drives from the mode -- switching back to Pre-built is
+returning it.
+
+**A 516-byte save appeared without the OSD being opened**, timed with the load
+rather than with the copy's end. Main polls somewhere in its own post-load path,
+which is more than the "only while the menu is up" this file has been assuming.
+Its stamp reads `FF FF FF FF`, which is not a bug and is worth understanding: the
+save was taken moments after the copy started, and the updater ERASES a block
+before programming it, so byte 0's region code was momentarily erased with the
+rest. It reads as "not programmed", which is the safe way for it to be wrong.
+
+**And its 512-byte tail is MAME's `ds2404` file, 505 bytes of 512.** Not designed
+as a test and much better than the one that was planned:
+
+    00 4A 4A 36 20 01 01 01 01 01 02 01 0F 00 00 00
+    01 03 00 01 67 45 23 01 EF CD AB 89 01 FF C6 05
+    40 42 0F 00 ...
+
+The game ID with its region byte cleared, the `67 45 23 01` / `EF CD AB 89` test
+patterns, the 1,000,000 counter -- all of it byte-identical to
+`~/.mame/nvram/rdft/ds2404`. 189 of the 512 bytes are non-zero and the game wrote
+every one of them through the port sequence 31.1 transliterated.
+
+The seven that differ are at 0x14C, 0x14D, 0x152, 0x153, 0x158, 0x159 and 0x15E --
+three pairs on a six-byte stride, plus one. The core reads 01 01 / 00 00 / 00 00 /
+02 where MAME reads 08 0F / 08 0B / 08 09 / 3B, which is consistent with fields
+derived from the RTC: MAME seeds its counter from the host clock against 1995,
+this one starts at zero from power-on, and 31.6 records that as deliberate. Stated
+as consistent rather than as proven -- nothing here identifies those seven bytes
+beyond their pattern.
+
+**Pre-built still plays at once afterwards**, with that blank-stamped save file
+sitting there -- which is the branch worth having seen: `flash_live` low means the
+stored stamp is ignored and the derivation's own is used, so a save whose stamp
+says "not programmed" does not drag Pre-built into a copy.
+
+**What is still not tested** is the toggle itself: the 0 -> 1 edge blanking the
+stamp and resetting the board. Its effect is now demonstrated from the other
+direction, since booting into Cart copy with a blank stamp does run the copy, but
+the edge detector and its 1.1 ms reset have only ever run in simulation.

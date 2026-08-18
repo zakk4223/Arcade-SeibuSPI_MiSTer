@@ -179,26 +179,22 @@ described -- but a fit is still worth CHECKING rather than assuming.
   rather than through an MRA, and it IS in the current bitstream -- the DS2404
   work rebuilt it. 29.3's seed-1 placement is no longer what is on disk; 31.8's
   is, and it is a better fit.
-* **The DS2404's own DATA is still unconfirmed on hardware**, and it needs a
-  human at the machine for a reason that predates it: MiSTer_cmd has no OSD or
-  input command, so neither of the two things that would prove it can be driven
-  from here. Both are a few button presses:
-    1. Service Mode -> **INCOME**, and **ADJUST TIMER**. A fresh chip reads zero,
-       which is correct and also what the old stub returned -- so coin up first
-       (Select on the pad) and look for a counter that MOVED.
-    2. Open the OSD once afterwards, which is the only thing that makes Main ask
-       for the nvram, and check that
-       `/media/fat/config/nvram/Raiden Fighters (Germany).nvm` appears at
-       **516 bytes**. Its last 512 are the chip; the four ahead of them are the
-       flash's stamp.
-  Until then what is established is that the core is HEALTHY with the DS2404 in
-  it, not that the chip remembers anything.
-* **Cart copy has never been exercised on hardware.** What to try, in order:
-  select it in the OSD (the board should reset itself within a second), watch for
-  the game's own "NOW UPDATING" and the six-minute copy, let it finish, open the
-  OSD once so the 516 bytes are saved, then reload and check it does NOT copy
-  again. Then toggle to Cart copy a second time and check that it DOES -- that
-  reachability is the whole point of `PLAN.md` 32.
+* **The DS2404 is VERIFIED on hardware**, and against MAME, which the Cart copy
+  run did for free (`PLAN.md` 32.7). The 516-byte save file's 512-byte tail is
+  `~/.mame/nvram/rdft/ds2404` in 505 of 512 bytes -- the game ID `00 4A 4A 36`,
+  the `67 45 23 01` / `EF CD AB 89` test patterns, the 1,000,000 counter, 189
+  non-zero bytes of bookkeeping the game wrote through the port sequence. The
+  seven that differ sit on a six-byte stride and are consistent with RTC-derived
+  fields, which start at zero here and from the host clock in MAME.
+  Nothing left to do on it. What would still be nice: Service Mode -> INCOME with
+  a coin inserted, to see a counter move on screen rather than in a file.
+* **The Cart copy TOGGLE is the one thing left.** The mode itself ran on hardware
+  end to end (`PLAN.md` 32.7): four minutes of "NOW UPDATING" with the counter
+  moving 895 -> 424 -> 000, then "UPDATE COMPLETED", and Pre-built playing at once
+  afterwards. What has only ever run in simulation is the 0 -> 1 EDGE -- blanking
+  the stamp and the 1.1 ms self-reset. Select Cart copy in the OSD while the game
+  is running: the board should restart itself within a second and come up copying.
+  There is no way to do that from here, because there is no OSD command.
 * **A variant has never been booted.** Any of the 42 would do as a first check,
   and `Raiden Fighters (Japan, earlier)` is the cheapest -- it shares rdft's job
   table address, so only the region lock and the file names are new.
