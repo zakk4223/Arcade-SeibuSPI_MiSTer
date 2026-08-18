@@ -8639,6 +8639,31 @@ the tail byte-identical to MAME's file.
 **Read-scratchpad (0xAA) does not exist**, in either. MAME has the state and no
 command that reaches it.
 
+### 31.9 On hardware: rdft boots, and the test menu names the chip
+
+Deployed md5-verified, `Raiden Fighters (Germany).mra` loaded twice from separate
+`load_core`s, and rdft ran its attract cycle both times -- the title over live
+gameplay, the runway cutscene, the RF camouflage panel, four screenshots with four
+different md5s. The download never wedged Main and the writer returned 0 each
+time, which answers the thing worth worrying about: `io_stall` is new on a path
+that previously stalled for nothing but the Z80 download, and the 386 does not
+hang on it. The derivation still works too -- attract, not the six-minute updater.
+
+Service Mode boots the game's own TEST MODE, which lists EXIT, GAME SETTINGS,
+**INCOME**, I/O TEST, MONITOR TEST, **ADJUST TIMER** and RESET SETTING. INCOME is
+the audit page kept in the DS2404's SRAM and ADJUST TIMER is the RTC at
+0x202-0x206; both read a hardwired zero before this section. That the menu draws
+at all says the game did not choke on the chip.
+
+**What this does NOT establish is that the chip remembers anything**, and the
+reason is structural rather than an oversight: `/dev/MiSTer_cmd` takes six
+commands (`fb_cmd`, `video_mode`, `load_core`, `screenshot`, `load_file`,
+`volume`) and none of them is an OSD or an input. So the two observations that
+would settle it both need a human -- a coin and a look at INCOME, because a fresh
+chip correctly reads the same zeros the old stub did, and the OSD opened once so
+that Main asks for the nvram and the 2,097,664-byte file appears. Recorded in
+RESUME as two button presses rather than as work.
+
 ### 31.7 It failed timing, and the fix was a flop count that had to be argued
 
 The first fit of all this FAILED, on the crossing it added and nothing else:

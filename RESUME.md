@@ -22,7 +22,7 @@ All of it is committed and green. `PLAN.md` 20, 22, 23, 24, 25, 26, 30.
 | integrated behind the OSD option | done, derivation verified on hardware |
 | MRAs collapsed to seven, Pre-built default | done |
 | every clone and regional variant, 49 MRAs | done, `make mras` + `make check-clones` |
-| the DS2404, and one save file for both devices | done in RTL and sim, NOT on hardware |
+| the DS2404, and one save file for both devices | done; rdft boots and runs on hardware |
 
 The last row is `PLAN.md` 30 and it needed no RTL: the collapse had already
 moved the one per-clone constant, the sample-flash job table, into the MRA.
@@ -63,8 +63,20 @@ Two consequences worth knowing before testing:
   Main_MiSTer accepts a short file or rejects the size is NOT verified; if it
   rejects it, the ritual runs once more and the next save is the new shape.
 
-`make -C sim run-ds2404` and `run-nvram` both pass. Nothing about it has been on
-hardware.
+`make -C sim run-ds2404` and `run-nvram` both pass.
+
+**On hardware (2026-08-18): rdft boots and runs with all of it in the net.** The
+RBF was deployed md5-verified, `Raiden Fighters (Germany).mra` loads (CORENAME
+reads `rdft`), and the attract cycle progresses -- title over live gameplay, the
+runway cutscene, the RF panel, four screenshots with four different md5s. Twice
+over, from two separate `load_core`s, and the ROM download never wedged Main. So
+`io_stall` does not hang the 386 and the derivation still fills the flash: the
+game runs its attract rather than its six-minute updater.
+
+**Service Mode reaches its own TEST MODE menu**, which lists EXIT, GAME SETTINGS,
+**INCOME**, I/O TEST, MONITOR TEST, **ADJUST TIMER** and RESET SETTING. Those two
+in caps are the DS2404's: INCOME is the audit page in its SRAM and ADJUST TIMER is
+the counter at 0x202-0x206, which read a hardwired zero until now.
 
 **It took three fits.** The first FAILED on the new crossing and nothing else:
 `spi_io|ds_data -> spi_ds2404|address` at -0.605 setup and -0.320 HOLD into the
@@ -158,12 +170,20 @@ described -- but a fit is still worth CHECKING rather than assuming.
   rather than through an MRA, and it IS in the current bitstream -- the DS2404
   work rebuilt it. 29.3's seed-1 placement is no longer what is on disk; 31.8's
   is, and it is a better fit.
-* **The DS2404 has never been exercised on hardware.** The whole of it is
-  simulation so far. What to watch for: the bookkeeping page in Service Mode
-  accumulating across boots, which is the thing that could not work before, and
-  a save file of 2,097,664 bytes appearing for a cartridge set (512 for rdfts).
-  If the 386 hangs early instead, `io_stall` is the first suspect -- it is new on
-  a path that previously never stalled for anything but the Z80 download.
+* **The DS2404's own DATA is still unconfirmed on hardware**, and it needs a
+  human at the machine for a reason that predates it: MiSTer_cmd has no OSD or
+  input command, so neither of the two things that would prove it can be driven
+  from here. Both are a few button presses:
+    1. Service Mode -> **INCOME**, and **ADJUST TIMER**. A fresh chip reads zero,
+       which is correct and also what the old stub returned -- so coin up first
+       (Select on the pad) and look for a counter that MOVED.
+    2. Open the OSD once afterwards, which is the only thing that makes Main ask
+       for the nvram, and check that
+       `/media/fat/config/nvram/Raiden Fighters (Germany).nvm` appears at
+       **2,097,664 bytes**. Its last 512 are the chip; the 2 MB ahead of them is
+       the derived flash, written but never read back.
+  Until then what is established is that the core is HEALTHY with the DS2404 in
+  it, not that the chip remembers anything.
 * **A variant has never been booted.** Any of the 42 would do as a first check,
   and `Raiden Fighters (Japan, earlier)` is the cheapest -- it shares rdft's job
   table address, so only the region lock and the file names are new.
