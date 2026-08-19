@@ -9222,3 +9222,93 @@ synchroniser whose two-flop and one-flop versions simulate identically (31.7), t
 `start_blank` test that reset the DUT into a state hardware never reaches (32.8),
 and now this. The pattern is the same each time -- the check was never made to
 fail on purpose.
+
+## 37. A cold build fails, and what that says about everything measured warm
+
+`make build` after a day of edits reported success, an identical RBF and identical
+slacks. All three were hollow: the flow SKIPPED Analysis & Synthesis, judged the
+cached netlist current, and re-fitted it. The stage list is the tell --
+
+    Shell (pre-flow) / Shell / Fitter / Assembler / TimeQuest
+
+no Analysis & Synthesis anywhere in it. So `make build` alone does not prove the
+sources compile. `make map` is the stage that always runs, which is why 21.x
+already said it is the first real check for `SeibuSPI.sv`; the same is true of the
+whole tree.
+
+Deleting `db/` and building again answered the question that had actually been
+asked, and the answer was worse than expected.
+
+### 37.1 The tree did not build a passing bitstream from cold
+
+    Analysis & Synthesis   0 errors, 241 warnings     everything compiles
+    setup worst  +0.271
+    hold  worst  -0.136    clk_ram                    FAILS
+    critical warnings: 1
+    registers 31,036                                  31,035 on the warm builds
+
+**A cold elaboration produces a different netlist**: one register more and four
+warnings more than every warm figure recorded that day. Different netlist, different
+fit -- and at the same seed 3, cold, the design failed.
+
+That invalidates two claims made earlier in these notes, and both are corrected
+here rather than quietly:
+
+* **34's seed table was measured warm.** Seed 3 reading +0.187 and seeds 2, 5 and 6
+  failing are all warm-db numbers. The hit rate they were used to argue -- two of
+  five -- is not a cold hit rate and cannot be read as one.
+* **36's determinism result was warm too.** A fit does reproduce to the byte
+  fit-to-fit with the netlist cached. It does NOT follow that a clean clone
+  reproduces it, and this section is the counter-example: same seed, same source,
+  different outcome.
+
+The consequence that matters: `releases/SeibuSPI.rbf` was a genuinely
+timing-clean build, verified and running on hardware, that **could not be
+reproduced from a clean checkout.** For a bitstream checked into a repository so
+other people can distribute it, that is not a footnote.
+
+### 37.2 The failing path was a crossing with no synchroniser
+
+    hold -0.136   hps_io|ioctl_upload  ->  spi_nvram|ioctl_upload_d
+
+`ioctl_upload` is clk_sys and `spi_nvram` is clk_ram, off the same PLL, so the
+analyser times the transfer. Worse than the flop capture the report names:
+the edge detect was `ioctl_wr && !ioctl_wr_d`, which put a clk_sys net straight
+into clk_ram COMBINATIONAL logic. It is original code, not new -- it simply needed
+a placement that stopped hiding it, and a warm db had been hiding it for months.
+
+Two fixes, and neither is sufficient alone.
+
+**THREE flops per strobe, edge between s2 and s3.** Not two: with two the edge
+lands on s1, whose output is exactly the one a synchroniser exists not to trust.
+The DS2404's request crossing was already built this way (31.7) and this is the
+same construction. Levels take s2. Payloads take ONE flop -- shallower than the
+strobe's detection point, because a payload synchronised as deeply as its strobe
+can still hold the previous value when the strobe is seen.
+
+**A false path, TARGETED at the four first-stage flops.** The synchroniser makes
+the transfer correct; the constraint makes it honest, because there is nothing
+useful the analyser can say about the first capture of an asynchronous signal, and
+leaving it timed means passing or failing on where one flop landed.
+`set_false_path -from clk_sys -to clk_ram` would have fixed it and stopped
+checking every legitimate transfer between those domains too -- the settled config
+registers, the video and sound interfaces. Four named destinations cut what is
+asynchronous by construction and nothing else. The payload registers are
+deliberately left timed: their strobe arrives two stages later, so their setup and
+hold requirements are real.
+
+This is the first core-specific constraint in a file that says it leaves timing to
+the framework, so the reasoning lives in `SeibuSPI.sdc` beside it.
+
+### 37.3 The number, from cold
+
+    setup worst  +0.341   clk_ram        pll_hdmi +0.420
+    clk_cpu      +1.216   clk_sys +1.305
+    hold  worst  +0.244   TNS 0.000 everywhere, 0 critical warnings
+
+Better on clk_ram than any warm fit recorded -- +0.341 against 33's +0.101, 34's
++0.187 and 31.8's +0.340 -- and the `ioctl_upload` path is out of the hold list
+entirely, the worst hold now being Cart copy's own `blank_cnt` at +0.244.
+
+**Cold is the only measurement that counts from here.** A warm rebuild answers
+"does this placement still hold", which is not the question a release asks.

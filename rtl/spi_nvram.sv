@@ -175,16 +175,47 @@ module spi_nvram
 	assign ioctl_upload_index = NV_INDEX;
 
 	// ------------------------------------------------------------------
-	// ioctl edges. Both strobes are one clk_sys cycle and this runs on
-	// clk_ram, so they are two cycles wide here -- acting on the level would
-	// count every byte twice, which is PLAN.md 10c's bug exactly.
+	// EVERY ioctl signal crosses a clock boundary to get here, and this is where
+	// that is dealt with. hps_io runs on clk_sys, this module on clk_ram, and the
+	// two come off the same PLL -- so the analyser TIMES the transfer rather than
+	// ignoring it, and a cold fit at the seed this design ships on failed HOLD by
+	// 0.136 ns on `ioctl_upload` reaching the flop that used to sample it
+	// directly. PLAN.md 37.
+	//
+	// THREE flops on the strobes, and the edge is detected between the second and
+	// the third. Two would put the edge on s1, which is the stage that can be
+	// metastable -- the whole point of the first flop is that its output is not
+	// trusted. The DS2404's request crossing is built the same way for the same
+	// reason (31.7), and this is the shape that was missing here.
+	//
+	// The edge is detected between synchronised stages rather than against the RAW
+	// input, which is the bigger of the two faults in what this replaces:
+	// `ioctl_wr && !ioctl_wr_d` fed a clk_sys net into clk_ram combinational logic.
+	//
+	// The strobes are one clk_sys cycle, which is two of these, so `s2 && !s3` is
+	// true for exactly one clk_ram cycle per pulse -- the same one-rise-per-byte
+	// the old form gave, two cycles later. Acting on the level would count every
+	// byte twice, which is PLAN.md 10c's bug.
+	//
+	// LEVELS take s2, the first trustworthy stage. PAYLOADS take ONE flop,
+	// deliberately shallower than the strobe's detection point, for the reason
+	// 31.7 spells out: a payload synchronised as deeply as its strobe can still
+	// hold the previous value when the strobe is seen, so shallower is what makes
+	// it settled by then and deeper would be worse.
 	// ------------------------------------------------------------------
-	reg ioctl_wr_d, ioctl_rd_d, ioctl_upload_d;
-	wire ioctl_wr_rise = ioctl_wr && !ioctl_wr_d;
-	wire ioctl_rd_rise = ioctl_rd && !ioctl_rd_d;
-	wire upload_start  = ioctl_upload && !ioctl_upload_d;
+	reg ioctl_wr_s1,     ioctl_wr_s2,     ioctl_wr_s3;
+	reg ioctl_rd_s1,     ioctl_rd_s2,     ioctl_rd_s3;
+	reg ioctl_upload_s1, ioctl_upload_s2, ioctl_upload_s3;
+	reg ioctl_dl_s1,     ioctl_dl_s2;
+	reg  [7:0] ioctl_dout_s, ioctl_index_s;
 
-	wire sel = enable && (ioctl_index == NV_INDEX);
+	wire ioctl_wr_rise = ioctl_wr_s2 && !ioctl_wr_s3;
+	wire ioctl_rd_rise = ioctl_rd_s2 && !ioctl_rd_s3;
+	wire upload_start  = ioctl_upload_s2 && !ioctl_upload_s3;
+	wire upload_run    = ioctl_upload_s2;
+	wire download_run  = ioctl_dl_s2;
+
+	wire sel = enable && (ioctl_index_s == NV_INDEX);
 
 	// ------------------------------------------------------------------
 	// LOAD: one 8-bit write per byte, with ioctl_wait as backpressure.
@@ -245,9 +276,15 @@ module spi_nvram
 	reg        want_save;
 
 	always @(posedge clk) begin
-		ioctl_wr_d     <= ioctl_wr;
-		ioctl_rd_d     <= ioctl_rd;
-		ioctl_upload_d <= ioctl_upload;
+		ioctl_wr_s1     <= ioctl_wr;
+		ioctl_wr_s2     <= ioctl_wr_s1;      ioctl_wr_s3     <= ioctl_wr_s2;
+		ioctl_rd_s1     <= ioctl_rd;
+		ioctl_rd_s2     <= ioctl_rd_s1;      ioctl_rd_s3     <= ioctl_rd_s2;
+		ioctl_upload_s1 <= ioctl_upload;
+		ioctl_upload_s2 <= ioctl_upload_s1;  ioctl_upload_s3 <= ioctl_upload_s2;
+		ioctl_dl_s1     <= ioctl_download;   ioctl_dl_s2     <= ioctl_dl_s1;
+		ioctl_dout_s    <= ioctl_dout;
+		ioctl_index_s   <= ioctl_index;
 		dirty_d        <= flash_dirty;
 		sdirty_d       <= sram_dirty;
 		sram_we        <= 1'b0;
@@ -255,7 +292,7 @@ module spi_nvram
 		// ---- load ----------------------------------------------------
 		if (wr_req == wr_ack) ioctl_wait <= 1'b0;
 
-		if (sel && ioctl_download) begin
+		if (sel && download_run) begin
 			// Hold the HPS off until the ROM image has finished landing. It
 			// waits mid-transfer, which is what ioctl_wait is for, and the
 			// replay it is waiting on is bounded by the image size.
@@ -267,7 +304,7 @@ module spi_nvram
 					// derivation writes the real one a moment later.
 					if (flash_live) begin
 						wr_addr    <= SDR_PCM_BASE + {dl_off[25:1], 1'b0};
-						wr_din     <= {ioctl_dout, ioctl_dout};
+						wr_din     <= {ioctl_dout_s, ioctl_dout_s};
 						wr_be      <= dl_off[0] ? 2'b10 : 2'b01;
 						wr_req     <= ~wr_req;
 						ioctl_wait <= 1'b1;
@@ -275,7 +312,7 @@ module spi_nvram
 				end
 				else begin
 					sram_addr <= dl_tail;
-					sram_din  <= ioctl_dout;
+					sram_din  <= ioctl_dout_s;
 					sram_we   <= 1'b1;
 				end
 				dl_off     <= dl_off + 26'd1;
@@ -303,7 +340,7 @@ module spi_nvram
 			rd_addr   <= SDR_PCM_BASE;
 			rd_req    <= ~rd_req;
 		end
-		else if (!ioctl_upload) up_run <= 1'b0;
+		else if (!upload_run) up_run <= 1'b0;
 
 		// EVERY re-arm toggles rd_req. Setting `fetching` without asking for
 		// anything leaves ack == req, so the branch below fires again on the
@@ -393,6 +430,10 @@ module spi_nvram
 		end
 
 		if (reset) begin
+			ioctl_wr_s1     <= 1'b0; ioctl_wr_s2     <= 1'b0; ioctl_wr_s3     <= 1'b0;
+			ioctl_rd_s1     <= 1'b0; ioctl_rd_s2     <= 1'b0; ioctl_rd_s3     <= 1'b0;
+			ioctl_upload_s1 <= 1'b0; ioctl_upload_s2 <= 1'b0; ioctl_upload_s3 <= 1'b0;
+			ioctl_dl_s1     <= 1'b0; ioctl_dl_s2     <= 1'b0;
 			ioctl_wait <= 1'b0;
 			wr_req     <= 1'b0;
 			wr_addr    <= 26'd0;
