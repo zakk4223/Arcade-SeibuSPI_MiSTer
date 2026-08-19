@@ -1,4 +1,4 @@
-# SlopperPI - persistent JTAG console.
+# SeibuSPI - persistent JTAG console.
 #
 # Run this ONCE, in your own terminal, and leave it up:
 #
@@ -430,7 +430,7 @@ proc handle {line} {
 # ------------------------------------------------------------------- main ---
 
 file delete -force $OUTFILE
-say "SlopperPI JTAG console"
+say "SeibuSPI JTAG console"
 say "hardware: $hw"
 say "device:   $dev"
 say "instances: $INSTANCES"

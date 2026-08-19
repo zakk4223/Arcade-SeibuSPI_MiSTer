@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  386 subsystem: z386 core, address decode, main RAM, PRG ROM fetch, IRQ.
 //

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - ROM download round-trip test
+//  SeibuSPI - ROM download round-trip test
 //
 //  Streams the real concatenated ROM image through rom_loader into the real
 //  SDRAM controller and a behavioural SDRAM chip, then reads every 64-bit word

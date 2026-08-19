@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - reset synchroniser
+//  SeibuSPI - reset synchroniser
 //
 //  Brings an asynchronous reset level into a clock domain so that its
 //  *deassertion* is synchronous to that clock.

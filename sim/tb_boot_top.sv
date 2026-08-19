@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - boot testbench wrapper
+//  SeibuSPI - boot testbench wrapper
 //
 //  Everything else in sim/ feeds MAME's captured RAM contents into the video
 //  path, which means the 386 itself has never actually been run. This wrapper

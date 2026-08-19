@@ -1,5 +1,5 @@
 #============================================================================
-#  SlopperPI - name the worst timing paths after a build
+#  SeibuSPI - name the worst timing paths after a build
 #
 #  quartus_sta's default report gives the Setup Summary, which names the clock
 #  and the slack but NOT the endpoints, and the .sta.rpt it writes contains no

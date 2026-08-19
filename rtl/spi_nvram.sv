@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - the save file: the sample flash, then the DS2404's SRAM
+//  SeibuSPI - the save file: the sample flash, then the DS2404's SRAM
 //
 //  The SPI cartridge programs its own sample flash on first boot, and without
 //  somewhere to put the result it does that on EVERY boot: six minutes of

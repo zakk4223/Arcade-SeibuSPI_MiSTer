@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - ROM download round-trip through the real SDRAM controller
+//  SeibuSPI - ROM download round-trip through the real SDRAM controller
 //
 //  rom_loader -> rtl/sdram.sv -> sim/sdram_model.sv, then read every byte back
 //  out through channel 1 and compare against the reference image.

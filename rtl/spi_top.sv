@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  Board top: 386 + video + sound + I/O.
 //

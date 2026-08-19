@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - RISE11 sprite decryption (rfjet)
+//  SeibuSPI - RISE11 sprite decryption (rfjet)
 //
 //  seibuspi_rise11_sprite_decrypt(), seibuspi_m.cpp. Like the other two units
 //  it takes one 16-bit word from each of the three plane-pair chunks -- 48 bits

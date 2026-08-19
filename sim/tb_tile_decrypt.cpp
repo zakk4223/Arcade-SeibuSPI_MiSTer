@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - tile/char decrypt unit vs MAME's decrypt_tile()
+//  SeibuSPI - tile/char decrypt unit vs MAME's decrypt_tile()
 //============================================================================
 
 #include "Vspi_tile_decrypt.h"

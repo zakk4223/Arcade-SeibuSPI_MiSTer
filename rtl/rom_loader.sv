@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  ROM loader: streams the MRA's concatenated ROM image from ioctl into SDRAM,
 //  performing the MAME ROM_LOAD24_* / ROM_LOAD32_* scatter in hardware.

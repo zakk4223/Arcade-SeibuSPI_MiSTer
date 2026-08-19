@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - on-screen vital signs
+//  SeibuSPI - on-screen vital signs
 //
 //  Replaces the picture with eight horizontal bars, one per internal event, so
 //  it is possible to tell from the hardware alone how far the core gets.

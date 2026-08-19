@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - testbench for rom_loader
+//  SeibuSPI - testbench for rom_loader
 //
 //  CAUTION: this test only proves the RTL agrees with the model below. It does
 //  not prove either is right -- the W24_W01 byte order was wrong in both for a

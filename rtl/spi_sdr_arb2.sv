@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - two-client arbiter for one SDRAM channel
+//  SeibuSPI - two-client arbiter for one SDRAM channel
 //
 //  SDRAM channel 3 is the only writable one, so it carries the ROM download,
 //  then the ROM checker, then -- once the board is running -- BOTH the Z80's

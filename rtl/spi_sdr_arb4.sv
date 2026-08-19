@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - SDRAM channel 3 arbiter, two readers and two writers
+//  SeibuSPI - SDRAM channel 3 arbiter, two readers and two writers
 //
 //  ch3 has four owners once the ROM check is done:
 //

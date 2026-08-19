@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI tile / char graphics decryption
+//  SeibuSPI - Seibu SPI tile / char graphics decryption
 //
 //  mame/src/mame/seibu/seibuspi_v.cpp:42
 //

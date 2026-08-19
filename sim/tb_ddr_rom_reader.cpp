@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - testbench for ddr_rom_reader
+//  SeibuSPI - testbench for ddr_rom_reader
 //
 //  The ioctl download has always been the one path that could not be
 //  simulated, and PLAN.md 10c is the bill for that: `ioctl_wr` was acted on

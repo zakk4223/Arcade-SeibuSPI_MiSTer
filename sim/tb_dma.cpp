@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - spi_dma against MAME's own video RAMs.
+//  SeibuSPI - spi_dma against MAME's own video RAMs.
 //
 //  Feeds the captured 386 main RAM and DMA registers into our DMA engine and
 //  compares what it produces with the tilemap / palette / sprite RAM MAME's

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - testbench for spi_rom_decode
+//  SeibuSPI - testbench for spi_rom_decode
 //
 //  Two tests, and the difference between them matters.
 //

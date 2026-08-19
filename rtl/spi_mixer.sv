@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  Layer mixer (screen_update_spi, seibuspi_v.cpp:434).
 //

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - testbench for spi_ds2404
+//  SeibuSPI - testbench for spi_ds2404
 //
 //  The DS2404 the games keep their bookkeeping in, against a transliteration of
 //  MAME's ds2404.cpp sitting beside it. Every command the RTL accepts is driven

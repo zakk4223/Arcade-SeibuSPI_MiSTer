@@ -1,4 +1,4 @@
-# SlopperPI - Seibu SPI / SXX2E for MiSTer
+# SeibuSPI - Seibu SPI / SXX2E for MiSTer
 
 QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI

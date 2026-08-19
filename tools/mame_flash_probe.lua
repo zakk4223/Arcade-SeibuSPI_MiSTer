@@ -1,5 +1,5 @@
 --============================================================================
---  SlopperPI - probe how an SPI cartridge game programs its sample flash.
+--  SeibuSPI - probe how an SPI cartridge game programs its sample flash.
 --
 --  This is the tool that produced PLAN.md section 0's rdft2 findings. Four
 --  modes, chosen with SLOP_MODE:

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - testbench for spi_nvram
+//  SeibuSPI - testbench for spi_nvram
 //
 //  Both directions of the save file, against a behavioural SDRAM and a
 //  behavioural DS2404: the LOAD writes an ioctl byte stream into the sample

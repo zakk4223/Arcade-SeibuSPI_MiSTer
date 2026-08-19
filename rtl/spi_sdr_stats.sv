@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - how busy is the SDRAM, per channel
+//  SeibuSPI - how busy is the SDRAM, per channel
 //
 //  Every existing SDRAM instrument here is a symptom counter: starved sprite
 //  lines, PCM overruns, the worst Z80 fetch wait. All of them answer "is

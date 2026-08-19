@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - the SPI cartridge's YMF271 sample flash
+//  SeibuSPI - the SPI cartridge's YMF271 sample flash
 //
 //  Two Intel E28F008SA, 1 MB each, sitting where SXX2E has a mask ROM. They ARE
 //  the YMF271's sample memory: chip 0 answers 0x000000-0x0FFFFF of the chip's

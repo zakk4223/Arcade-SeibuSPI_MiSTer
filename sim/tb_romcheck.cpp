@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - test the ROM integrity checker
+//  SeibuSPI - test the ROM integrity checker
 //
 //  spi_romcheck is going to be the thing that tells us whether the hardware's
 //  ioctl download worked, so it had better be right itself. Feeds it the real

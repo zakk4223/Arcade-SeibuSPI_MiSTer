@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - T80s stand-in for Verilator
+//  SeibuSPI - T80s stand-in for Verilator
 //
 //  The Z80 core is the VHDL T80 under rtl/t80, which Verilator cannot read.
 //  Lint and the C++ testbenches need SOMETHING with that entity's ports or the

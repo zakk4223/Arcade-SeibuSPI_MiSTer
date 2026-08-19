@@ -1,4 +1,4 @@
-# SlopperPI — Seibu SPI / SXX2E MiSTer core
+# SeibuSPI — Seibu SPI / SXX2E MiSTer core
 
 Working plan + hardware notes. This file is the resume point: if context is lost,
 read this first, then `TASKS` at the bottom.

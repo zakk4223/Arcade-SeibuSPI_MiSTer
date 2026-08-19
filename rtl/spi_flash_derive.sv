@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - build the sample-flash image the way the game's updater does
+//  SeibuSPI - build the sample-flash image the way the game's updater does
 //
 //  The SXX2C cartridge ships a BLANK sample flash and the game programs it
 //  itself at first boot, which takes about six minutes: 93% of that trace is

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - YMF271 + its sample flash, as the cartridge wires them
+//  SeibuSPI - YMF271 + its sample flash, as the cartridge wires them
 //
 //  tb_ymf271.cpp drove `ymf271` directly for everything up to the sample-flash
 //  work. That is no longer the whole chip's worth of behaviour: on the SPI

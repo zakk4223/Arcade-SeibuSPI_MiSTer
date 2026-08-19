@@ -1,5 +1,5 @@
 --
--- SlopperPI - capture a golden reference frame from MAME.
+-- SeibuSPI - capture a golden reference frame from MAME.
 --
 -- MAME exposes the SPI driver's video RAMs as named shares, which lets the
 -- pipeline be verified in two independent halves instead of one lump:

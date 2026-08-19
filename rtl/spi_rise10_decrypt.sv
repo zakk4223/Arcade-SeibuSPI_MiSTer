@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - RISE10 sprite decryption (rdft2 / rdft2us / rdft22kc)
+//  SeibuSPI - RISE10 sprite decryption (rdft2 / rdft2us / rdft22kc)
 //
 //  seibuspi_rise10_sprite_decrypt(), seibuspi_m.cpp. Operates on one 16-bit
 //  word from each of the three plane-pair chunks at a time -- 48 bits in, 48

@@ -1,4 +1,4 @@
-# Read SDRAM out of a running SlopperPI over JTAG.
+# Read SDRAM out of a running SeibuSPI over JTAG.
 #
 #   quartus_stp -t tools/jtag_peek.tcl sums
 #   quartus_stp -t tools/jtag_peek.tcl dump <addr> <count>

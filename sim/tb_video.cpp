@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - render a frame and diff it against MAME's.
+//  SeibuSPI - render a frame and diff it against MAME's.
 //
 //  Loads MAME's captured tilemap and palette RAM straight into ours, points the
 //  graphics fetch at the real (still encrypted) ROM image, renders a frame, and

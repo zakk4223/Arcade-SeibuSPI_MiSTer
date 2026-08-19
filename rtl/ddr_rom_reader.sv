@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  "Fast" ROM loading: the HPS DMAs the MRA's index-0 image straight into
 //  DDR3 and this module reads it back out as a byte stream, so `rom_loader`

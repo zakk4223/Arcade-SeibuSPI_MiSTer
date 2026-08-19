@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - verify the ROM image actually landed in SDRAM
+//  SeibuSPI - verify the ROM image actually landed in SDRAM
 //
 //  Everything in sim/ starts from a perfect SDRAM image and fakes rom_ready, so
 //  the ioctl download -- 22.3 MB pushed through rom_loader under HPS flow

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E for MiSTer
+//  SeibuSPI - Seibu SPI / SXX2E for MiSTer
 //
 //  Raiden Fighters (rdfts, SXX2E single board).
 //

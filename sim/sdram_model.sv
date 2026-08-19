@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - behavioural SDRAM chip, for simulation only
+//  SeibuSPI - behavioural SDRAM chip, for simulation only
 //
 //  Enough of a 16Mx16 SDR part to run rtl/sdram.sv against: ACTIVE / READ /
 //  WRITE / PRECHARGE / AUTO REFRESH / LOAD MODE, CAS latency 3, burst length 4,

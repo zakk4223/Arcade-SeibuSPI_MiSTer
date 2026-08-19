@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - YMF271 "OPX" register file, timers and interrupt
+//  SeibuSPI - YMF271 "OPX" register file, timers and interrupt
 //
 //  The Z80 sees sixteen bytes at 0x6000. Even offsets latch an address, odd
 //  offsets deliver the data to one of four FM register banks, the PCM bank, or

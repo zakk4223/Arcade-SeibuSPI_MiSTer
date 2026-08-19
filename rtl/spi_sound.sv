@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  Sound subsystem: Z80 + banked program ROM + the 386 command FIFO + YMF271.
 //  (sxx2e_soundmap, seibuspi.cpp:1171)

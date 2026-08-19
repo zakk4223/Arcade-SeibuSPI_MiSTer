@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu "partial carry sum"
+//  SeibuSPI - Seibu "partial carry sum"
 //
 //  The primitive under every Seibu Kaihatsu graphics encryption
 //  (mame/src/mame/seibu/seibu_helper.cpp): an adder whose carry only propagates

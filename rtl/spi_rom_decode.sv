@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - ROM download decoder
+//  SeibuSPI - ROM download decoder
 //
 //  Sits between ioctl and the SDRAM writer in rom_loader, so a part can be
 //  DECODED on the way in rather than copied. The point is rdft2: its sample

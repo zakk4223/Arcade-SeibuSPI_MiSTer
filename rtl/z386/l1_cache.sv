@@ -9,7 +9,7 @@ module l1_cache #(
     // The defaults reproduce the original hardcoded PC test
     // (cpu_addr[31:17] == 15'h5, i.e. the A0000-BFFFF VGA aperture) so
     // existing instantiations are unaffected.
-    // -- SlopperPI: parameterised so an arcade board can mark its
+    // -- SeibuSPI: parameterised so an arcade board can mark its
     //    memory-mapped I/O window uncacheable instead.
     parameter [31:0] UNCACHED_MASK = 32'hFFFE_0000,
     parameter [31:0] UNCACHED_BASE = 32'h000A_0000

@@ -1,5 +1,5 @@
 --============================================================================
---  SlopperPI - raw wave-port register writes across a window of flash.
+--  SeibuSPI - raw wave-port register writes across a window of flash.
 --
 --  The other two scripts interpret the port: they track the address register
 --  and decide what is a command and what is a datum. That interpretation is

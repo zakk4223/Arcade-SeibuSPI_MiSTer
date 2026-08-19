@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - YMF271 "OPX" synthesis engine
+//  SeibuSPI - YMF271 "OPX" synthesis engine
 //
 //  MAME's sound_stream_update / calculate_op / update_pcm / update_envelope /
 //  calculate_slot_volume (ymf271.cpp), re-expressed as one serial pass over

@@ -1,5 +1,5 @@
 --============================================================================
---  SlopperPI - log the YMF271 wave-memory port in BOTH directions.
+--  SeibuSPI - log the YMF271 wave-memory port in BOTH directions.
 --
 --  tools/mame_flash_probe.lua logs what the updater WRITES, which was enough to
 --  work out the payload. This one logs what it READS BACK as well, because the

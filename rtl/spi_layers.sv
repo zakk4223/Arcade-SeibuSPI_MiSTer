@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  Tile layer renderer: back, middle, fore (16x16, 6bpp) and text (8x8, 5bpp).
 //

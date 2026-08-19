@@ -20,7 +20,7 @@ module z386
     parameter DCACHE_SET_BITS = 8,   // dcache size: 8 = 16KB, 7 = 8KB
     parameter ICACHE_SET_BITS = 8,   // icache size: 8 = 16KB, 7 = 8KB
     // Uncacheable data window, (addr & MASK) == BASE. Defaults to the PC VGA
-    // aperture at A0000-BFFFF. -- SlopperPI
+    // aperture at A0000-BFFFF. -- SeibuSPI
     parameter [31:0] DCACHE_UNCACHED_MASK = 32'hFFFE_0000,
     parameter [31:0] DCACHE_UNCACHED_BASE = 32'h000A_0000
 )

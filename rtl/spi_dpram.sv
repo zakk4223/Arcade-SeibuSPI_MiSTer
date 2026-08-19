@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - simple dual port RAM (one write port, one read port)
+//  SeibuSPI - simple dual port RAM (one write port, one read port)
 //
 //  Separate write and read clocks: the DMA writes from the 386's domain while
 //  the video reads from clk_sys. One write port and one read port is a simple

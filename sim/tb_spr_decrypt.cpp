@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - SEI252 sprite decrypt unit vs MAME's seibuspi_sprite_decrypt()
+//  SeibuSPI - SEI252 sprite decrypt unit vs MAME's seibuspi_sprite_decrypt()
 //
 //  MAME's routine transforms a whole ROM in place, so we hand it a 3 x 2 MB
 //  buffer of random data. That is large enough for the word index i to reach

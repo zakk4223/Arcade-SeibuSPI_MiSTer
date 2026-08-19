@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - testbench for spi_rise10_decrypt
+//  SeibuSPI - testbench for spi_rise10_decrypt
 //
 //  Drives the RTL over pseudo-random 48-bit inputs and compares against MAME's
 //  own seibuspi_rise10_sprite_decrypt(), copied verbatim into spi_ref.h by

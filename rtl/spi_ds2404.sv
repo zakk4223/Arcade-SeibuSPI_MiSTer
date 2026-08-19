@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - DS2404 EconoRAM Time Chip
+//  SeibuSPI - DS2404 EconoRAM Time Chip
 //
 //  The Dallas DS2404S on the SPI mainboard and on SXX2E: a 40-bit real-time
 //  counter plus 512 bytes of battery-backed SRAM, which is where the games keep

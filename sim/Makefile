@@ -1,4 +1,4 @@
-# Verilator unit tests for SlopperPI
+# Verilator unit tests for SeibuSPI
 VERILATOR ?= verilator
 MAME      ?= $(HOME)/proj/mame
 RTL       := ../rtl

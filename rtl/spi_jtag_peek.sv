@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - read SDRAM from the host over JTAG
+//  SeibuSPI - read SDRAM from the host over JTAG
 //
 //  Two In-System Sources & Probes instances:
 //

@@ -1,5 +1,5 @@
 --
--- SlopperPI - how long does rfjet's 386 legitimately go without a sprite DMA?
+-- SeibuSPI - how long does rfjet's 386 legitimately go without a sprite DMA?
 --
 --   DISPLAY=:0 SLOP_SECS=180 mame rfjet -autoboot_script tools/mame_sprdma_gap.lua \
 --       -video none -sound none -nothrottle -skip_gameinfo

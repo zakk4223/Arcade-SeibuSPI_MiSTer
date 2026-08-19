@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - SEI252 sprite graphics decryption
+//  SeibuSPI - SEI252 sprite graphics decryption
 //
 //  mame/src/mame/seibu/seibuspi_m.cpp:115 (seibuspi_sprite_decrypt).
 //

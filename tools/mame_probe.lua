@@ -1,5 +1,5 @@
 --
--- SlopperPI - dump MAME's state whenever YOU pause it.
+-- SeibuSPI - dump MAME's state whenever YOU pause it.
 --
 --   SLOP_OUT=/tmp/mame_state mame rdfts -autoboot_script tools/mame_probe.lua
 --

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  Shared constants. Included inside module bodies rather than provided as a
 //  SystemVerilog package: Quartus 17.0 is fussy about package compile order and

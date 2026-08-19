@@ -1,5 +1,5 @@
 --
--- SlopperPI - reproduce the core's Z80 bank bug inside MAME.
+-- SeibuSPI - reproduce the core's Z80 bank bug inside MAME.
 --
 --   DISPLAY=:0 SLOP_SECS=60 mame rfjet -autoboot_script tools/mame_z80_zerotop.lua \
 --       -wavwrite /tmp/rfjet_broken.wav -video none -nothrottle -skip_gameinfo

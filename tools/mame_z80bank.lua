@@ -1,5 +1,5 @@
 --
--- SlopperPI - which Z80 ROM banks does the sound driver actually select?
+-- SeibuSPI - which Z80 ROM banks does the sound driver actually select?
 --
 --   SLOP_SECS=90 mame rfjet -autoboot_script tools/mame_z80bank.lua -video none -sound none
 --

@@ -1,5 +1,5 @@
 --============================================================================
---  SlopperPI - count what the updater issues, and when.
+--  SeibuSPI - count what the updater issues, and when.
 --
 --  The core's telemetry says it ACCEPTED 2,028,340 byte programs for rdft2 and
 --  dropped none, and the resulting flash still differs from MAME's in one byte

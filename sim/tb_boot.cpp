@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - does the 386 actually boot?
+//  SeibuSPI - does the 386 actually boot?
 //
 //  Loads the real SDRAM image (tools/build_sdram_image.py), releases reset, and
 //  runs the board for a few million CPU cycles while watching what the 386 does.

@@ -1,4 +1,4 @@
-# SlopperPI — Seibu SPI / SXX2E for MiSTer
+# SeibuSPI — Seibu SPI / SXX2E for MiSTer
 
 Six Seibu games on the **SPI cartridge** board — `rdft`, `rdft2`, `rfjet`,
 `viprp1`, `senkyu` and `ejanhs` — and on the **SXX2E** single board they share

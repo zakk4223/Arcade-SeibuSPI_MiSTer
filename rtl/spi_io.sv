@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - Seibu SPI / SXX2E
+//  SeibuSPI - Seibu SPI / SXX2E
 //
 //  Memory-mapped I/O at 0x400-0x7FF, overlaying main RAM.
 //  (sxx2e_map / base_map, seibuspi.cpp:1004,1077; seibu_crtc.cpp)

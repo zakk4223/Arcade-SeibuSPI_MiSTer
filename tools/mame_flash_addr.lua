@@ -1,5 +1,5 @@
 --============================================================================
---  SlopperPI - log every wave-port access that touches ONE flash address.
+--  SeibuSPI - log every wave-port access that touches ONE flash address.
 --
 --  tools/mame_flash_port.lua logs the whole handshake, which is the right tool
 --  when the question is "what is the command sequence". This one exists for a

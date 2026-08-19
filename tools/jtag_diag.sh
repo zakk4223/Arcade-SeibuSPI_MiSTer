@@ -1,5 +1,5 @@
 #!/bin/sh
-# One-shot SDRAM diagnosis over JTAG against a running SlopperPI.
+# One-shot SDRAM diagnosis over JTAG against a running SeibuSPI.
 #
 #   tools/jtag_diag.sh <reference sdram.bin>
 #

@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - the 386's view of MAME's `sound01` region
+//  SeibuSPI - the 386's view of MAME's `sound01` region
 //
 //  MAME gives the SXX2C cartridge a 10 MB `sound01` region mapped at 386
 //  address 0x00A0_0000, holding two ROMs that the loader stores PACKED in SDRAM

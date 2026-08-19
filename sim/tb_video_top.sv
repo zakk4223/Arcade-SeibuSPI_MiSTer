@@ -1,5 +1,5 @@
 //============================================================================
-//  SlopperPI - test wrapper around the video pipeline.
+//  SeibuSPI - test wrapper around the video pipeline.
 //
 //  Video timing + tilemap RAM + palette RAM + layer renderer + mixer, with
 //  preload ports so a testbench can drop in MAME's captured video RAMs and

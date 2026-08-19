@@ -1,5 +1,5 @@
 --
--- SlopperPI - check the Z80 sound map the core implements against MAME's.
+-- SeibuSPI - check the Z80 sound map the core implements against MAME's.
 --
 --   DISPLAY=:0 SLOP_SECS=45 mame rfjet -autoboot_script tools/mame_z80map.lua \
 --       -video none -sound none -nothrottle -skip_gameinfo

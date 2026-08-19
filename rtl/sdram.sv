@@ -19,7 +19,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // ---------------------------------------------------------------------------
-// SlopperPI notes
+// SeibuSPI notes
 //
 // Vendored from Arcade-IGSPGM_MiSTer (5-channel variant). Local changes:
 //   - refresh constants retuned for the 114.545455 MHz clk_ram used here.
