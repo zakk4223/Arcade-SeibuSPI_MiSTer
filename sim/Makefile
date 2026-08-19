@@ -252,7 +252,7 @@ obj_dir/Vspi_spr_decrypt: $(RTL)/spi_spr_decrypt.sv $(RTL)/seibu_partial_add.sv 
 # z386_pkg.sv must come first: it declares the types the rest reference.
 Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv \
              $(RTL)/z386/l1_icache.sv $(RTL)/z386/alu.sv $(RTL)/z386/alu_alt.sv \
-             $(RTL)/z386/decoder.sv $(RTL)/z386/dsp_mul.sv \
+             $(RTL)/z386/biu.sv $(RTL)/z386/decoder.sv $(RTL)/z386/dsp_mul.sv \
              $(RTL)/z386/paging_tlb.sv $(RTL)/z386/paging_unit.sv \
              $(RTL)/z386/paging_walker.sv $(RTL)/z386/prefetch.sv \
              $(RTL)/z386/protection.sv $(RTL)/z386/segmentation_unit.sv \

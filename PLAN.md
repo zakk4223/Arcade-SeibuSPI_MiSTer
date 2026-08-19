@@ -9136,16 +9136,32 @@ top module, and RESUME records that as the working offline replacement for the
 boot-time checker. "Not instantiated" and "not referenced" are different
 questions, and a first pass that only asked the first one had it down for deletion.
 
-**`rtl/z386/biu.sv`** was the surprise: 63 lines, "Bus Interface Unit -
-Combinational Pass-Through", listed in `files.qip`, in the `.qsf` AND in
-sim/Makefile's source list for four targets -- and instantiated by nothing at all.
-The z386 port's bus logic lives elsewhere and this file is vestigial. It is part of
-a vendored core, so an upstream re-sync would bring it back; that is a reason to
-remember it was removed, not a reason to keep parsing it.
+**`rtl/z386/biu.sv` was the surprise, and it is RESTORED.** 63 lines, "Bus
+Interface Unit - Combinational Pass-Through", listed in `files.qip`, in the `.qsf`
+AND in sim/Makefile's source list for four targets -- and instantiated by nothing
+at all. The z386 port's bus logic lives elsewhere, so the file is vestigial.
 
-Removing files means removing their list entries too, or the next compile fails on
-a file that is not there: four from `files.qip`, one from `SeibuSPI.qsf`, one from
-sim/Makefile's z386 list.
+It went, and then came back: it is part of a VENDORED core, and vendored things
+are kept whole. An unused file there is not this project's clutter to tidy --
+deleting it buys a little parse time and pays for it with a divergence that every
+future upstream sync has to re-litigate. It is the one file of the four that was
+genuinely in the synthesis list, and it is the one that stays.
+
+**Correction to the above, found while restoring `biu.sv`.** The three
+instrumentation files were never build entries at all -- `files.qip` mentioned them
+only in a COMMENT explaining their deliberate absence, and the grep that said
+"listed for synthesis" was matching that comment. So the earlier claim here, that
+four entries came out of `files.qip`, was wrong: **one** did, `biu.sv`, and it was
+the only one of the four that Quartus had been parsing. Deleting the other three
+cost the build nothing because the build never had them; it removed tree clutter
+and no more. The line-based edit also left two orphaned lines of that comment
+behind, now rewritten to say what is actually true.
+
+So the real list-entry changes are: `biu.sv` out of `files.qip`, out of
+`SeibuSPI.qsf` and out of sim/Makefile's z386 list -- and then back into all three,
+because a vendored core is kept intact whether or not this project instantiates
+every file in it. The one thing an unused vendored file costs is parse time, and
+that is a worse trade than diverging from upstream.
 
 Checked by building rather than by reading: `make map` succeeds with 0 errors and
 31,035 registers against 31,034 before, which is unchanged within noise -- exactly
