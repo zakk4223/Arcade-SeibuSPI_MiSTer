@@ -9065,3 +9065,53 @@ change.
 
 A reset always resumes. Coming up paused would be indistinguishable from a dead
 core, and the OSD's own Reset is in `wire reset` too.
+
+## 34. The seed sweep, and how marginal this design actually is (2026-08-18)
+
+33's fit passed at clk_ram +0.101, the thinnest margin recorded at that endpoint,
+so the seed was re-rolled. Five seeds on one unchanged tree:
+
+    seed  clk_ram   ascal    hold     crit  verdict
+      1    +0.101   +0.470   +0.239    0    passes, thin
+      2    -0.053   +0.159   -0.223    1    FAILS, setup and hold
+      3    +0.187   +0.614   +0.161    0    PASSES -- chosen
+      5    -0.083   -0.072   +0.244    1    FAILS, both domains
+      6    -0.024   +0.067   -0.185    1    FAILS, hold
+
+**Two of five pass.** That number is the useful output of this exercise, more than
+the winning slack is. 29.3 recorded three fits with one passing and called the
+design "no longer balanced on a knife edge the way 28.5 described"; five fits
+later, at 40%, that reads as optimistic. The convergence point in sdram.sv is
+routing-limited (28.5) and the fitter's placement of it is what decides a build.
+
+Worth noting which way the failures went, because it is not all one path:
+
+* seed 2 and seed 6 failed on **HOLD** on clk_ram, -0.223 and -0.185. Hold is the
+  worse half: a setup failure is a speed limit, a hold failure is broken at any
+  speed, and no amount of downclocking fixes it.
+* seed 5 failed on clk_ram AND on `ascal`, the framework scaler on the HDMI clock
+  that nothing in this core is on. 29.3's point that a fit has to close two
+  knife-edge paths in two domains at once still stands, and seed 5 is the case
+  where neither closed.
+* every failing seed also produced a **critical warning**, and every passing one
+  produced none. Cheap tell, worth checking first.
+
+**And every one of them wrote an RBF.** `make build` runs the assembler whatever
+the timing verdict says, so `output_files/SeibuSPI.rbf` after seed 2 was a failing
+bitstream that looked exactly like a good one on disk. That is the trap this file
+and the memory note both record, met again five times in an afternoon. The sweep
+script captured the slack table per seed rather than trusting an exit code, and
+kept each RBF separately so the winner needed no guessing.
+
+Seed 3 was then recompiled from scratch rather than having its saved RBF dropped
+back into place, so the bitstream, the fit report and the timing report in
+`output_files/` all come from one run. The second run reproduced the first to the
+byte -- same slacks and an identical RBF md5, `d801fb4c` -- so a fit IS
+deterministic for a given seed and tree, which is worth having established: it
+means a seed is a property of the design and not a lottery ticket that has to be
+re-drawn, and a recorded number can be trusted to come back.
+
+    clk_ram  +0.187   clk_cpu  +1.647   clk_sys  +2.169   pll_hdmi +0.614
+    hold     +0.161   TNS 0.000 everywhere, 0 critical warnings
+
+That is 33's +0.101 nearly doubled, and both marginal domains improved at once.

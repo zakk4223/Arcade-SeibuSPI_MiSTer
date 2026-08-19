@@ -97,15 +97,19 @@ a command takes its own cycle now, and the 386 cannot tell.
 Both of the first two versions simulate identically -- the bench waits for the
 ack, as the 386 does -- so nothing but a fit was ever going to find either.
 
-    setup worst  +0.230   sdram|ch4_rq -> sdram|SDRAM_A[8]
-    clk_ram      +0.230   clk_cpu  +1.915   clk_sys  +1.851   pll_hdmi +0.428
-    hold worst   +0.205   TNS 0.000 everywhere, 0 critical warnings
+    clk_ram  +0.187   clk_cpu  +1.647   clk_sys  +2.169   pll_hdmi +0.614
+    hold     +0.161   TNS 0.000 everywhere, 0 critical warnings   SEED 3
 
-That is the fit WITH section 32's Cart copy rework in it (31.8 read +0.340 before
-it, on the same convergence point with a different signal named). Nothing of the
-DS2404's or the nvram's appears in the worst 25; the endpoint is sdram.sv's, and
-which of its request flags is "the" worst there has now been three different ones
-in three fits -- 28.5's routing limit, not a path getting worse.
+**SEED 3, and the seed matters more than 29.3 thought.** Five of them on one
+unchanged tree and only TWO PASS (`PLAN.md` 34): seed 1 +0.101, seed 3 +0.187, and
+2, 5 and 6 all failing -- two of those on HOLD, which is the half no downclocking
+fixes. Every failing seed also threw exactly one critical warning and every passing
+one threw none, which is the cheapest tell to check first. And every one of them
+wrote an RBF regardless, so `make timing` is not optional.
+
+A fit IS deterministic though: recompiling seed 3 reproduced it to the byte, same
+slacks and an identical RBF md5. So the seed is a property of the design rather
+than a ticket to re-draw.
 
 ## The release blocker, and what moved it
 
