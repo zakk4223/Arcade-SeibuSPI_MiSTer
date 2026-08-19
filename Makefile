@@ -4,7 +4,7 @@ QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
 .PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 \
-        check-derive check-tb mras check-clones verify
+        check-derive check-tb check-timing mras check-clones release verify
 
 all: build
 
@@ -97,6 +97,29 @@ mras:
 #   make check-clones ROMS=~/Downloads/roms
 check-clones:
 	@python3 tools/gen_mras.py --verify "$(ROMS)"
+
+# Did the last fit MEET timing? `make build` runs the assembler whatever the
+# analyser says, so output_files/SeibuSPI.rbf exists and looks ordinary after a fit
+# that failed -- PLAN.md 34 measured three of five seeds failing and every one of
+# them writing a bitstream anyway. Any negative slack on any clock, or a single
+# critical warning, and this says no.
+check-timing:
+	@python3 tools/check_timing.py
+
+# Assemble releases/ -- the layout MiSTer's distribution system expects: parent
+# MRAs at the top with the RBF, clones under _alternatives/_<parent>/. It is a
+# BUILD PRODUCT and gitignored; mra/ is the source. Gated on check-timing, because
+# a distribution directory is the last place a failing bitstream should reach.
+#   make release
+release: check-timing check-mra
+	@test -f output_files/$(PROJECT).rbf || { echo "no $(PROJECT).rbf -- run make first"; exit 1; }
+	@rm -f  releases/*.mra
+	@rm -rf releases/_alternatives
+	@mkdir -p releases
+	@cp output_files/$(PROJECT).rbf releases/
+	@cp mra/*.mra releases/
+	@cp -r mra/_alternatives releases/
+	@echo "releases/: $$(ls releases/*.mra | wc -l) parent MRAs, $$(find releases/_alternatives -name '*.mra' | wc -l) under _alternatives, $(PROJECT).rbf $$(md5sum releases/$(PROJECT).rbf | cut -c1-8)"
 
 # Everything that can be checked without a Quartus run or a MiSTer.
 verify: lint check-mra check-tb test

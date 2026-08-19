@@ -49,9 +49,28 @@ The music itself matches; this is fidelity. `PLAN.md` T-K.
 
 ## Installing
 
-1. Build `SeibuSPI.rbf` (see below) and put it in `/media/fat/_Arcade/cores/`.
-2. Put the MRA you want from `mra/` in `/media/fat/_Arcade/`.
-3. Put its zip in `/media/fat/games/mame/`.
+`make release` assembles everything into `releases/`, in the layout MiSTer's
+distribution system expects — parent MRAs and the RBF at the top, clones under
+`_alternatives/_<parent>/`:
+
+    releases/
+      SeibuSPI.rbf
+      Raiden Fighters (Germany).mra          ...and the five other parents
+      _alternatives/_Raiden Fighters (Germany)/Raiden Fighters (Japan, earlier).mra
+      ...43 clones in all
+
+It is a **build product** and gitignored; `mra/` is the source it comes from, and
+the target rebuilds `releases/` from scratch each time so a renamed or reclassified
+MRA cannot linger. It refuses to run unless the last fit met timing — `make build`
+writes an RBF whatever the analyser says (`PLAN.md` 34), and a distribution
+directory is the last place that should reach.
+
+By hand, or onto a machine already set up:
+
+1. `SeibuSPI.rbf` goes in `/media/fat/_Arcade/cores/`.
+2. The MRA you want goes in `/media/fat/_Arcade/`, keeping `_alternatives/` if you
+   want the clones.
+3. Its zip goes in `/media/fat/games/mame/`.
 
 **49 MRAs, six games.** `mra/` holds one file per MAME PARENT set, named the way
 MiSTer names them -- the game's descriptive name, not the set name -- and every

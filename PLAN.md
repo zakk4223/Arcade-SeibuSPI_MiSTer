@@ -9167,3 +9167,45 @@ Checked by building rather than by reading: `make map` succeeds with 0 errors an
 31,035 registers against 31,034 before, which is unchanged within noise -- exactly
 what four modules nothing instantiated should cost. `make lint`, `lint-top` and
 `check-tb` all clean.
+
+## 36. `make release`, and a guard that had to be tested to be worth having
+
+`releases/` is what MiSTer's distribution system reads: parent MRAs and the RBF at
+the top level, clones under `_alternatives/_<parent>/`. It is a BUILD PRODUCT --
+gitignored, assembled from `mra/` -- and `make release` is that assembly.
+
+It rebuilds the directory rather than adding to it, which is not fussiness: the
+copy sitting there was from 9 August and had `rdfts.mra` at the TOP level, where
+the distribution system would have read it as a parent. rdfts became a clone when
+the MRAs were renamed (30), so that file was not merely stale but in the wrong
+category. Anything that only ever copies over the top would have left it there.
+
+    releases/: 6 parent MRAs, 43 under _alternatives, SeibuSPI.rbf d801fb4c
+
+### 36.1 The release gate, and the bug in it
+
+`make build` runs the assembler whatever the Timing Analyzer says. 34 measured
+what that means -- three of five seeds failed and every one still wrote a
+bitstream -- so `release` depends on `check-timing`, which reads the report rather
+than an exit code and refuses on any negative slack on any clock, or any critical
+warning, or a missing report.
+
+**The first version of it passed everything, including a report doctored to fail.**
+Its table parser used `((?:;.*\n)+)` after the summary's opening rule, which stops
+at the SECOND rule -- the one under the column headings -- so it captured the
+heading row and no data. Every table read as empty, no negative slack was found
+anywhere, and it reported success on a report it had not looked at. The tell was
+there in the passing output: it printed no per-table "worst" line, because it had
+no rows.
+
+It walks the table line by line now, and it is checked both ways -- against the
+real report, which passes, and against one with a slack sign flipped, which fails
+with the clock named. A guard that cannot fail is worse than no guard, and this one
+would have waved through exactly the builds it exists to stop.
+
+That is the fourth time in two days that something of mine passed for the wrong
+reason: the RTC test comparing against its own expectation (31.5), the payload
+synchroniser whose two-flop and one-flop versions simulate identically (31.7), the
+`start_blank` test that reset the DUT into a state hardware never reaches (32.8),
+and now this. The pattern is the same each time -- the check was never made to
+fail on purpose.
