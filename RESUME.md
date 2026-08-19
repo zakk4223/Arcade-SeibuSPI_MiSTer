@@ -113,8 +113,10 @@ than a ticket to re-draw.
 
 ## The release blocker, and what moved it
 
-**The instrumentation is out of the net** (`PLAN.md` 29). `spi_debug`,
-`spi_jtag_peek`, `spi_romcheck` and `spi_sdr_stats` are no longer instantiated,
+**The instrumentation is out of the net** (`PLAN.md` 29), and three of the four
+modules are out of the TREE as well (`PLAN.md` 35): `spi_debug`, `spi_jtag_peek`
+and `spi_sdr_stats` are deleted, recoverable from git at `02fcac4~1`.
+`spi_romcheck` survives because `run-romcheck` still uses it. None is instantiated,
 and every per-module watch that fed them is disconnected at its instantiation.
 The modules are all still in `rtl/`; nothing of theirs reaches the fabric.
 
@@ -175,7 +177,9 @@ described -- but a fit is still worth CHECKING rather than assuming.
   works. Its guard note (21.5) is moot until something instantiates it again.
 * **The JTAG tools have nothing to talk to.** `tools/jtag_peek.tcl`,
   `jtag_server.tcl` and `jtag_diag.sh` are all still there, and all now find no
-  instances. Putting one back means re-instantiating `spi_jtag_peek`, wiring
+  instances, and the module they talked to is deleted now (`PLAN.md` 35) rather
+  than merely unwired. Putting one back starts with
+  `git show 02fcac4:rtl/spi_jtag_peek.sv`, then re-instantiating it, wiring
   whichever watch it is to read, and adding the file to `files.qip` -- and
   expecting the timing to move when you do.
 * **`DEFMRA` is `Raiden Fighters (Germany).mra` now**, since the naming rule put

@@ -299,7 +299,8 @@ build.** The probes it talks to, the ROM checksum walker, the SDRAM bus meter
 and the on-screen panel were all instrumentation, and they are out of the
 synthesised net so a release does not carry them (PLAN.md 29). `rtl/` still has
 every module and `tools/` still has the Tcl; putting them back means
-re-instantiating `spi_jtag_peek` (plus whichever watch it is to read) and
+recovering `spi_jtag_peek.sv` from git (`PLAN.md` 35), re-instantiating it
+(plus whichever watch it is to read) and
 re-adding the file to `files.qip`. Expect the timing endpoint in `sdram.sv` to
 move when you do -- that is most of what these cost.
 

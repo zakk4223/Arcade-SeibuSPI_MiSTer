@@ -26,9 +26,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_soundflash.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_nvram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ds2404.sv
 
-# NOT BUILT, deliberately. rtl/spi_debug.sv (the vital signs panel),
-# rtl/spi_jtag_peek.sv (the ISSP probes), rtl/spi_romcheck.sv (the checksum
-# walker) and rtl/spi_sdr_stats.sv (the bus meter) are instrumentation. They
 # stay in the tree for the next investigation; nothing instantiates them, so
 # nothing of theirs reaches the fabric. PLAN.md 29.
 
@@ -52,7 +49,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/l1_cache.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/l1_icache.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/alu.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/alu_alt.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/biu.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/decoder.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/dsp_mul.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/z386/paging_tlb.sv

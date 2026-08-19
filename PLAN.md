@@ -9115,3 +9115,39 @@ re-drawn, and a recorded number can be trusted to come back.
     hold     +0.161   TNS 0.000 everywhere, 0 critical warnings
 
 That is 33's +0.101 nearly doubled, and both marginal domains improved at once.
+
+## 35. The instrumentation leaves the tree (2026-08-19)
+
+29 took the instrumentation out of the NET and deliberately left the sources in
+`rtl/`, on the grounds that "the source stays where the next investigation will
+look for it". That is reversed: three of the four are deleted.
+
+    rtl/spi_debug.sv        the vital signs panel
+    rtl/spi_jtag_peek.sv    the ISSP probes
+    rtl/spi_sdr_stats.sv    the per-channel bus meter
+    rtl/z386/biu.sv         and this, which is a different story -- see below
+
+`git show 02fcac4:rtl/spi_jtag_peek.sv` is how any of them comes back, and 29
+remains the description of what they were for.
+
+**`spi_romcheck.sv` STAYS**, and the reason is the point of doing this carefully:
+it is not instantiated either, but `make -C sim run-romcheck` builds it as its own
+top module, and RESUME records that as the working offline replacement for the
+boot-time checker. "Not instantiated" and "not referenced" are different
+questions, and a first pass that only asked the first one had it down for deletion.
+
+**`rtl/z386/biu.sv`** was the surprise: 63 lines, "Bus Interface Unit -
+Combinational Pass-Through", listed in `files.qip`, in the `.qsf` AND in
+sim/Makefile's source list for four targets -- and instantiated by nothing at all.
+The z386 port's bus logic lives elsewhere and this file is vestigial. It is part of
+a vendored core, so an upstream re-sync would bring it back; that is a reason to
+remember it was removed, not a reason to keep parsing it.
+
+Removing files means removing their list entries too, or the next compile fails on
+a file that is not there: four from `files.qip`, one from `SeibuSPI.qsf`, one from
+sim/Makefile's z386 list.
+
+Checked by building rather than by reading: `make map` succeeds with 0 errors and
+31,035 registers against 31,034 before, which is unchanged within noise -- exactly
+what four modules nothing instantiated should cost. `make lint`, `lint-top` and
+`check-tb` all clean.
