@@ -11,6 +11,12 @@ hc_output/
 *.sof
 *.pof
 *.rbf
+# ...EXCEPT the released one. releases/ is CHECKED IN on purpose: MiSTer's
+# distribution system reads the parent MRAs, _alternatives/ and the RBF out of the
+# repo to copy into the master distribution, so it is a deliverable and not a build
+# product. `make release` refreshes it; the result has to be committed. Do not add
+# releases/ back to this file.
+!releases/*.rbf
 *.jdi
 *.pin
 *.done
@@ -24,7 +30,6 @@ compile*.log
 sim/*.ppm
 sim/*.png
 tools/__pycache__/
-releases/
 *.114
 
 # Generated from MAME by tools/gen_ref_c.py; the Makefile rebuilds it.

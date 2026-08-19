@@ -59,11 +59,16 @@ distribution system expects — parent MRAs and the RBF at the top, clones under
       _alternatives/_Raiden Fighters (Germany)/Raiden Fighters (Japan, earlier).mra
       ...43 clones in all
 
-It is a **build product** and gitignored; `mra/` is the source it comes from, and
-the target rebuilds `releases/` from scratch each time so a renamed or reclassified
-MRA cannot linger. It refuses to run unless the last fit met timing — `make build`
-writes an RBF whatever the analyser says (`PLAN.md` 34), and a distribution
-directory is the last place that should reach.
+**`releases/` is checked in**, deliberately: MiSTer's distribution system reads the
+parent MRAs, `_alternatives/` and the RBF out of the repo to copy into the master
+distribution. So it is a deliverable, not a build product — after `make release`,
+**commit what it changed**. `mra/` remains the source the MRAs are generated and
+maintained in.
+
+The target rebuilds `releases/` from scratch each time, so a renamed or
+reclassified MRA cannot linger, and it refuses to run unless the last fit met
+timing — `make build` writes an RBF whatever the analyser says (`PLAN.md` 34), and a
+distribution the world pulls from is the last place that should reach.
 
 By hand, or onto a machine already set up:
 
