@@ -81,6 +81,8 @@ module tb_ymf_top
 
 	ymf271 ymf
 	(
+		// The savestate's board-wide pause. Nothing here ever asserts it.
+		.pause    (1'b0),
 		.clk      (clk),
 		.reset    (reset),
 		.stereo   (stereo),

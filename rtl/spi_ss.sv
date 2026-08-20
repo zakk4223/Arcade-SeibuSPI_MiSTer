@@ -162,6 +162,7 @@ module spi_ss
 
 	reg [3:0] st;
 	reg       is_load;
+	reg [1:0] inval_ph;
 
 	assign busy    = (st != S_IDLE);
 	// The port is ours from the moment the machine is frozen until it is let go.
@@ -182,6 +183,7 @@ module spi_ss
 			cpu_restore_req <= 1'b0;
 			cpu_hold_rel    <= 1'b0;
 			inval_set       <= 8'd0;
+			inval_ph        <= 2'd0;
 			is_load         <= 1'b0;
 			capture_esp     <= 1'b0;
 		end
@@ -216,6 +218,7 @@ module spi_ss
 
 			S_STREAMING: if (!stream_busy && !stream_read && !stream_write) begin
 				inval_set <= 8'd0;
+				inval_ph  <= 2'd0;
 				st        <= is_load ? S_INVAL : S_RELEASE;
 			end
 
@@ -223,10 +226,22 @@ module spi_ss
 			// snoop pulse retires a whole set and there are 256 of them; the
 			// data cache is write-through and the TLB is a cache of page tables
 			// with paging off, so nothing is lost by invalidating the lot.
+			//
+			// FOUR CYCLES A SET, not one. This module is clk_sys and the snoop
+			// port is sampled on clk_cpu, which is half the rate -- so a pulse
+			// one clk_sys cycle wide is missed about half the time, and the
+			// sets that get missed keep their stale lines. That is not a
+			// theoretical hazard: it is what made a restore return the CPU to a
+			// wrong EIP at four save points out of five, while the fifth
+			// happened to have nothing stale in the lines that mattered and
+			// looked like proof the whole thing worked.
 			S_INVAL: begin
 				inval <= 1'b1;
-				if (inval_set == 8'd255) st <= S_RELEASE;
-				else inval_set <= inval_set + 8'd1;
+				inval_ph <= inval_ph + 2'd1;
+				if (inval_ph == 2'd3) begin
+					if (inval_set == 8'd255) st <= S_RELEASE;
+					else inval_set <= inval_set + 8'd1;
+				end
 			end
 
 			S_RELEASE: begin

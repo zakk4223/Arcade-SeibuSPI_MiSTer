@@ -104,6 +104,8 @@ module tb_video_top
 
 	spi_video_timing timing
 	(
+		// The savestate's board-wide pause. Nothing here ever asserts it.
+		.pause      (1'b0),
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
 		.hcnt(hcnt), .vcnt(vcnt),
 		.hsync(hsync), .vsync(vsync), .hblank(hblank), .vblank(vblank),

@@ -17,6 +17,12 @@ module spi_video_timing
 (
 	input             clk,        // clk_sys, 57.272727 MHz
 	input             reset,
+	// Stop the raster dead. Everything downstream -- the tile and sprite
+	// engines, the mixer, and the vblank interrupt the 386 runs on -- is driven
+	// from the counters below, so gating them here freezes the whole video side
+	// without any of those modules needing to know. A savestate holds this for
+	// the length of its transfer; nothing else uses it.
+	input             pause,
 
 	output reg        ce_pix,     // 7.1590909 MHz pixel enable
 
@@ -49,6 +55,14 @@ module spi_video_timing
 			ce_pix     <= 1'b0;
 			hcnt       <= 10'd0;
 			vcnt       <= 10'd0;
+			line_start <= 1'b0;
+			vbl_rise   <= 1'b0;
+		end
+		else if (pause) begin
+			// Not just the counters: the three pulses have to go too, or a
+			// line_start latched on the way in would fire the moment the rest
+			// of the board is let go.
+			ce_pix     <= 1'b0;
 			line_start <= 1'b0;
 			vbl_rise   <= 1'b0;
 		end

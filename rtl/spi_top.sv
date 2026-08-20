@@ -162,6 +162,7 @@ module spi_top
 	(
 		.clk        (clk_sys),
 		.reset      (sys_reset),
+		.pause      (ss_pause),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
@@ -525,6 +526,7 @@ module spi_top
 
 	spi_sound sound
 	(
+		.pause      (ss_pause),
 		.set_sxx2c  (set_sxx2c),
 		.jumpers    (jumpers),
 		.fifo2_q    (fifo2_q),
@@ -615,6 +617,25 @@ module spi_top
 	wire        ss_cpu_save, ss_cpu_restore, ss_cpu_hold_rel;
 	wire [31:0] ss_esp_scratch;
 	wire        ss_dma_busy;
+
+	// THE BOARD-WIDE PAUSE, and it is what makes a save state correct rather
+	// than merely possible.
+	//
+	// Freezing only the 386 -- which is all `freeze` does, and all the first
+	// version of this did -- is not enough. A transfer takes about 14 ms, and
+	// in that time the raster, the sound board and the vblank interrupt all run
+	// on, so the 386 comes back into a machine that has moved without it.
+	// Measured: a save taken while rdfts drives its display loop left the run
+	// with 1,567 I/O writes against a baseline 1,569 and a different main RAM
+	// hash, while the same save taken at a quiet point in boot was
+	// bit-identical. No vblank was lost in the window -- it is the raster phase,
+	// not the interrupt count.
+	//
+	// This is deliberately NOT wired to `freeze`. That is the Pause button, and
+	// STATUS.md documents its behaviour as stopping the 386 alone so a frozen
+	// frame stays on screen to be studied -- which is the opposite of what a
+	// save state wants and a useful thing to keep.
+	wire        ss_pause = ss_busy;
 	assign ss_dbg_esp_scratch = ss_esp_scratch;
 	wire        ss_ram_own, ss_ram_we;
 	wire [15:0] ss_ram_addr;

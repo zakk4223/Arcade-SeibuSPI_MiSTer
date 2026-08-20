@@ -351,3 +351,12 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rise10_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rise11_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddr_rom_reader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ds2404.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/system_consts.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestates.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory_stream.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ss_ram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestate_ui.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_bridge.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_vram.sv

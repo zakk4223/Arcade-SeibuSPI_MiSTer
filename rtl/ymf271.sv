@@ -26,6 +26,9 @@ module ymf271
 (
 	input             clk,
 	input             reset,
+	// Hold the 44.1 kHz tick, and with it every voice, envelope and timer in
+	// the chip: nothing in here advances except on a tick.
+	input             pause,
 	input             stereo,      // cartridge board: out 0 left, out 1 right
 
 	// ---- Z80 bus, 0x6000-0x600F ------------------------------------------
@@ -87,6 +90,9 @@ module ymf271
 	always @(posedge clk) begin
 		if (reset) begin
 			tick_acc    <= 27'd0;
+			sample_tick <= 1'b0;
+		end
+		else if (pause) begin
 			sample_tick <= 1'b0;
 		end
 		else if (tick_next >= {1'b0, CLK_HZ}) begin

@@ -263,7 +263,7 @@ int main(int argc, char **argv)
     uint32_t ss_marker = 0;
     uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
     uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
-    uint64_t ss_snap_vbl = 0;
+    uint64_t ss_snap_vbl = 0, ss_busy_start = 0, ss_hash_anchor = 0;
 
     for (uint64_t t = 0; t < max_steps; t++) {
         // clk_ram toggles every step; clk_sys every 2; clk_cpu every 4
@@ -488,7 +488,12 @@ int main(int argc, char **argv)
             }
 
             // busy falls when the whole operation is over.
+            if (!ss_busy_d && dut->p_ss_busy) ss_busy_start = cyc;
             if (ss_busy_d && !dut->p_ss_busy) {
+                printf("  SS: the board was paused for %llu cycles = %llu "
+                       "model steps\n",
+                       (unsigned long long)(cyc - ss_busy_start),
+                       (unsigned long long)((cyc - ss_busy_start) * 4));
                 if (!ss_done) {
                     ss_done = true;
                     printf("  SS: the CPU was frozen for %llu cycles "
@@ -564,8 +569,37 @@ int main(int argc, char **argv)
                              ? "<- EXACT" : "<- MISMATCH");
                 }
                 ss_snap_cyc = 0;
+                // The anchor for the determinism hash: the last moment the
+                // savestate let go. Unambiguous, and present in both a
+                // save-only run and a save-then-load one, which is what makes
+                // the two comparable at all.
+                if (ss_hash_after && !(ss_restore_at && !rs_done))
+                    ss_hash_anchor = cyc;
             }
             ss_busy_d = dut->p_ss_busy;
+
+            // The determinism hash, taken a fixed number of cycles after the
+            // savestate let go. Run it once with a save alone and once with a
+            // save and then a load: if the restore is faithful the two must be
+            // identical, because the CPU's evolution is a function of its
+            // registers and main RAM and nothing else.
+            if (ss_hash_anchor && !ss_hashed
+                && cyc >= ss_hash_anchor + ss_hash_after) {
+                ss_hashed = true;
+                uint64_t hh = 1469598103934665603ULL;
+                for (uint32_t i = 0; i < 65536; i++) {
+                    dut->peek_addr = (uint16_t)i;
+                    dut->eval();
+                    uint32_t v = dut->peek_data;
+                    for (int b = 0; b < 4; b++) {
+                        hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
+                    }
+                }
+                printf("  SS: RAM hash %llu cycles after the operation "
+                       "finished: %016llX\n",
+                       (unsigned long long)ss_hash_after,
+                       (unsigned long long)hh);
+            }
 
             // The determinism probe, as in phase 0: measured from the first
             // cycle after the operation finishes at which the CPU is executing
@@ -854,6 +888,21 @@ int main(int argc, char **argv)
             }
         }
         printf("main RAM hash          : %016llX\n", (unsigned long long)h);
+    }
+    // A dump, so two runs can be diffed dword by dword rather than compared
+    // through a hash that says only "different".
+    if (const char *dp = getenv("SS_DUMP")) {
+        FILE *f = fopen(dp, "wb");
+        if (f) {
+            for (uint32_t i = 0; i < 65536; i++) {
+                dut->peek_addr = (uint16_t)i;
+                dut->eval();
+                uint32_t v = dut->peek_data;
+                fwrite(&v, 4, 1, f);
+            }
+            fclose(f);
+            printf("wrote main RAM to      : %s\n", dp);
+        }
     }
     printf("EIP transitions        : %llu   (a stuck CPU shows very few)\n",
            (unsigned long long)eip_changes);

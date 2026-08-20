@@ -29,7 +29,10 @@
 
 module spi_sound
 (
-	input             clk,          // clk_sys, 57.272727 MHz
+	input             clk,
+	// Freeze the sound board: the Z80's clock enable and the YMF271's sample
+	// tick. See rtl/spi_video_timing.sv for why a savestate needs this.
+	input             pause,          // clk_sys, 57.272727 MHz
 	input             reset,
 
 	// ---- 386 side. These cross from clk_cpu; see the CDC note below. -------
@@ -145,7 +148,9 @@ module spi_sound
 	// ------------------------------------------------------------------
 	reg [2:0] ce_div;
 	always @(posedge clk) ce_div <= reset ? 3'd0 : ce_div + 3'd1;
-	wire ce_z80 = (ce_div == 3'd7);
+	// `pause` stops the sound board with the rest of it. The divider keeps
+	// running so the Z80 comes back on its own phase rather than a new one.
+	wire ce_z80 = (ce_div == 3'd7) && !pause;
 
 	// ------------------------------------------------------------------
 	// Z80
@@ -544,6 +549,7 @@ module spi_sound
 	(
 		.clk      (clk),
 		.reset    (reset),
+		.pause    (pause),
 		// The board, not the set: the single-board PCB sums the chip's four
 		// outputs to one speaker, the cartridge splits 0 and 1 left/right.
 		// That is exactly the mod byte's bit 0, which is already here.
