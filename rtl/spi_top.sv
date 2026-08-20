@@ -539,6 +539,11 @@ module spi_top
 	spi_sound sound
 	(
 		.pause      (ss_pause),
+		.ssbus_z80    (ssb[SSIDX_Z80]),
+		.ssbus_z80ram (ssb[SSIDX_Z80_RAM]),
+		.ssbus_fifo   (ssb[SSIDX_SND_FIFO]),
+		.ssbus_fifo2  (ssb[SSIDX_SND_FIFO2]),
+		.ssbus_regs   (ssb[SSIDX_SND_REGS]),
 		.set_sxx2c  (set_sxx2c),
 		.jumpers    (jumpers),
 		.fifo2_q    (fifo2_q),

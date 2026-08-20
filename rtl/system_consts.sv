@@ -50,9 +50,21 @@ package system_consts;
 	// comment in rtl/spi_io.sv for what is left out and why.
 	parameter int SSIDX_SPI_IO       = 6;  // 26 dwords
 
+	// The sound board. The 386 polls the FIFO between itself and the Z80, so
+	// none of this is optional: with the Z80 paused but not saved it comes back
+	// from a restore wherever it was at LOAD time, the FIFO it feeds disagrees
+	// with what the 386 expects, and the two machines take different branches.
+	// Traced to exactly that -- 41,743 identical instructions after a restore
+	// and then one conditional at 0x002018FC going the other way.
+	parameter int SSIDX_Z80          = 7;  // tv80's own state, auto-generated
+	parameter int SSIDX_Z80_RAM      = 8;  // 8 KB work RAM
+	parameter int SSIDX_SND_FIFO     = 9;  // 386 -> Z80, 512 bytes
+	parameter int SSIDX_SND_FIFO2    = 10; // Z80 -> 386, 512 bytes
+	parameter int SSIDX_SND_REGS     = 11; // the pointers and the ROM bank
+
 	// Sections after this point arrive with the later phases; the count below
 	// is what `memory_stream` is told to walk, so it has to grow with them.
-	parameter int SSIDX_COUNT       = 7;
+	parameter int SSIDX_COUNT       = 12;
 
 	// ---- the DDR3 window -------------------------------------------------
 	//

@@ -28,11 +28,23 @@
 //============================================================================
 
 module spi_sound
+	import system_consts::*;
 (
 	input             clk,
 	// Freeze the sound board: the Z80's clock enable and the YMF271's sample
 	// tick. See rtl/spi_video_timing.sv for why a savestate needs this.
-	input             pause,          // clk_sys, 57.272727 MHz
+	input             pause,
+
+	// ---- the savestate's sections on this board -------------------------
+	// All of it runs on clk_sys, which is the ssbus's own clock, so these are
+	// plain slaves rather than going through spi_ss_bridge like the clk_cpu
+	// ones do. Every RAM is reached by stealing the port its own client uses,
+	// which is safe because `pause` has stopped that client.
+	ssbus_if.slave    ssbus_z80,
+	ssbus_if.slave    ssbus_z80ram,
+	ssbus_if.slave    ssbus_fifo,
+	ssbus_if.slave    ssbus_fifo2,
+	ssbus_if.slave    ssbus_regs,          // clk_sys, 57.272727 MHz
 	input             reset,
 
 	// ---- 386 side. These cross from clk_cpu; see the CDC note below. -------
@@ -162,30 +174,72 @@ module spi_sound
 	wire        z80_wait_n;
 	wire        ymf_irq;
 
-	T80s #(.Mode(0), .T2Write(1), .IOWait(1)) z80
+	// The Z80's own state, discovered rather than enumerated: auto_save_adaptor2
+	// walks every (device, state) pair the generated core exposes at reset and
+	// records which ones answer, so nothing here has to know how many registers
+	// tv80 has.
+	wire        z80_ss_rd, z80_ss_wr, z80_ss_ack;
+	wire [31:0] z80_ss_in, z80_ss_out;
+	wire  [7:0] z80_ss_device_idx;
+	wire [15:0] z80_ss_state_idx;
+
+	auto_save_adaptor2 #(.SS_IDX(SSIDX_Z80)) z80_ss_adaptor
+	(
+		.clk        (clk),
+		.ssbus      (ssbus_z80),
+		.rd         (z80_ss_rd),
+		.wr         (z80_ss_wr),
+		.ack        (z80_ss_ack),
+		.device_idx (z80_ss_device_idx),
+		.state_idx  (z80_ss_state_idx),
+		.wr_data    (z80_ss_in),
+		.rd_data    (z80_ss_out)
+	);
+
+	// tv80 rather than T80, and the reason is savestates and nothing else.
+	// state_module.py -- what makes a CPU's state free in Arcade-IGSPGM -- reads
+	// Verilog, and rtl/t80 is VHDL. tv80 is the same core translated, so PGM's
+	// already-generated tv80_auto_ss.sv drops straight in and the Z80's ~400
+	// flops come along without anything being hand-instrumented. The port names
+	// are the only thing that changes; `OUT0` has no equivalent and was tied off
+	// here anyway.
+	//
+	// rtl/t80 stays in the tree. The sound path is matched against MAME over two
+	// minutes of rdft2 attract (PLAN.md 14) and that measurement, not a compile,
+	// is what says this swap is sound -- so the thing it replaced should still
+	// be there to go back to.
+	tv80s #(.Mode(0), .T2Write(1), .IOWait(1)) z80
 	(
 		// On SXX2C the Z80 stays in reset until the 386 has pushed its whole
 		// program into RAM and released it with 0x68C d0. On SXX2E z80_rst_n is
 		// tied high, because there the program is a ROM and nothing gates it.
-		.RESET_n (~reset & z80_rst_n),
-		.CLK     (clk),
-		.CEN     (ce_z80),
-		.WAIT_n  (z80_wait_n),
-		.INT_n   (~ymf_irq),
-		.NMI_n   (1'b1),
-		.BUSRQ_n (1'b1),
-		.M1_n    (z80_m1_n),
-		.MREQ_n  (z80_mreq_n),
-		.IORQ_n  (z80_iorq_n),
-		.RD_n    (z80_rd_n),
-		.WR_n    (z80_wr_n),
-		.RFSH_n  (z80_rfsh_n),
-		.HALT_n  (),
-		.BUSAK_n (),
-		.OUT0    (1'b0),
+		.reset_n (~reset & z80_rst_n),
+		.clk     (clk),
+		.cen     (ce_z80),
+		.wait_n  (z80_wait_n),
+		.int_n   (~ymf_irq),
+		.nmi_n   (1'b1),
+		.busrq_n (1'b1),
+		.m1_n    (z80_m1_n),
+		.mreq_n  (z80_mreq_n),
+		.iorq_n  (z80_iorq_n),
+		.rd_n    (z80_rd_n),
+		.wr_n    (z80_wr_n),
+		.rfsh_n  (z80_rfsh_n),
+		.halt_n  (),
+		.busak_n (),
 		.A       (z80_addr),
-		.DI      (z80_di),
-		.DO      (z80_dout)
+		.di      (z80_di),
+		.dout    (z80_dout),
+
+		.auto_ss_rd              (z80_ss_rd),
+		.auto_ss_wr              (z80_ss_wr),
+		.auto_ss_data_in         (z80_ss_in),
+		.auto_ss_device_idx      (z80_ss_device_idx),
+		.auto_ss_state_idx       (z80_ss_state_idx),
+		.auto_ss_base_device_idx (8'd0),
+		.auto_ss_data_out        (z80_ss_out),
+		.auto_ss_ack             (z80_ss_ack)
 	);
 
 	// ------------------------------------------------------------------
@@ -336,9 +390,31 @@ module spi_sound
 	// ------------------------------------------------------------------
 	reg [7:0] ram [0:8191];
 	reg [7:0] ram_q;
+
+	wire        ss_ram_acc = ssbus_z80ram.access(SSIDX_Z80_RAM);
+	wire [12:0] ram_wa = ss_ram_acc ? ssbus_z80ram.addr[12:0] : bus_addr[12:0];
+	wire  [7:0] ram_wd = ss_ram_acc ? ssbus_z80ram.data[7:0]  : bus_data;
+	wire        ram_we = ss_ram_acc ? ssbus_z80ram.write : (wr_end && b_ram);
+	wire [12:0] ram_ra = ss_ram_acc ? ssbus_z80ram.addr[12:0] : z80_addr[12:0];
+
 	always @(posedge clk) begin
-		if (wr_end && b_ram) ram[bus_addr[12:0]] <= bus_data;
-		ram_q <= ram[z80_addr[12:0]];
+		if (ram_we) ram[ram_wa] <= ram_wd;
+		ram_q <= ram[ram_ra];
+	end
+
+	// One cycle of read latency, exactly as ram_ss_adaptor handles it.
+	reg ss_ram_d;
+	always @(posedge clk) begin
+		ssbus_z80ram.setup(SSIDX_Z80_RAM, 32'd8192, 0);
+		if (ss_ram_acc) begin
+			if (ssbus_z80ram.write) ssbus_z80ram.write_ack(SSIDX_Z80_RAM);
+			else if (ssbus_z80ram.read) begin
+				if (ss_ram_d)
+					ssbus_z80ram.read_response(SSIDX_Z80_RAM, {56'd0, ram_q});
+				ss_ram_d <= 1'b1;
+			end
+		end
+		else ss_ram_d <= 1'b0;
 	end
 
 	// ------------------------------------------------------------------
@@ -372,6 +448,10 @@ module spi_sound
 			fifo_rp     <= 9'd0;
 			dbg_fifo_rd <= 16'd0;
 		end
+		else if (ss_rg_acc && ssbus_regs.write && (ssbus_regs.addr == 32'd0)) begin
+			fifo_rp <= ssbus_regs.data[8:0];
+			fifo_wp <= ssbus_regs.data[17:9];
+		end
 		else begin
 			if (snd_wr_pulse && !fifo_full) begin
 				fifo_mem[fifo_wp] <= snd_din;
@@ -382,7 +462,24 @@ module spi_sound
 				dbg_fifo_rd <= dbg_fifo_rd + 16'd1;
 			end
 		end
-		fifo_q <= fifo_mem[fifo_rp];
+		if (ss_f1_acc && ssbus_fifo.write)
+			fifo_mem[ssbus_fifo.addr[8:0]] <= ssbus_fifo.data[7:0];
+		fifo_q <= fifo_mem[ss_f1_acc ? ssbus_fifo.addr[8:0] : fifo_rp];
+	end
+
+	wire ss_f1_acc = ssbus_fifo.access(SSIDX_SND_FIFO);
+	reg  ss_f1_d;
+	always @(posedge clk) begin
+		ssbus_fifo.setup(SSIDX_SND_FIFO, 32'd512, 0);
+		if (ss_f1_acc) begin
+			if (ssbus_fifo.write) ssbus_fifo.write_ack(SSIDX_SND_FIFO);
+			else if (ssbus_fifo.read) begin
+				if (ss_f1_d) ssbus_fifo.read_response(SSIDX_SND_FIFO,
+					{56'd0, fifo_q});
+				ss_f1_d <= 1'b1;
+			end
+		end
+		else ss_f1_d <= 1'b0;
 	end
 
 	// ------------------------------------------------------------------
@@ -497,6 +594,10 @@ module spi_sound
 			dbg_f2_wr <= 16'd0;
 			dbg_f2_rd <= 16'd0;
 		end
+		else if (ss_rg_acc && ssbus_regs.write && (ssbus_regs.addr == 32'd1)) begin
+			f2_wp <= ssbus_regs.data[20:12];
+			f2_rp <= ssbus_regs.data[29:21];
+		end
 		else begin
 			if (set_sxx2c && wr_end && b_io && (bus_addr[12:0] == 13'h008) && !f2_full) begin
 				f2_mem[f2_wp] <= bus_data;
@@ -508,7 +609,24 @@ module spi_sound
 				dbg_f2_rd <= dbg_f2_rd + 16'd1;
 			end
 		end
-		fifo2_q <= f2_mem[f2_rp];
+		if (ss_f2_acc && ssbus_fifo2.write)
+			f2_mem[ssbus_fifo2.addr[8:0]] <= ssbus_fifo2.data[7:0];
+		fifo2_q <= f2_mem[ss_f2_acc ? ssbus_fifo2.addr[8:0] : f2_rp];
+	end
+
+	wire ss_f2_acc = ssbus_fifo2.access(SSIDX_SND_FIFO2);
+	reg  ss_f2_d;
+	always @(posedge clk) begin
+		ssbus_fifo2.setup(SSIDX_SND_FIFO2, 32'd512, 0);
+		if (ss_f2_acc) begin
+			if (ssbus_fifo2.write) ssbus_fifo2.write_ack(SSIDX_SND_FIFO2);
+			else if (ssbus_fifo2.read) begin
+				if (ss_f2_d) ssbus_fifo2.read_response(SSIDX_SND_FIFO2,
+					{56'd0, fifo2_q});
+				ss_f2_d <= 1'b1;
+			end
+		end
+		else ss_f2_d <= 1'b0;
 	end
 
 	// ------------------------------------------------------------------
@@ -531,7 +649,27 @@ module spi_sound
 	// ------------------------------------------------------------------
 	always @(posedge clk) begin
 		if (reset) rom_bank <= 3'd0;
+		else if (ss_rg_acc && ssbus_regs.write && (ssbus_regs.addr == 32'd1))
+			rom_bank <= ssbus_regs.data[2:0];
 		else if (wr_end && b_io && (bus_addr[12:0] == 13'h01B)) rom_bank <= bus_data[2:0];
+	end
+
+	// ------------------------------------------------------------------
+	// SSIDX_SND_REGS: the two FIFOs' pointers and the ROM bank. The FIFO
+	// CONTENTS are their own sections; without the pointers they would say
+	// nothing, because a FIFO is its pointers.
+	// ------------------------------------------------------------------
+	wire ss_rg_acc = ssbus_regs.access(SSIDX_SND_REGS);
+	always @(posedge clk) begin
+		ssbus_regs.setup(SSIDX_SND_REGS, 32'd2, 2);
+		if (ss_rg_acc) begin
+			if (ssbus_regs.read)
+				ssbus_regs.read_response(SSIDX_SND_REGS,
+					(ssbus_regs.addr == 32'd0)
+						? {46'd0, fifo_wp, fifo_rp}
+						: {34'd0, f2_rp, f2_wp, 9'd0, rom_bank});
+			else if (ssbus_regs.write) ssbus_regs.write_ack(SSIDX_SND_REGS);
+		end
 	end
 
 	// ------------------------------------------------------------------

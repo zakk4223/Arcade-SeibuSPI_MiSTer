@@ -258,8 +258,12 @@ Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv
              $(RTL)/z386/protection.sv $(RTL)/z386/segmentation_unit.sv \
              $(RTL)/z386/ucode_rom.sv
 
-# T80s.sv here is the Verilator stand-in; Quartus builds the VHDL core instead.
-SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv T80s.sv
+# tv80 replaced T80 for savestates (PLAN.md 40), and it is Verilog -- so the
+# simulator now runs the REAL Z80 instead of the stand-in T80s.sv that stood in
+# for a VHDL core it could not read. sim/T80s.sv is kept for reference; nothing
+# builds it any more.
+SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv \
+              $(RTL)/tv80_auto_ss.sv
 
 # The savestate framework. system_consts.sv first (it is the package) and
 # savestates.sv next (it declares the interface the slaves take as a port).

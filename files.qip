@@ -51,11 +51,20 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_vram.sv
 # meter -- were deleted in PLAN.md 35, and were never listed here either.
 # PLAN.md 29.
 
-# Sound: Z80 + YMF271. The T80 core is VHDL, so it comes in through its own qip.
+# Sound: Z80 + YMF271.
+#
+# The Z80 is tv80, not T80, and only because of savestates: state_module.py
+# reads Verilog and rtl/t80 is VHDL, so PGM's already-generated
+# tv80_auto_ss.sv is what makes the Z80's state free. PLAN.md 40.
+#
+# rtl/tv80_auto_ss.sv REPLACES rtl/tv80/*.v -- same five module names -- so
+# exactly one of the two is ever listed. rtl/t80 and rtl/tv80 both stay in the
+# tree: the first as what this replaced, the second as what the generated file
+# was generated from.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sound.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ymf271.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ymf271_synth.sv
-set_global_assignment -name QIP_FILE rtl/t80/T80.qip
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv80_auto_ss.sv
 
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/seibu_partial_add.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_tile_decrypt.sv

@@ -360,3 +360,4 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestate_ui.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_vram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tv80_auto_ss.sv
