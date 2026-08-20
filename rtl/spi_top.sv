@@ -163,6 +163,7 @@ module spi_top
 		.clk        (clk_sys),
 		.reset      (sys_reset),
 		.pause      (ss_pause),
+		.vbl_next   (vbl_next),
 		.ss_state   (vt_ss_state),
 		.ss_state_in(vt_ss_in),
 		.ss_state_we(vt_ss_we),
@@ -638,7 +639,7 @@ module spi_top
 	// STATUS.md documents its behaviour as stopping the 386 alone so a frozen
 	// frame stays on screen to be studied -- which is the opposite of what a
 	// save state wants and a useful thing to keep.
-	wire        ss_pause = ss_busy;
+	wire        ss_pause;      // driven by spi_ss, below
 	assign ss_dbg_esp_scratch = ss_esp_scratch;
 	wire        ss_ram_own, ss_ram_we;
 	wire [15:0] ss_ram_addr;
@@ -653,6 +654,8 @@ module spi_top
 
 		.ss_save         (ss_save),
 		.ss_load         (ss_load),
+		.vbl_next        (vbl_next),
+		.pause           (ss_pause),
 
 		.stream_write    (ss_stream_write),
 		.stream_read     (ss_stream_read),
@@ -684,6 +687,7 @@ module spi_top
 	// SSIDX_VIDEO_TIMING: one 32-bit item, the raster counters. Small enough to
 	// answer inline rather than through an adaptor.
 	wire [22:0] vt_ss_state;
+	wire        vbl_next;
 	reg  [22:0] vt_ss_in;
 	reg         vt_ss_we;
 

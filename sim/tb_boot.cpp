@@ -599,6 +599,22 @@ int main(int argc, char **argv)
                        "finished: %016llX\n",
                        (unsigned long long)ss_hash_after,
                        (unsigned long long)hh);
+                // ...and the memory itself, at that same instant, so two runs
+                // can be diffed dword by dword. A hash only ever says
+                // "different", and "different" has meant a handful of dead
+                // stack words as often as it has meant a broken restore.
+                if (const char *dp = getenv("SS_DUMP_AT")) {
+                    FILE *f = fopen(dp, "wb");
+                    if (f) {
+                        for (uint32_t i = 0; i < 65536; i++) {
+                            dut->peek_addr = (uint16_t)i;
+                            dut->eval();
+                            uint32_t v = dut->peek_data;
+                            fwrite(&v, 4, 1, f);
+                        }
+                        fclose(f);
+                    }
+                }
             }
 
             // The determinism probe, as in phase 0: measured from the first

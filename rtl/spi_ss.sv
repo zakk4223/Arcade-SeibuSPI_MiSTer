@@ -6,7 +6,28 @@
 //  state is already in main RAM), and memory_stream (which moves the blob to
 //  and from DDR3). PLAN.md 38 is the design record for the CPU half.
 //
+//  WHEN a save happens is chosen, not taken as it comes. The request arms, and
+//  nothing else happens until the raster is one tick from raising the vblank
+//  interrupt -- `vbl_next` -- at which point the board is paused and the raster
+//  is left parked there.
+//
+//  That instant is worth waiting for because it makes the interrupt state
+//  KNOWN rather than something that has to be carried in the blob. Parked
+//  there, this frame's interrupt has not been raised yet and the previous
+//  frame's has long since been acknowledged and returned from, so `irq_pending`
+//  is clear and spi_cpu's two-cycle acknowledge machine is idle. There is
+//  nothing to save because there is nothing in flight. Releasing lets the very
+//  next tick raise vbl_rise exactly as it would have, so the interrupt is not
+//  lost either -- it is deferred by the length of the transfer along with
+//  everything else.
+//
+//  Measured: a save taken wherever the request happened to land failed the
+//  determinism test at the one point in five where the game was inside its
+//  vblank handler, and the same point failed on all three sets. Restoring
+//  spi_cpu's interrupt state instead was tried and made things worse.
+//
 //  A SAVE:
+//     wait for vbl_next               -> the canonical instant, above
 //     ask spi_cpu for a save          -> NMI, the stub pushes, the marker
 //                                        write freezes the machine
 //     take the main RAM port           -> the CPU is frozen, so nothing else
@@ -54,6 +75,13 @@ module spi_ss
 	// ---- from savestate_ui ----------------------------------------------
 	input             ss_save,      // one clk_sys pulse
 	input             ss_load,
+
+	// The raster is one tick from the vblank interrupt: the instant a save or a
+	// load is allowed to start.
+	input             vbl_next,
+	// Freeze the board. NOT the same as `busy`: while the request is armed and
+	// waiting for vbl_next, the machine has to keep running to get there.
+	output            pause,
 
 	// ---- memory_stream / save_state_data --------------------------------
 	output reg        stream_write, // start a save   (one pulse)
@@ -153,6 +181,7 @@ module spi_ss
 	// The sequence
 	// ------------------------------------------------------------------
 	localparam [3:0] S_IDLE      = 4'd0,
+	                 S_ARM       = 4'd8,   // wait for the canonical instant
 	                 S_ASK       = 4'd1,   // hold the request until it is taken
 	                 S_STREAM    = 4'd2,
 	                 S_STREAMING = 4'd3,
@@ -165,6 +194,8 @@ module spi_ss
 	reg [1:0] inval_ph;
 
 	assign busy    = (st != S_IDLE);
+	// Everything except the wait is frozen.
+	assign pause   = busy && (st != S_ARM);
 	// The port is ours from the moment the machine is frozen until it is let go.
 	// Not in S_STREAM until the DMA has let go, or the override in spi_cpu's
 	// mux would cut a transfer off mid-flight.
@@ -190,9 +221,15 @@ module spi_ss
 		else begin
 			case (st)
 			S_IDLE: if (ss_save || ss_load) begin
-				is_load         <= ss_load && !ss_save;
-				cpu_save_req    <= !(ss_load && !ss_save);
-				cpu_restore_req <=  (ss_load && !ss_save);
+				is_load <= ss_load && !ss_save;
+				st      <= S_ARM;
+			end
+
+			// The machine runs on until the raster reaches the one place a
+			// snapshot is cheap to take.
+			S_ARM: if (vbl_next) begin
+				cpu_save_req    <= !is_load;
+				cpu_restore_req <=  is_load;
 				st              <= S_ASK;
 			end
 

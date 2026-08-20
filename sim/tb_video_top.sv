@@ -107,6 +107,7 @@ module tb_video_top
 		// The savestate's board-wide pause and raster section. Nothing here
 		// ever asserts either.
 		.pause      (1'b0),
+		.vbl_next   (),
 		.ss_state   (),
 		.ss_state_in(23'd0),
 		.ss_state_we(1'b0),

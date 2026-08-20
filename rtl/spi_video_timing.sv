@@ -37,6 +37,10 @@ module spi_video_timing
 	output reg        line_start, // pulse at the start of each line
 	output reg        vbl_rise,   // pulse on entry to vertical blanking
 
+	// One tick from raising vbl_rise. A savestate parks the raster here, which
+	// is the whole reason it exists -- see rtl/spi_ss.sv.
+	output            vbl_next,
+
 	// The savestate's view of the raster. Written only while `pause` is high,
 	// so the counters cannot move underneath the write.
 	output     [22:0] ss_state,
@@ -49,6 +53,12 @@ module spi_video_timing
 	reg [2:0] div;
 
 	assign ss_state = {div, vcnt, hcnt};
+
+	// Exactly the condition the always block below uses to set vbl_rise, one
+	// cycle earlier. Pausing while this holds means the pulse never happens;
+	// releasing lets it happen on the very next tick, unchanged.
+	assign vbl_next = (div == 3'd7) && (hcnt == HTOTAL - 10'd1)
+	                                && (vcnt == VBSTART - 10'd1);
 
 	// Blanking and sync are simple decodes of the counters. At a 7.16 MHz pixel
 	// rate on a 57 MHz fabric there is no reason to pipeline them.
