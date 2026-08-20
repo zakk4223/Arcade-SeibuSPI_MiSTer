@@ -55,6 +55,13 @@ module spi_ds2404
 )
 (
 	input             clk,        // clk_ram, with spi_nvram and the arbiters
+	// Stop the chip with the rest of the board while a savestate is taken. Only
+	// two things in here advance without the 386 asking them to -- the RTC's
+	// 256 Hz tick and the scratchpad copy loop -- so only those are gated. The
+	// command machine steps on a request edge from a CPU that is frozen, so it
+	// is already still, and the SRAM's ports are deliberately left live because
+	// the savestate reaches the array through them.
+	input             pause,
 	// The state machine only. The SRAM deliberately survives reset: it is
 	// battery-backed on the board, and it is loaded from the save file while the
 	// rest of the core is still held down.
@@ -251,7 +258,12 @@ module spi_ds2404
 		// scheduler would give one or the other whole. Five cycles out of
 		// 447,444 per tick, during a copy a game does once at boot if ever, and
 		// arbitrating it would cost more logic than the divergence is worth.
-		if (tick_cnt == TICK_LAST) begin
+		if (pause) begin
+			// Held, not reset: the tick has to come back on its own phase or
+			// the RTC gains or loses a fraction of a second on every save.
+			tick_cnt <= tick_cnt;
+		end
+		else if (tick_cnt == TICK_LAST) begin
 			tick_cnt <= '0;
 			rtc      <= rtc + 40'd1;
 		end
@@ -263,7 +275,10 @@ module spi_ds2404
 		dout <= (st[sptr] == S_READ_MEM) ? mem_q : 8'h00;
 
 		// ---- the copy loop -------------------------------------------
-		if (copying) begin
+		if (pause) begin
+			// Nothing: a copy in flight resumes where it left off.
+		end
+		else if (copying) begin
 			if (copy_sram) nv_dirty <= ~nv_dirty;
 			if (copy_rtc)  rtc[{copy_addr[2:0] - 3'd2, 3'b000} +: 8] <= pad[copy_i[4:0]];
 			copy_addr <= copy_addr + 16'd1;

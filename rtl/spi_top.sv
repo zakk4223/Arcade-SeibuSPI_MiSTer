@@ -500,6 +500,10 @@ module spi_top
 
 	spi_ds2404 ds2404
 	(
+		// clk_ram, so this level crosses from clk_sys into a FASTER clock --
+		// which is the easy direction: a level held for a clk_sys cycle is
+		// sampled twice here rather than missed.
+		.pause    (ss_pause),
 		.clk      (clk_ram),
 		.reset    (reset),
 
