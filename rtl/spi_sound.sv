@@ -453,19 +453,26 @@ module spi_sound
 			fifo_wp <= ssbus_regs.data[17:9];
 		end
 		else begin
-			if (snd_wr_pulse && !fifo_full) begin
-				fifo_mem[fifo_wp] <= snd_din;
-				fifo_wp <= fifo_wp + 9'd1;
-			end
+			if (snd_wr_pulse && !fifo_full) fifo_wp <= fifo_wp + 9'd1;
 			if (fifo_pop) begin
 				fifo_rp     <= fifo_rp + 9'd1;
 				dbg_fifo_rd <= dbg_fifo_rd + 16'd1;
 			end
 		end
-		if (ss_f1_acc && ssbus_fifo.write)
-			fifo_mem[ssbus_fifo.addr[8:0]] <= ssbus_fifo.data[7:0];
+		// ONE write statement, with the savestate muxed into it. Two separate
+		// writes to the same array -- which is how this was first written --
+		// stop Quartus inferring a memory at all: it built the whole 512 bytes
+		// out of flip-flops instead, and the two FIFOs between them cost 8,192
+		// registers and the fit. spi_mainram.sv's header records the same trap
+		// from the other direction.
+		if (f1_we) fifo_mem[f1_wa] <= f1_wd;
 		fifo_q <= fifo_mem[ss_f1_acc ? ssbus_fifo.addr[8:0] : fifo_rp];
 	end
+
+	wire [8:0] f1_wa = ss_f1_acc ? ssbus_fifo.addr[8:0] : fifo_wp;
+	wire [7:0] f1_wd = ss_f1_acc ? ssbus_fifo.data[7:0] : snd_din;
+	wire       f1_we = ss_f1_acc ? ssbus_fifo.write
+	                             : (snd_wr_pulse && !fifo_full);
 
 	wire ss_f1_acc = ssbus_fifo.access(SSIDX_SND_FIFO);
 	reg  ss_f1_d;
@@ -599,8 +606,7 @@ module spi_sound
 			f2_rp <= ssbus_regs.data[29:21];
 		end
 		else begin
-			if (set_sxx2c && wr_end && b_io && (bus_addr[12:0] == 13'h008) && !f2_full) begin
-				f2_mem[f2_wp] <= bus_data;
+			if (f2_push) begin
 				f2_wp <= f2_wp + 9'd1;
 				dbg_f2_wr <= dbg_f2_wr + 16'd1;
 			end
@@ -609,10 +615,15 @@ module spi_sound
 				dbg_f2_rd <= dbg_f2_rd + 16'd1;
 			end
 		end
-		if (ss_f2_acc && ssbus_fifo2.write)
-			f2_mem[ssbus_fifo2.addr[8:0]] <= ssbus_fifo2.data[7:0];
+		if (f2_we) f2_mem[f2_wa] <= f2_wd;
 		fifo2_q <= f2_mem[ss_f2_acc ? ssbus_fifo2.addr[8:0] : f2_rp];
 	end
+
+	wire       f2_push = set_sxx2c && wr_end && b_io
+	                     && (bus_addr[12:0] == 13'h008) && !f2_full;
+	wire [8:0] f2_wa = ss_f2_acc ? ssbus_fifo2.addr[8:0] : f2_wp;
+	wire [7:0] f2_wd = ss_f2_acc ? ssbus_fifo2.data[7:0] : bus_data;
+	wire       f2_we = ss_f2_acc ? ssbus_fifo2.write : f2_push;
 
 	wire ss_f2_acc = ssbus_fifo2.access(SSIDX_SND_FIFO2);
 	reg  ss_f2_d;
