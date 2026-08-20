@@ -85,6 +85,48 @@ module tb_boot_top
 	output            p_z80_rst_n,
 	output     [15:0] p_snd_pc,
 
+	// Where the 386 has put its IDT. Phase 0 of the savestate work needs to
+	// overlay one gate in it, and the first question is whether the base is
+	// visible and sane once the boot code has run its LIDT.
+	output     [31:0] p_idt_base,
+	output     [19:0] p_idt_limit,
+	output     [31:0] p_eip,
+	output     [15:0] p_cs,
+	output     [31:0] p_cs_base,
+	output     [31:0] p_cr0,
+
+	// Savestate phase 0: the C++ side pulses this and then watches whether the
+	// 386 walks into the stub and spills its registers.
+	input             ss_save_req,
+	input             ss_restore_req,
+	input      [31:0] ss_esp_in,
+	input             ss_hold_rel,
+	output            p_ss_snapshot,
+	output     [31:0] p_ss_esp_out,
+	input             ss_ram_own,
+	input      [15:0] ss_ram_addr,
+	input      [31:0] ss_ram_din,
+	input             ss_ram_we,
+	output     [31:0] ss_ram_dout,
+	input             ss_inval,
+	input       [7:0] ss_inval_set,
+
+	output            p_ss_in_stub,
+	output     [15:0] p_ss_writes,
+	output     [31:0] p_ss_last_wa,
+	output     [31:0] p_ss_last_wd,
+	// A window onto main RAM for the testbench alone. The savestate work needs
+	// to read back what the 386's stub pushed, and later to hash the whole
+	// 256 KB either side of a restore; nothing synthesised has this.
+	input      [15:0] peek_addr,
+	output     [31:0] peek_data,
+
+	output      [2:0] p_ss_state,
+	output            p_ss_nmi,
+	output     [15:0] p_ss_gate_dw0,
+	output     [15:0] p_ss_gate_reads,
+	output            p_ss_hold,
+
 	// video out, so the testbench can see what the core actually draws
 	output            v_ce_pix,
 	output      [7:0] v_r,
@@ -114,6 +156,30 @@ module tb_boot_top
 		.jumpers      (8'hFC),
 		// The one debug control still in the core: the CPU freeze. Off here.
 		.freeze       (1'b0),
+
+		.ss_save_req  (ss_save_req),
+		.ss_restore_req (ss_restore_req),
+		.ss_esp_in    (ss_esp_in),
+		.ss_snapshot  (p_ss_snapshot),
+		.ss_hold_rel  (ss_hold_rel),
+		.ss_esp_out   (p_ss_esp_out),
+		.ss_ram_own  (ss_ram_own),
+		.ss_ram_addr (ss_ram_addr),
+		.ss_ram_din  (ss_ram_din),
+		.ss_ram_we   (ss_ram_we),
+		.ss_ram_dout (ss_ram_dout),
+		.ss_inval    (ss_inval),
+		.ss_inval_set(ss_inval_set),
+
+		.ss_in_stub   (p_ss_in_stub),
+		.ss_writes    (p_ss_writes),
+		.ss_last_wa   (p_ss_last_wa),
+		.ss_last_wd   (p_ss_last_wd),
+		.ss_dbg_state      (p_ss_state),
+		.ss_dbg_nmi        (p_ss_nmi),
+		.ss_dbg_gate_dw0   (p_ss_gate_dw0),
+		.ss_dbg_gate_reads (p_ss_gate_reads),
+		.ss_dbg_hold       (p_ss_hold),
 
 		// Ports spi_top grew after this file was last touched. Leaving them
 		// off is not free: Verilator's -Wall makes PINMISSING an error, so the
@@ -222,5 +288,15 @@ module tb_boot_top
 	// synthesised net now (PLAN.md 29), so this reaches into spi_sound the same
 	// way every other probe in this file reaches into the DUT.
 	assign p_snd_pc          = dut.sound.dbg_z80_pc;
+	assign p_idt_base        = dut.cpu.dbg_idt_base;
+	assign p_idt_limit       = dut.cpu.dbg_idt_limit;
+	assign p_eip             = dut.cpu.dbg_eip;
+	assign p_cs              = dut.cpu.dbg_cs;
+	assign p_cs_base         = dut.cpu.dbg_cs_base;
+	assign peek_data         = {dut.cpu.mainram.mem3[peek_addr],
+	                            dut.cpu.mainram.mem2[peek_addr],
+	                            dut.cpu.mainram.mem1[peek_addr],
+	                            dut.cpu.mainram.mem0[peek_addr]};
+	assign p_cr0             = dut.cpu.dbg_cr0;
 
 endmodule

@@ -136,6 +136,56 @@ module spi_cpu
 	output      [3:0] dbg_why,
 	output     [31:0] dbg_eip,
 	output     [15:0] dbg_cs,
+	// Where the 386 has put its IDT, and how big it is. The savestate needs
+	// this to overlay one gate; nothing else reads it.
+	output     [31:0] dbg_idt_base,
+	output     [19:0] dbg_idt_limit,
+	output     [31:0] dbg_cs_base,
+	output     [31:0] dbg_cr0,
+
+	// ---- savestate: the 386 spills its own state ------------------------
+	// PLAN: the CPU is never instrumented. A savestate asserts NMI, overlays
+	// the vector-2 gate so the interrupt lands in a stub this module supplies,
+	// and the stub pushes the architectural state onto the game's own stack --
+	// which is main RAM, and is saved anyway. All the hardware has to keep is
+	// where the stack ended up.
+	input             ss_save_req,   // one clk_cpu pulse
+	input             ss_restore_req,// ...and the other direction
+	// The ESP the save recorded, handed back so the restore stub can bake it
+	// into its own `mov esp, imm32`.
+	input      [31:0] ss_esp_in,
+	// High from the instant the save stub's marker write retires until the
+	// caller drops ss_hold_rel: the CPU is frozen and main RAM is quiet, which
+	// is when the blob is streamed out.
+	output reg        ss_snapshot,
+	input             ss_hold_rel,
+	output reg [31:0] ss_esp_out,
+	// Port stealing, the pattern Arcade-IGSPGM's ram_ss_adaptor uses: while
+	// the savestate owns main RAM the CPU is frozen, so the blob is read and
+	// written through the port the CPU normally drives. No memory here gains
+	// a second port -- spi_mainram's own header records that making it truly
+	// dual-ported took the array from 2 Mbit to 4 and blew the M10K budget.
+	input             ss_ram_own,
+	input      [15:0] ss_ram_addr,
+	input      [31:0] ss_ram_din,
+	input             ss_ram_we,
+	output     [31:0] ss_ram_dout,
+	// Sweep every cache set after a restore has rewritten memory underneath
+	// the CPU. z386's snoop port invalidates a whole set per pulse and feeds
+	// both L1s, so 256 pulses retire the lot -- which is all that is needed,
+	// because the data cache is write-through and neither cache holds
+	// anything that is not also in RAM.
+	input             ss_inval,
+	input       [7:0] ss_inval_set,
+	output reg        ss_in_stub,    // EIP is inside the stub window
+	output reg [15:0] ss_writes,     // dword writes the stub has made
+	output reg [31:0] ss_last_wa,    // physical address of the last of them
+	output reg [31:0] ss_last_wd,    // and the value
+	output      [2:0] ss_dbg_state,
+	output            ss_dbg_nmi,
+	output     [15:0] ss_dbg_gate_dw0,
+	output     [15:0] ss_dbg_gate_reads,
+	output            ss_dbg_hold,
 	output            dbg_irq,
 	// Mirror of what the CPU writes to main RAM at 0x800, where the boot code
 	// builds the GDT it then LGDTs. If protected-mode entry fails, the first
@@ -222,18 +272,25 @@ module spi_cpu
 		.resp_valid         (cpu_resp_valid),
 
 		.intr               (irq_pending),
-		.nmi                (1'b0),
+		.nmi                (ss_nmi),
 		.inta               (cpu_inta),
 
-		.snoop_addr         (32'd0),
-		.snoop_valid        (1'b0),
+		// The savestate's gate overlay is a READ substitution, and the gate
+		// lives in main RAM, so the game's own build of the IDT has very
+		// likely left that line in the data cache. Invalidating it through
+		// the core's own snoop port is what makes the overlay visible.
+		.snoop_addr         (ss_snoop_addr),
+		.snoop_valid        (ss_snoop_valid),
 
 		.a20_enable         (1'b1),
 		.single_step        (1'b0),
 
 		.dbg_CS             (dbg_cs),
 		.dbg_EIP            (dbg_eip),
-		.dbg_CS_base        (),
+		.dbg_CS_base        (dbg_cs_base),
+		.dbg_IDT_base       (dbg_idt_base),
+		.dbg_IDT_limit      (dbg_idt_limit),
+		.dbg_CR0            (dbg_cr0),
 		.dbg_pe             (),
 		.dbg_vm             (),
 		.triple_fault_reset ()
@@ -311,6 +368,261 @@ module spi_cpu
 	wire [31:0] byte_addr = {cpu_addr, 2'b00};
 	/* verilator lint_on UNUSEDSIGNAL */
 
+	// ------------------------------------------------------------------
+	// Savestate: the stub window, the gate overlay, and the entry sequence
+	//
+	// WHY THIS SHAPE. z386 is 10,707 flops and vendored; instrumenting it
+	// would cost more fabric than this core has and would fork the upstream
+	// source. So the CPU is asked to write its own state out instead, exactly
+	// as Arcade-IGSPGM and Arcade-TaitoF2 do with their 68000s. The difference
+	// is that a 68000 takes its vector from a fixed low address and this 386
+	// runs in PROTECTED MODE with the IDT wherever the boot code put it -- so
+	// the gate is overlaid at `dbg_idt_base` rather than at a constant.
+	//
+	// Measured on rdfts: IDT base 0x00000900, limit 0x110, written once at
+	// cycle 6486 and never moved; CS base 0 and CR0 = 0x11, so PE is on and
+	// PAGING IS OFF. Linear equals physical, which is why the gate can carry a
+	// raw physical address as its offset and why the stub needs no page tables.
+	//
+	// NMI rather than a maskable interrupt: it is vector 2, the games do not
+	// use it, it cannot be masked by a game sitting in a cli/sti critical
+	// section, and z386 takes it at an instruction boundary (`nmi_accept_
+	// boundary` in z386.sv), which is the quiesce a snapshot needs anyway.
+	// ------------------------------------------------------------------
+
+	// 1 KB above main RAM, so both halves of the stub are reachable in real
+	// mode after a restore reset (0x40000 is segment 0x4000, offset 0) as well
+	// as in protected mode. Main RAM ends at 0x3FFFF, PRG ROM starts at
+	// 0x200000, and nothing on the board decodes between them.
+	localparam [31:0] SS_STUB_BASE = 32'h0004_0000;
+
+	wire sel_ss = (byte_addr[31:10] == SS_STUB_BASE[31:10]);
+
+	// THE TWO STUBS. Both are entered through the overlaid vector-2 gate, so
+	// the CPU is already in protected mode at CPL 0 with EFLAGS, CS and EIP
+	// pushed by the interrupt itself. That is the whole reason this is small:
+	// a restore never has to re-enter protected mode, reload GDTR/IDTR or
+	// touch CR0, because it never leaves them. Measured on rdfts, the boot
+	// code writes the IDT once and never moves it, and CR0 settles at 0x11 --
+	// so between any two points in one game's run those registers are already
+	// identical, and main RAM (which carries the GDT and the IDT) is restored
+	// wholesale anyway. A state saved BEFORE protected-mode entry is the one
+	// case this cannot express, and the save side refuses it.
+	//
+	// SAVE, at offset 0x00:
+	//
+	//   60        pushad         EAX ECX EDX EBX ESP EBP ESI EDI, downwards
+	//   89 E0     mov  eax, esp
+	//   50        push eax       the hardware recognises THIS write by its own
+	//                            signature -- the value stored is the address
+	//                            stored to, plus four -- and freezes the CPU on
+	//                            it. That single write pins down both ESP and
+	//                            the SS base, and the freeze is the moment the
+	//                            snapshot is taken.
+	//   83 C4 04  add  esp, 4    ...and when the hardware lets go, the stub
+	//   61        popad          unwinds and hands the game back. A save is
+	//   CF        iret           therefore transparent: no reset, no reload.
+	//
+	// RESTORE, at offset 0x40:
+	//
+	//   89 E0     mov  eax, esp
+	//   50        push eax       the same marker, so the same hardware freezes
+	//                            on it. THE ORDER MATTERS: the blob is written
+	//                            back HERE, after the interrupt has made its
+	//                            own three pushes, not before. Written before,
+	//                            those pushes land on top of the register frame
+	//                            that was just restored and quietly wreck it --
+	//                            the game's live ESP at restore time is within
+	//                            a few words of where the frame sits.
+	//   BC imm32  mov  esp, <saved ESP + 4>   baked in by the hardware, which
+	//   61        popad                       is why the stub needs no way to
+	//   CF        iret                        address memory of its own
+	//
+	// Everything else the restore needs -- the GDT, the IDT, the game's stack
+	// and the saved register frame sitting on it -- is main RAM, streamed back
+	// in while the stub is frozen on its marker.
+	//
+	// Padded with 0x90 so a cache-line fill never reads undefined bytes.
+	localparam [7:0] SS_RESTORE_IDX = 8'h10;   // dword index of offset 0x40
+
+	function automatic [31:0] ss_stub_rom(input [7:0] idx);
+		case (idx)
+			8'h00:   ss_stub_rom = 32'h50E08960;   // pushad / mov eax,esp / push eax
+			8'h01:   ss_stub_rom = 32'h6104C483;   // add esp,4 / popad
+			8'h02:   ss_stub_rom = 32'h909090CF;   // iret
+			SS_RESTORE_IDX:
+			         ss_stub_rom = 32'hBC50E089;   // mov eax,esp / push eax / mov esp,
+			8'h11:   ss_stub_rom = ss_restore_esp; //   ...the immediate itself
+			8'h12:   ss_stub_rom = 32'h9090CF61;   // popad / iret
+			default: ss_stub_rom = 32'h90909090;
+		endcase
+	endfunction
+
+	// The synthetic vector-2 gate: a 32-bit interrupt gate (type 0xE, P=1,
+	// DPL=0) whose selector is the CS the game is already running under -- so
+	// the game's own GDT describes it and no GDT overlay is needed -- and whose
+	// offset is the stub's physical address, valid as a linear address because
+	// paging is off.
+	wire [15:0] ss_entry_off = ss_mode_restore ? {6'd0, SS_RESTORE_IDX, 2'b00}
+	                                           : 16'h0000;
+	wire [31:0] ss_gate_lo = {dbg_cs, SS_STUB_BASE[15:0] | ss_entry_off};
+	wire [31:0] ss_gate_hi = {SS_STUB_BASE[31:16], 8'h8E, 8'h00};
+
+	// Where that gate sits, as a main-RAM dword index. Vector 2 is the third
+	// 8-byte gate, so 16 bytes in.
+	wire [15:0] ss_gate_dw0 = dbg_idt_base[17:2] + 16'd4;
+
+	reg        ss_nmi;
+	reg        ss_gate_armed;
+	reg        ss_mode_restore;   // which stub the gate points at
+	reg [31:0] ss_restore_esp;    // baked into the restore stub's immediate
+	reg        ss_hold;           // freeze the CPU: the snapshot instant
+	reg [31:0] ss_snoop_addr;
+	reg        ss_snoop_valid;
+	reg  [3:0] ss_arm_cnt;
+	reg        ss_active;
+
+	localparam [2:0] SS_IDLE = 3'd0, SS_INVAL = 3'd1, SS_NMI = 3'd2,
+	                 SS_RUN  = 3'd3;
+	reg [2:0] ss_state;
+
+	// Does a main-RAM dword index land on the overlaid gate, and if so which
+	// half? 2'd0 is "no", 2'd1 the low dword, 2'd2 the high one.
+	function automatic [1:0] ss_gate_sel(input [15:0] dw);
+		ss_gate_sel = !ss_gate_armed        ? 2'd0 :
+		              (dw == ss_gate_dw0)   ? 2'd1 :
+		              (dw == ss_gate_dw0 + 16'd1) ? 2'd2 : 2'd0;
+	endfunction
+
+
+	// EIP is a linear address here and the stub is identity-mapped, so this is
+	// simply "is the CPU executing our code".
+	wire ss_eip_in_stub = (dbg_eip[31:10] == SS_STUB_BASE[31:10]);
+
+	assign ss_dbg_state     = ss_state;
+	assign ss_dbg_hold      = ss_hold;
+	assign ss_dbg_nmi       = ss_nmi;
+	assign ss_dbg_gate_dw0  = ss_gate_dw0;
+
+	// How many times the overlay actually answered a read. Zero here and a
+	// missed stub entry means the CPU never went looking for the gate; nonzero
+	// and it did, and something after that is wrong instead.
+	reg [15:0] ss_gate_reads;
+	assign ss_dbg_gate_reads = ss_gate_reads;
+
+	always @(posedge clk) begin
+		ss_snoop_valid <= 1'b0;
+		if (ss_inval) begin
+			// Set index is addr[11:4] for both L1s (16-byte lines, 256 sets).
+			ss_snoop_addr  <= {20'd0, ss_inval_set, 4'd0};
+			ss_snoop_valid <= 1'b1;
+		end
+		if (reset) ss_gate_reads <= 16'd0;
+		else if (ram_rd_pipe && (ss_gsel_pipe != 2'd0))
+			ss_gate_reads <= ss_gate_reads + 16'd1;
+
+		if (reset) begin
+			ss_state        <= SS_IDLE;
+			ss_nmi          <= 1'b0;
+			ss_gate_armed   <= 1'b0;
+			ss_active       <= 1'b0;
+			ss_arm_cnt      <= 4'd0;
+			ss_in_stub      <= 1'b0;
+			ss_writes       <= 16'd0;
+			ss_last_wa      <= 32'd0;
+			ss_last_wd      <= 32'd0;
+			ss_mode_restore <= 1'b0;
+			ss_restore_esp  <= 32'd0;
+			ss_hold         <= 1'b0;
+			ss_snapshot     <= 1'b0;
+			ss_esp_out      <= 32'd0;
+		end
+		else begin
+			ss_in_stub <= ss_eip_in_stub;
+
+			case (ss_state)
+			SS_IDLE: if (ss_save_req || ss_restore_req) begin
+				ss_mode_restore <= ss_restore_req && !ss_save_req;
+				// +4 skips the marker slot the save stub pushed, so `popad`
+				// lands on the pushad frame and `iret` on the interrupt's.
+				ss_restore_esp  <= ss_esp_in + 32'd4;
+
+				// Arm the overlay first, then evict the gate's cache line, and
+				// only then let the NMI in: if the line were still cached the
+				// CPU would read the game's own gate and vanish into whatever
+				// the game does with vector 2.
+				ss_gate_armed  <= 1'b1;
+				ss_active      <= 1'b1;
+				ss_writes      <= 16'd0;
+				ss_snoop_addr  <= {14'd0, ss_gate_dw0, 2'b00};
+				ss_snoop_valid <= 1'b1;
+				ss_arm_cnt     <= 4'd0;
+				ss_state       <= SS_INVAL;
+			end
+
+			// Give the invalidate time to retire before the NMI is offered.
+			SS_INVAL: begin
+				ss_arm_cnt <= ss_arm_cnt + 4'd1;
+				if (ss_arm_cnt == 4'd8) begin
+					ss_nmi   <= 1'b1;
+					ss_state <= SS_NMI;
+				end
+			end
+
+			// z386 edge-detects NMI, so the level only has to be held long
+			// enough to be seen.
+			SS_NMI: begin
+				ss_arm_cnt <= ss_arm_cnt + 4'd1;
+				if (ss_arm_cnt == 4'd15) begin
+					ss_nmi   <= 1'b0;
+					ss_state <= SS_RUN;
+				end
+			end
+
+			// Frozen on the marker write. mem_accept is already gated by
+			// ss_hold, so no further memory cycle -- and in particular no
+			// write to main RAM -- can retire until the caller lets go.
+			SS_RUN: if (ss_hold && ss_hold_rel) begin
+				ss_hold     <= 1'b0;
+				ss_snapshot <= 1'b0;
+				ss_active   <= 1'b0;
+				// The overlay comes down with the hold. The stub is past its
+				// last fetch by now (it sits in the prefetch queue), and
+				// leaving the gate substituted would silently redirect any
+				// later NMI the game itself took.
+				ss_gate_armed <= 1'b0;
+				ss_state      <= SS_IDLE;
+			end
+
+			default: ss_state <= SS_IDLE;
+			endcase
+
+			// Snoop the stub's own writes. Everything it pushes goes to the
+			// game's stack in main RAM, which the blob carries regardless; the
+			// only thing the hardware has to keep is the last one, whose
+			// address and value together pin down both ESP and the SS base.
+			if (ss_active && ss_eip_in_stub && ram_we && !dma_own) begin
+				ss_writes  <= ss_writes + 16'd1;
+				ss_last_wa <= {14'd0, ram_addr, 2'b00};
+				ss_last_wd <= ram_din;
+
+				// The marker: `mov eax,esp` then `push eax` is the only write
+				// whose stored VALUE is its own destination address plus four.
+				// Recognising it by shape rather than by counting means the
+				// stub can grow without the hardware having to be told.
+				if (!ss_hold
+				    && (ram_din == ({14'd0, ram_addr, 2'b00} + 32'd4))) begin
+					ss_hold     <= 1'b1;
+					ss_snapshot <= 1'b1;
+					// Only a save has an ESP worth keeping; a restore's marker
+					// is thrown away by its own `mov esp, imm32`.
+					if (!ss_mode_restore)
+						ss_esp_out <= {14'd0, ram_addr, 2'b00};
+				end
+			end
+		end
+	end
+
 	wire sel_io  = (byte_addr[31:11] == 21'd0) && byte_addr[10];
 	wire sel_ram = (byte_addr[31:18] == 14'd0) && !sel_io;
 	wire sel_rom = ((byte_addr[31:22] == 10'd0) && byte_addr[21])   // 0020_0000
@@ -335,7 +647,9 @@ module spi_cpu
 	reg dma_own;
 	assign dma_gnt = dma_own;
 
-	wire [15:0] ram_addr_mux = dma_own ? dma_addr : ram_addr;
+	wire [15:0] ram_addr_mux = ss_ram_own ? ss_ram_addr :
+	                           dma_own     ? dma_addr    : ram_addr;
+	assign ss_ram_dout = ram_dout;
 
 	// dword 0xDC00..0xDFFF is byte 0x37000..0x37FFF (the sprite list),
 	// dword 0xE000..0xE3FF is byte 0x38000..0x38FFF (the tilemap source).
@@ -354,9 +668,9 @@ module spi_cpu
 	(
 		.clk  (clk),
 		.addr (ram_addr_mux),
-		.din  (ram_din),
-		.be   (ram_be),
-		.we   (ram_we && !dma_own),
+		.din  (ss_ram_own ? ss_ram_din : ram_din),
+		.be   (ss_ram_own ? 4'hF       : ram_be),
+		.we   (ss_ram_own ? ss_ram_we  : (ram_we && !dma_own)),
 		.dout (ram_dout)
 	);
 
@@ -386,6 +700,7 @@ module spi_cpu
 	localparam [2:0] S_ROM_ACK = 3'd4;
 	localparam [2:0] S_ROM_OUT = 3'd5;
 	localparam [2:0] S_NULL    = 3'd6;
+	localparam [2:0] S_SS_RD   = 3'd7;   // the savestate stub window
 
 	reg  [2:0] state;
 	reg  [7:0] burst_left;
@@ -402,6 +717,11 @@ module spi_cpu
 	// so data is valid two cycles after the issuing state.
 	reg        ram_rd_q;
 	reg        ram_rd_pipe;
+	// Which half of the overlaid vector-2 gate, if either, the read now in the
+	// RAM's two-cycle pipe is going to land on. Carried alongside the read
+	// rather than recomputed on delivery, because by then `ram_addr` has moved
+	// on to the next dword of the burst.
+	reg  [1:0] ss_gsel_q, ss_gsel_pipe;
 
 	// Accept combinationally: the cache samples ready in the same cycle it
 	// drives valid, and holds valid until it sees ready. `valid` is also
@@ -426,8 +746,13 @@ module spi_cpu
 	// byte at a time with each byte a full SDRAM write, or a DS2404 port. The
 	// CPU waits rather than risk a dropped byte. Same shape as the DMA hold
 	// above, and the same justification -- the real board stops the 386 too.
+	// ss_hold is the savestate freeze. Same shape as the DMA hold above and for
+	// the same reason: with no memory cycle accepted, nothing the CPU is doing
+	// can reach main RAM, so the blob can be streamed out of a RAM that is
+	// provably still.
 	wire mem_accept = cpu_valid && !cpu_inta && cpu_en && !dma_own && !dma_req
-	                  && !io_stall && (state == S_IDLE);
+	                  && !io_stall && !ss_hold && !ss_ram_own
+	                  && (state == S_IDLE);
 	assign cpu_ready = cpu_inta ? inta_ready : mem_accept;
 
 	// Guard against a zero burstcount, which would underflow the counter.
@@ -535,10 +860,15 @@ module spi_cpu
 		io_cyc_rd      <= 1'b0;
 		ram_rd_q    <= 1'b0;
 		ram_rd_pipe <= ram_rd_q;
+		ss_gsel_q    <= 2'd0;
+		ss_gsel_pipe <= ss_gsel_q;
 
-		// Deliver the dword read from main RAM two cycles ago.
+		// Deliver the dword read from main RAM two cycles ago -- except where
+		// the savestate has overlaid the vector-2 gate, which is answered from
+		// here instead so the game's own IDT is never written to.
 		if (ram_rd_pipe) begin
-			mem_din        <= ram_dout;
+			mem_din        <= (ss_gsel_pipe == 2'd1) ? ss_gate_lo :
+			                  (ss_gsel_pipe == 2'd2) ? ss_gate_hi : ram_dout;
 			mem_resp_valid <= 1'b1;
 		end
 
@@ -546,6 +876,8 @@ module spi_cpu
 			state      <= S_IDLE;
 			sdr_req    <= 1'b0;
 			burst_left <= 8'd0;
+			ss_gsel_q    <= 2'd0;
+			ss_gsel_pipe <= 2'd0;
 			dma_own    <= 1'b0;
 			dbg_c_hits <= 8'd0;
 			dbg_c_rom  <= 64'd0;
@@ -593,6 +925,7 @@ module spi_cpu
 				else if (sel_ram) begin
 					ram_addr    <= cpu_addr[17:2];
 					ram_rd_q    <= 1'b1;
+					ss_gsel_q   <= ss_gate_sel(cpu_addr[17:2]);
 					cur_dw      <= cpu_addr + 30'd1;
 					burst_left  <= burst_n - 8'd1;
 					state       <= (burst_n > 8'd1) ? S_RAM_RD : S_IDLE;
@@ -607,6 +940,9 @@ module spi_cpu
 					rd_src <= sel_s01 ? SNDW_S01 : sel_pcm ? SNDW_PCM : SNDW_PRG;
 					state  <= S_ROM_REQ;
 				end
+				else if (sel_ss) begin
+					state <= S_SS_RD;
+				end
 				else begin
 					state <= S_NULL;
 				end
@@ -616,6 +952,7 @@ module spi_cpu
 			S_RAM_RD: begin
 				ram_addr    <= cur_dw[15:0];
 				ram_rd_q    <= 1'b1;
+				ss_gsel_q   <= ss_gate_sel(cur_dw[15:0]);
 				cur_dw      <= cur_dw + 30'd1;
 				burst_left  <= burst_left - 8'd1;
 				if (burst_left == 8'd1) state <= S_IDLE;
@@ -673,6 +1010,16 @@ module spi_cpu
 				// Crossing into the next 8-byte group needs a fresh fetch;
 				// otherwise the next dword is already in rom_data.
 				else if (grp_last)       state <= S_ROM_REQ;
+			end
+
+			// The savestate stub. A cache-line fill asks for four dwords, so
+			// this walks the burst the same way S_NULL does.
+			S_SS_RD: begin
+				mem_din        <= ss_stub_rom(cur_dw[7:0]);
+				mem_resp_valid <= 1'b1;
+				cur_dw         <= cur_dw + 30'd1;
+				burst_left     <= burst_left - 8'd1;
+				if (burst_left == 8'd1) state <= S_IDLE;
 			end
 
 			// Unmapped read: answer with zeroes.

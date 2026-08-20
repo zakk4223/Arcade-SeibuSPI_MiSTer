@@ -57,6 +57,12 @@ module z386
     output     [15:0]  dbg_CS,
     output     [31:0]  dbg_EIP,
     output     [31:0]  dbg_CS_base,
+    // -- SeibuSPI: the IDT's base and limit, so the board can overlay one
+    //    interrupt gate while a savestate is being taken. Read-only taps on
+    //    the descriptor cache; nothing else about the core changes.
+    output     [31:0]  dbg_IDT_base,
+    output     [19:0]  dbg_IDT_limit,
+    output     [31:0]  dbg_CR0,
     output             dbg_pe,
     output             dbg_vm,
 
@@ -153,6 +159,9 @@ wire       vm = EFLAGS[17];         // Virtual 8086 mode
 assign dbg_CS  = CS;
 assign dbg_EIP = EIP;
 assign dbg_CS_base = CS_base;
+assign dbg_IDT_base  = seg_cache[SEG_IDT].base;
+assign dbg_IDT_limit = seg_cache[SEG_IDT].limit;
+assign dbg_CR0       = CR0;
 assign dbg_pe  = pe;
 assign dbg_vm  = vm;
 wire [1:0] cpl = vm ? 2'd3 : !pe ? 2'd0 : CS[1:0];
