@@ -35,12 +35,20 @@ module spi_video_timing
 	output            vblank,
 
 	output reg        line_start, // pulse at the start of each line
-	output reg        vbl_rise    // pulse on entry to vertical blanking
+	output reg        vbl_rise,   // pulse on entry to vertical blanking
+
+	// The savestate's view of the raster. Written only while `pause` is high,
+	// so the counters cannot move underneath the write.
+	output     [22:0] ss_state,
+	input      [22:0] ss_state_in,
+	input             ss_state_we
 );
 
 `include "spi_defs.vh"
 
 	reg [2:0] div;
+
+	assign ss_state = {div, vcnt, hcnt};
 
 	// Blanking and sync are simple decodes of the counters. At a 7.16 MHz pixel
 	// rate on a 57 MHz fabric there is no reason to pipeline them.
@@ -55,6 +63,12 @@ module spi_video_timing
 			ce_pix     <= 1'b0;
 			hcnt       <= 10'd0;
 			vcnt       <= 10'd0;
+			line_start <= 1'b0;
+			vbl_rise   <= 1'b0;
+		end
+		else if (ss_state_we) begin
+			{div, vcnt, hcnt} <= ss_state_in;
+			ce_pix     <= 1'b0;
 			line_start <= 1'b0;
 			vbl_rise   <= 1'b0;
 		end

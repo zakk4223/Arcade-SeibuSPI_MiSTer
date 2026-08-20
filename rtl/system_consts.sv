@@ -36,9 +36,17 @@ package system_consts;
 	parameter int SSIDX_PALETTE_RAM = 3;   // 4K x 30, streamed as 32
 	parameter int SSIDX_SPRITE_RAM  = 4;   // 1K x 32
 
+	// The raster. Small, and load-bearing out of proportion to its size: the
+	// board-wide pause PRESERVES the phase between the 386 and the raster
+	// across a transfer, but a restore has to SET it -- the CPU comes back to
+	// where it was at save time and the raster would otherwise still be at
+	// load time. Everything else on the video side is regenerated from these
+	// counters within a line.
+	parameter int SSIDX_VIDEO_TIMING = 5;  // {div, vcnt, hcnt}
+
 	// Sections after this point arrive with the later phases; the count below
 	// is what `memory_stream` is told to walk, so it has to grow with them.
-	parameter int SSIDX_COUNT       = 5;
+	parameter int SSIDX_COUNT       = 6;
 
 	// ---- the DDR3 window -------------------------------------------------
 	//

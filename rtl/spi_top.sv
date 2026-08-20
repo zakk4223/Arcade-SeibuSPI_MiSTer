@@ -163,6 +163,9 @@ module spi_top
 		.clk        (clk_sys),
 		.reset      (sys_reset),
 		.pause      (ss_pause),
+		.ss_state   (vt_ss_state),
+		.ss_state_in(vt_ss_in),
+		.ss_state_we(vt_ss_we),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
@@ -677,6 +680,27 @@ module spi_top
 
 		.busy            (ss_busy)
 	);
+
+	// SSIDX_VIDEO_TIMING: one 32-bit item, the raster counters. Small enough to
+	// answer inline rather than through an adaptor.
+	wire [22:0] vt_ss_state;
+	reg  [22:0] vt_ss_in;
+	reg         vt_ss_we;
+
+	always @(posedge clk_sys) begin
+		ssb[SSIDX_VIDEO_TIMING].setup(SSIDX_VIDEO_TIMING, 32'd1, 2);
+		vt_ss_we <= 1'b0;
+		if (ssb[SSIDX_VIDEO_TIMING].access(SSIDX_VIDEO_TIMING)) begin
+			if (ssb[SSIDX_VIDEO_TIMING].read)
+				ssb[SSIDX_VIDEO_TIMING].read_response(SSIDX_VIDEO_TIMING,
+					{41'd0, vt_ss_state});
+			else if (ssb[SSIDX_VIDEO_TIMING].write) begin
+				vt_ss_in <= ssb[SSIDX_VIDEO_TIMING].data[22:0];
+				vt_ss_we <= 1'b1;
+				ssb[SSIDX_VIDEO_TIMING].write_ack(SSIDX_VIDEO_TIMING);
+			end
+		end
+	end
 
 	// ------------------------------------------------------------------
 	// Video RAMs

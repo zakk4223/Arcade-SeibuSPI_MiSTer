@@ -342,7 +342,7 @@ module spi_cpu
 	always @(posedge clk) begin
 		inta_ready <= 1'b0;
 
-		if (reset) begin
+if (reset) begin
 			istate         <= I_IDLE;
 			inta_responded <= 1'b0;
 			irq_pending    <= 1'b0;
