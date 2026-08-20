@@ -261,7 +261,13 @@ Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv
 # T80s.sv here is the Verilator stand-in; Quartus builds the VHDL core instead.
 SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv T80s.sv
 
-CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RTL)/spi_snd_window.sv \
+# The savestate framework. system_consts.sv first (it is the package) and
+# savestates.sv next (it declares the interface the slaves take as a port).
+SS_SRCS := $(RTL)/system_consts.sv $(RTL)/savestates.sv $(RTL)/memory_stream.sv \
+           $(RTL)/ddram.sv $(RTL)/spi_ss.sv $(RTL)/spi_ss_bridge.sv \
+           $(RTL)/spi_ss_vram.sv
+
+CORE_SRCS := $(SS_SRCS) $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RTL)/spi_snd_window.sv \
              $(RTL)/spi_io.sv $(RTL)/spi_mainram.sv $(RTL)/spi_reset_sync.sv \
              $(RTL)/spi_dpram.sv $(RTL)/spi_dma.sv $(RTL)/spi_layers.sv \
              $(RTL)/spi_mixer.sv $(RTL)/spi_tile_decrypt.sv \

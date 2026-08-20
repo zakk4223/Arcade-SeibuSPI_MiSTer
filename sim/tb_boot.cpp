@@ -221,112 +221,83 @@ int main(int argc, char **argv)
     uint32_t eip_last = 0;
     uint64_t eip_changes = 0, in_stub_cycles = 0;
     int      in_stub_d = 0, in_stub_runs = 0;
-    uint64_t ss_resume_cyc = 0, ss_resume_vbl = 0;
-    bool     ss_hashed = false;
-    const char *ha_env = getenv("SS_HASH_AFTER");
-    const uint64_t ss_hash_after = ha_env ? strtoull(ha_env, nullptr, 0) : 0;
 
-    // Savestate phase 0. SS_AT is a clk_cpu cycle count, chosen by the caller,
-    // at which the NMI is offered; 0 disables the whole experiment so every
+    // ---- savestates ------------------------------------------------------
+    // SS_AT is a cycle count at which a save is asked for, the way the OSD
+    // asks; SS_RESTORE_AT likewise for a load. 0 disables each, so every
     // existing use of this testbench behaves exactly as before.
     const char *ss_env = getenv("SS_AT");
     const uint64_t ss_at = ss_env ? strtoull(ss_env, nullptr, 0) : 0;
-    bool     ss_fired = false, ss_entered = false;
-    int      ss_state_d = 0, ss_trace = 0;
-    bool     ss_gate_seen = false;
-    bool     ss_snapped = false, ss_released = false, ss_armed_done = false;
-    uint64_t ss_snap_cyc = 0;
-    uint32_t ss_saved_esp = 0;
-    // How long the hardware pretends to be busy streaming the blob out. The
-    // real transfer is ~305 KB over a 64-bit DDR3 port and takes well under a
-    // millisecond; what matters here is only that the CPU comes back.
-    const char *hold_env = getenv("SS_HOLD");
-    const uint64_t ss_hold_cycles = hold_env ? strtoull(hold_env, nullptr, 0)
-                                             : 2000;
-    dut->ss_restore_req = 0;
-    dut->ss_hold_rel    = 0;
-    dut->ss_esp_in      = 0;
-    dut->ss_ram_own     = 0;
-    dut->ss_ram_we      = 0;
-    dut->ss_ram_addr    = 0;
-    dut->ss_ram_din     = 0;
-    dut->ss_inval       = 0;
-    dut->ss_inval_set   = 0;
-
-    // The blob: all 256 KB of main RAM, plus the one register the hardware
-    // has to keep for itself.
-    std::vector<uint32_t> ss_blob(65536, 0);
-    uint32_t ss_saved_eip = 0, ss_saved_cs = 0, ss_saved_flags = 0;
-
-    // Where the walk over main RAM has got to, and which phase it is in.
-    enum { W_NONE, W_READ, W_WRITE, W_INVAL, W_DONE };
-    int      ss_walk = W_NONE;
-    uint32_t ss_wi = 0;
-    enum { P_WAIT, P_READ, P_REL, P_DONE };
-    int      ss_phase = P_WAIT;
-
     const char *rst_env = getenv("SS_RESTORE_AT");
     const uint64_t ss_restore_at = rst_env ? strtoull(rst_env, nullptr, 0) : 0;
-    bool     ss_rst_done = false;
-    uint64_t ss_rst_cyc = 0;
-    enum { V_IDLE, V_NMI, V_WAIT, V_REL, V_DONE };
-    int      ss_v2 = V_IDLE;
-    uint32_t ss_frame1[12] = {0}, ss_frame2[12] = {0};
-    bool     ss_frame2_ok = false;
-    const char *vd_env = getenv("SS_VERIFY_AFTER");
-    const uint64_t ss_verify_delay = vd_env ? strtoull(vd_env, nullptr, 0) : 0;
-    enum { R_IDLE, R_NMI, R_WAITSNAP, R_WRITE, R_REL, R_DONE };
-    int      ss_rphase = R_IDLE;
-    uint64_t ss_eip_match_cyc = 0;
+    const char *ha_env = getenv("SS_HASH_AFTER");
+    const uint64_t ss_hash_after = ha_env ? strtoull(ha_env, nullptr, 0) : 0;
+
+    // A flat DDR3, 512 KB of it -- one savestate slot. memory_stream drives a
+    // byte address and a 64-bit port, so this is indexed by addr >> 3. Answers
+    // with the one-cycle latency the real controller has at its best; there is
+    // no point modelling worse, because the engine holds its request until
+    // rdata_ready and the transfer is not on any critical path.
+    std::vector<uint64_t> ddr(65536, 0);
+    dut->ddr_rdata       = 0;
+    dut->ddr_busy        = 0;
+    dut->ddr_rdata_ready = 0;
+    dut->ss_save = 0;
+    dut->ss_load = 0;
+    int      ddr_lat = -1;
+    uint32_t ddr_lat_addr = 0;
+    uint64_t ddr_writes = 0, ddr_reads = 0;
+
+    bool     ss_fired = false, ss_done = false;
+    bool     rs_fired = false, rs_done = false;
+    uint64_t ss_snap_cyc = 0;
+    uint32_t ss_saved_esp = 0;
+    bool     ss_busy_d = false;
+    uint64_t ss_resume_cyc = 0, ss_resume_vbl = 0;
+    bool     ss_hashed = false;
+    uint32_t ss_saved_eip = 0;
     bool     ss_eip_matched = false;
+    uint64_t ss_eip_match_cyc = 0;
+    bool     ss_entered = false;
     uint64_t ss_enter_cyc = 0;
-    uint32_t ss_eip_at_fire = 0, ss_cs_at_fire = 0;
-    dut->ss_save_req = 0;
+    uint32_t ss_marker = 0;
+    uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
+    uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
+    uint64_t ss_snap_vbl = 0;
+
     for (uint64_t t = 0; t < max_steps; t++) {
         // clk_ram toggles every step; clk_sys every 2; clk_cpu every 4
         dut->clk_ram = (t >> 0) & 1;
         dut->clk_sys = (t >> 1) & 1;
         dut->clk_cpu = (t >> 2) & 1;
 
-        // The savestate's walk over main RAM, one dword per clk_cpu edge --
-        // the same port the CPU uses, stolen while the CPU is frozen. Reads
-        // are a cycle behind the address, exactly as the RTL is.
-        if ((t & 7) == 4 && ss_walk != W_NONE && ss_walk != W_DONE) {
-            if (ss_walk == W_READ) {
-                if (ss_wi > 0 && ss_wi <= 65536)
-                    ss_blob[ss_wi - 1] = dut->ss_ram_dout;
-                if (ss_wi <= 65536) {
-                    dut->ss_ram_addr = (uint16_t)(ss_wi & 0xFFFF);
-                    dut->ss_ram_we   = 0;
-                    ss_wi++;
-                } else {
-                    printf("  SS: read 256 KB of main RAM out through the CPU's "
-                           "own port\n");
-                    ss_walk = W_DONE;
-                }
-            } else if (ss_walk == W_WRITE) {
-                if (ss_wi < 65536) {
-                    dut->ss_ram_addr = (uint16_t)ss_wi;
-                    dut->ss_ram_din  = ss_blob[ss_wi];
-                    dut->ss_ram_we   = 1;
-                    ss_wi++;
-                } else {
-                    dut->ss_ram_we = 0;
-                    ss_wi   = 0;
-                    ss_walk = W_INVAL;
-                }
-            } else if (ss_walk == W_INVAL) {
-                // 256 sets, one pulse each; both L1s see the same snoop.
-                if (ss_wi < 256) {
-                    dut->ss_inval     = 1;
-                    dut->ss_inval_set = (uint8_t)ss_wi;
-                    ss_wi++;
-                } else {
-                    dut->ss_inval = 0;
-                    printf("  SS: wrote 256 KB back and invalidated all 256 "
-                           "cache sets\n");
-                    ss_walk = W_DONE;
-                }
+        // The DDR3 the blob lives in. One clk_sys tick per two steps, which
+        // is where memory_stream runs. A read answers on the next tick; a
+        // write lands immediately. The engine holds its request until it sees
+        // rdata_ready, so a lazier model would only make the transfer longer.
+        if ((t & 3) == 0) {
+            bool acq = dut->ddr_acquire;
+            dut->ddr_rdata_ready = 0;
+            if (ddr_lat == 0) {
+                dut->ddr_rdata = ddr[(ddr_lat_addr >> 3) & 0xFFFF];
+                dut->ddr_rdata_ready = 1;
+                ddr_lat = -1;
+                ddr_reads++;
+            } else if (ddr_lat > 0) {
+                ddr_lat--;
+            } else if (acq && dut->ddr_read) {
+                ddr_lat_addr = dut->ddr_addr;
+                ddr_lat = 0;
+            } else if (acq && dut->ddr_write) {
+                uint32_t w = (dut->ddr_addr >> 3) & 0xFFFF;
+                uint64_t cur = ddr[w], nw = dut->ddr_wdata;
+                for (int b = 0; b < 8; b++)
+                    if (dut->ddr_byteenable & (1u << b)) {
+                        uint64_t m = 0xFFULL << (8 * b);
+                        cur = (cur & ~m) | (nw & m);
+                    }
+                ddr[w] = cur;
+                ddr_writes++;
             }
         }
 
@@ -435,53 +406,25 @@ int main(int argc, char **argv)
             hb_d = dut->v_hb; vb_d = dut->v_vb;
 
             cyc++;
-            if (dut->p_eip != eip_last) { eip_changes++; eip_last = dut->p_eip; }
+            if (dut->p_eip != eip_last) {
+                eip_changes++;
+                // The first few instruction boundaries after a load is
+                // released: where the restore stub's iret actually landed.
+                if (in_stub_d && trail_armed && trail_n < 24)
+                    trail[trail_n++] = dut->p_eip;
+                eip_last = dut->p_eip;
+            }
             if (dut->p_ss_in_stub) in_stub_cycles++;
-            // The determinism probe. The CPU's evolution is a function of its
-            // registers and main RAM and nothing else -- the DMA only reads
-            // RAM -- so if a restore really put both back, then running the
-            // same number of cycles from the save point and from the restore
-            // point must leave main RAM in exactly the same state. Measured
-            // from the cycle the CPU leaves the stub, which is the instant it
-            // resumes in both cases.
-            // The resume instant, defined the same way in both runs: the
-            // first cycle after the hold is released at which the CPU is
-            // executing at the saved EIP again. dbg_EIP is not usable for this
-            // while the CPU is frozen -- it reverts to the interrupted address
-            // -- so it is only sampled once the operation has finished.
-            if (!ss_resume_cyc && ss_saved_eip
-                && (ss_restore_at ? ss_rst_done : ss_released)
-                && dut->p_eip == ss_saved_eip) {
-                ss_resume_cyc = cyc;
-                ss_resume_vbl = n_vbl;
-                printf("  SS: resumed at the saved EIP %08X, cycle %llu\n",
-                       ss_saved_eip, (unsigned long long)cyc);
-            }
-            if (ss_hash_after && ss_resume_cyc && !ss_hashed
-                && cyc >= ss_resume_cyc + ss_hash_after) {
-                ss_hashed = true;
-                uint64_t hh = 1469598103934665603ULL;
-                for (uint32_t i = 0; i < 65536; i++) {
-                    dut->peek_addr = (uint16_t)i;
-                    dut->eval();
-                    uint32_t v = dut->peek_data;
-                    for (int b = 0; b < 4; b++) {
-                        hh ^= (v >> (8 * b)) & 0xFF;
-                        hh *= 1099511628211ULL;
-                    }
-                }
-                printf("  SS: RAM hash %llu cycles after resume (resume was at "
-                       "cycle %llu, %llu vblanks since): %016llX\n",
-                       (unsigned long long)ss_hash_after,
-                       (unsigned long long)ss_resume_cyc,
-                       (unsigned long long)(n_vbl - ss_resume_vbl),
-                       (unsigned long long)hh);
-            }
             if (dut->p_ss_in_stub != in_stub_d) {
                 if (in_stub_runs++ < 16)
                     printf("  SS: in_stub %d -> %d at cycle %llu, EIP=%08X\n",
                            in_stub_d, dut->p_ss_in_stub,
                            (unsigned long long)cyc, dut->p_eip);
+                // Arm the trail when the CPU leaves the stub for the second
+                // time, which on a save-then-load run is the load's exit.
+                if (in_stub_d && !dut->p_ss_in_stub) {
+                    if (ss_done) trail_armed = true;
+                }
                 in_stub_d = dut->p_ss_in_stub;
             }
 
@@ -498,220 +441,170 @@ int main(int argc, char **argv)
                 idt_base_last = dut->p_idt_base;
             }
 
-            // Fire the savestate NMI once, at the requested cycle.
-            // Held, not pulsed: clk_cpu is a quarter of the model's step
-            // rate, so a request one C++ iteration wide can fall between two
-            // of its edges and never be sampled at all.
-            if (ss_at && cyc >= ss_at && dut->p_ss_state == 0 && !ss_armed_done) {
-                dut->ss_save_req = 1;
-                if (!ss_fired) {
-                    ss_fired       = true;
-                    ss_eip_at_fire = dut->p_eip;
-                    ss_cs_at_fire  = dut->p_cs;
-                    printf("  SS: firing at cycle %llu, CS=%04X EIP=%08X, "
-                           "IDT=%08X, gate dword=%04X\n",
-                           (unsigned long long)cyc, ss_cs_at_fire,
-                           ss_eip_at_fire, dut->p_idt_base,
-                           dut->p_ss_gate_dw0);
-                }
-            } else {
-                dut->ss_save_req = 0;
+            // ---- savestates, driven the way the OSD drives them --------
+            // One pulse in, and the board does everything: NMI, stub, freeze,
+            // the whole blob through memory_stream to DDR3, release. Phase 0's
+            // testbench drove each of those steps by hand; none of that is
+            // here any more, which is the point -- what runs now is the path
+            // the hardware takes.
+            dut->ss_save = 0;
+            dut->ss_load = 0;
+            if (ss_at && !ss_fired && cyc >= ss_at && !dut->p_ss_busy) {
+                ss_fired = true;
+                dut->ss_save = 1;
+                printf("  SS: save asked for at cycle %llu, CS=%04X EIP=%08X\n",
+                       (unsigned long long)cyc, dut->p_cs, dut->p_eip);
             }
-            // One save only: the request is level-held, so without this the
-            // machine would take another the moment it returned to idle.
-            if (ss_fired && dut->p_ss_state != 0) ss_armed_done = true;
-            if (ss_fired && dut->p_ss_state != ss_state_d) {
-                if (ss_trace++ < 12)
-                    printf("  SS: state %d -> %d at cycle %llu (nmi=%d)\n",
-                           ss_state_d, dut->p_ss_state,
-                           (unsigned long long)cyc, dut->p_ss_nmi);
-                ss_state_d = dut->p_ss_state;
+            if (ss_restore_at && ss_done && !rs_fired
+                && cyc >= ss_restore_at && !dut->p_ss_busy) {
+                rs_fired = true;
+                dut->ss_load = 1;
+                printf("  SS: load asked for at cycle %llu, CS=%04X EIP=%08X\n",
+                       (unsigned long long)cyc, dut->p_cs, dut->p_eip);
             }
-            if (ss_fired && !ss_gate_seen && dut->p_ss_gate_reads) {
-                ss_gate_seen = true;
-                printf("  SS: gate fetched at cycle %llu (%llu after the NMI)\n",
-                       (unsigned long long)cyc,
-                       (unsigned long long)(cyc - ss_at));
-            }
-            // The snapshot instant, and the release that follows it.
-            if (dut->p_ss_snapshot && !ss_snapped) {
-                ss_snapped   = true;
+
+            if (dut->p_ss_snapshot && !ss_snap_cyc) {
                 ss_snap_cyc  = cyc;
-                ss_saved_esp = dut->p_ss_esp_out;
-                printf("  SS: SNAPSHOT at cycle %llu, ESP=%08X -- the CPU is "
-                       "frozen and main RAM is quiet\n",
+                // Frozen, and the stream has not run yet on a save nor
+                // finished on a load. Hashing main RAM here is layout-free:
+                // the two hashes must match if the restore is exact, and
+                // neither depends on knowing how memory_stream packs a section.
+                uint64_t hh = 1469598103934665603ULL;
+                for (uint32_t i = 0; i < 65536; i++) {
+                    dut->peek_addr = (uint16_t)i;
+                    dut->eval();
+                    uint32_t v = dut->peek_data;
+                    for (int b = 0; b < 4; b++) {
+                        hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
+                    }
+                }
+                ss_snap_vbl = n_vbl;
+                if (!ss_done) ss_hash_at_save = hh;
+                else          ss_hash_pre_load = hh;
+                if (!ss_done) ss_saved_esp = dut->p_ss_esp_out;
+                else          ss_marker    = dut->p_ss_esp_out;
+                printf("  SS: frozen at cycle %llu, marker slot %08X\n",
                        (unsigned long long)cyc, ss_saved_esp);
             }
-            // The save, as an explicit sequence. Doing this with ad-hoc
-            // flags once left ss_ram_own asserted for the rest of the run,
-            // which freezes the CPU and looks exactly like a savestate that
-            // fails to resume -- so it is a state machine now.
-            switch (ss_phase) {
-            case P_WAIT:
-                if (ss_snapped) {
-                    dut->ss_ram_own = 1;
-                    ss_wi   = 0;
-                    ss_walk = W_READ;
-                    ss_phase = P_READ;
-                }
-                break;
-            case P_READ:
-                if (ss_walk == W_DONE) {
-                    dut->ss_ram_own = 0;
-                    ss_walk = W_NONE;
-                    ss_saved_eip   = ss_blob[(ss_saved_esp + 36) >> 2];
-                    ss_saved_cs    = ss_blob[(ss_saved_esp + 40) >> 2];
-                    ss_saved_flags = ss_blob[(ss_saved_esp + 44) >> 2];
-                    for (int i = 0; i < 12; i++)
-                        ss_frame1[i] = ss_blob[(ss_saved_esp + 4u * i) >> 2];
-                    printf("  SS: blob captured -- resume point is CS:EIP = "
-                           "%04X:%08X, EFLAGS %08X\n",
-                           ss_saved_cs, ss_saved_eip, ss_saved_flags);
-                    dut->ss_hold_rel = 1;
-                    ss_phase = P_REL;
-                }
-                break;
-            case P_REL:
-                if (!dut->p_ss_snapshot) {
-                    dut->ss_hold_rel = 0;
-                    ss_released = true;
-                    printf("  SS: released at cycle %llu -- the game runs on\n",
-                           (unsigned long long)cyc);
-                    ss_phase = P_DONE;
-                }
-                break;
-            default:
-                break;
-            }
 
-            // ---- the restore ----------------------------------------
-            // Order matters and is the mirror of the save: interrupt FIRST,
-            // let the stub's marker freeze the CPU, and only then put the blob
-            // back. Writing memory before the NMI leaves the interrupt's own
-            // three pushes sitting on top of the restored register frame.
-            switch (ss_rphase) {
-            case R_IDLE:
-                if (ss_restore_at && ss_released && cyc >= ss_restore_at) {
-                    printf("  SS: RESTORING at cycle %llu (saved CS:EIP "
-                           "%04X:%08X; the game is at %04X:%08X)\n",
-                           (unsigned long long)cyc, ss_saved_cs, ss_saved_eip,
-                           dut->p_cs, dut->p_eip);
-                    dut->ss_esp_in = ss_saved_esp;
-                    ss_rphase = R_NMI;
-                }
-                break;
-            case R_NMI:
-                if (dut->p_ss_state == 0) {
-                    dut->ss_restore_req = 1;
-                } else {
-                    dut->ss_restore_req = 0;
-                    printf("  SS: restore NMI taken at cycle %llu\n",
-                           (unsigned long long)cyc);
-                    ss_rphase = R_WAITSNAP;
-                }
-                break;
-            case R_WAITSNAP:
-                if (dut->p_ss_snapshot) {
-                    printf("  SS: restore stub frozen on its marker at cycle "
-                           "%llu -- memory goes back now\n",
-                           (unsigned long long)cyc);
-                    dut->ss_ram_own = 1;
-                    ss_wi   = 0;
-                    ss_walk = W_WRITE;
-                    ss_rphase = R_WRITE;
-                }
-                break;
-            case R_WRITE:
-                if (ss_walk == W_DONE) {
-                    dut->ss_ram_own = 0;
-                    ss_walk = W_NONE;
-                    dut->ss_hold_rel = 1;
-                    ss_rphase = R_REL;
-                }
-                break;
-            case R_REL:
-                if (!dut->p_ss_snapshot) {
-                    dut->ss_hold_rel = 0;
-                    ss_rst_done = true;
-                    ss_rst_cyc  = cyc;
-                    {   // Is main RAM now byte-for-byte the blob we captured?
-                        uint32_t diff = 0, first = 0;
-                        for (uint32_t i = 0; i < 65536; i++) {
-                            dut->peek_addr = (uint16_t)i;
-                            dut->eval();
-                            if (dut->peek_data != ss_blob[i]) {
-                                if (!diff) first = i;
-                                diff++;
-                            }
-                        }
-                        printf("  SS: main RAM vs the blob: %u of 65536 dwords "
-                               "differ%s\n", diff,
-                               diff ? "" : " -- the memory restore is exact");
-                        if (diff)
-                            printf("      first difference at dword %05X "
-                                   "(byte %08X)\n", first, first * 4);
-                    }
-                    printf("  SS: restore released at cycle %llu\n",
-                           (unsigned long long)cyc);
-                    ss_rphase = R_DONE;
-                }
-                break;
-            default:
-                break;
-            }
-            // A second save, once the restore has settled: the only way to
-            // ask the CPU what its registers actually are. If the restore was
-            // faithful this frame must match the first one.
-            switch (ss_v2) {
-            case V_IDLE:
-                if (ss_rst_done && ss_verify_delay
-                    && cyc >= ss_rst_cyc + ss_verify_delay) {
-                    ss_v2 = V_NMI;
-                }
-                break;
-            case V_NMI:
-                if (dut->p_ss_state == 0) {
-                    dut->ss_save_req = 1;
-                } else {
-                    dut->ss_save_req = 0;
-                    ss_v2 = V_WAIT;
-                }
-                break;
-            case V_WAIT:
-                if (dut->p_ss_snapshot) {
-                    uint32_t e = dut->p_ss_esp_out;
-                    printf("\n  verification frame, taken %llu cycles after "
-                           "the restore (ESP=%08X):\n",
-                           (unsigned long long)ss_verify_delay, e);
+            // busy falls when the whole operation is over.
+            if (ss_busy_d && !dut->p_ss_busy) {
+                if (!ss_done) {
+                    ss_done = true;
+                    printf("  SS: the CPU was frozen for %llu cycles "
+                           "(%.2f ms at clk_sys) and %llu vblanks passed in "
+                           "that time\n",
+                           (unsigned long long)(cyc - ss_snap_cyc),
+                           (double)(cyc - ss_snap_cyc) / 57272.727,
+                           (unsigned long long)(n_vbl - ss_snap_vbl));
+                    printf("  SS: SAVE COMPLETE at cycle %llu -- %llu DDR3 "
+                           "writes, %llu reads\n",
+                           (unsigned long long)cyc,
+                           (unsigned long long)ddr_writes,
+                           (unsigned long long)ddr_reads);
+                    // What the blob says. Section GLOBAL's header is at word
+                    // 1 and its one item at word 2; MAIN_RAM's header follows.
+                    printf("        blob GLOBAL payload = %08X  (should be the "
+                           "marker slot %08X)\n",
+                           (uint32_t)(ddr[2] & 0xFFFFFFFFu), ss_saved_esp);
+                    // The frame, read out of main RAM rather than out of the
+                    // blob: the stub does not erase it on its way out, and the
+                    // peek window is authoritative where a hand-rolled parse of
+                    // memory_stream's packing is just one more thing to get
+                    // wrong.
+                    static const char *fn[] = {
+                        "marker", "EDI", "ESI", "EBP", "ESP(pushad)", "EBX",
+                        "EDX", "ECX", "EAX", "EIP", "CS", "EFLAGS" };
+                    printf("        the frame on the game's stack:\n");
                     for (int i = 0; i < 12; i++) {
-                        dut->peek_addr = (uint16_t)(((e + 4u * i) >> 2) & 0xFFFF);
+                        uint32_t byte = ss_saved_esp + 4u * i;
+                        dut->peek_addr = (uint16_t)((byte >> 2) & 0xFFFF);
                         dut->eval();
-                        ss_frame2[i] = dut->peek_data;
+                        if (i == 9) ss_saved_eip = dut->peek_data;
+                        printf("          [%08X] = %08X   %s\n",
+                               byte, dut->peek_data, fn[i]);
                     }
-                    ss_frame2_ok = true;
-                    dut->ss_hold_rel = 1;
-                    ss_v2 = V_REL;
+                } else if (!rs_done) {
+                    rs_done = true;
+                    printf("  SS: LOAD COMPLETE at cycle %llu\n",
+                           (unsigned long long)cyc);
+                    // Main RAM should now be the blob, byte for byte. The
+                    // frame the CPU is about to pop is part of that, so this
+                    // covers it too.
+                    uint32_t diff = 0;
+                    for (uint32_t i = 0; i < 65536; i++) {
+                        dut->peek_addr = (uint16_t)i;
+                        dut->eval();
+                        uint64_t d = ddr[3 + (i >> 1)];
+                        uint32_t want = (i & 1) ? (uint32_t)(d >> 32)
+                                               : (uint32_t)(d & 0xFFFFFFFFu);
+                        if (dut->peek_data != want) diff++;
+                    }
+                    printf("        main RAM vs the blob: %u of 65536 dwords "
+                           "differ (layout-dependent, diagnostic only)\n", diff);
+                    // The check that counts. Hashed while frozen in both cases,
+                    // so nothing the CPU does after release can contaminate it.
+                    uint64_t hh = 1469598103934665603ULL;
+                    for (uint32_t i = 0; i < 65536; i++) {
+                        dut->peek_addr = (uint16_t)i;
+                        dut->eval();
+                        uint32_t v = dut->peek_data;
+                        for (int b = 0; b < 4; b++) {
+                            hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
+                        }
+                    }
+                    ss_hash_post_load = hh;
+                    printf("        main RAM at save   : %016llX\n"
+                           "        main RAM before it : %016llX\n"
+                           "        main RAM restored  : %016llX  %s\n",
+                           (unsigned long long)ss_hash_at_save,
+                           (unsigned long long)ss_hash_pre_load,
+                           (unsigned long long)ss_hash_post_load,
+                           ss_hash_post_load == ss_hash_at_save
+                             ? "<- EXACT" : "<- MISMATCH");
                 }
-                break;
-            case V_REL:
-                if (!dut->p_ss_snapshot) { dut->ss_hold_rel = 0; ss_v2 = V_DONE; }
-                break;
-            default:
-                break;
+                ss_snap_cyc = 0;
             }
+            ss_busy_d = dut->p_ss_busy;
 
-            if (ss_rst_done && !ss_eip_matched && dut->p_eip == ss_saved_eip) {
-                ss_eip_matched  = true;
+            // The determinism probe, as in phase 0: measured from the first
+            // cycle after the operation finishes at which the CPU is executing
+            // at the EIP that was saved.
+            if (ss_saved_eip && !ss_resume_cyc
+                && (ss_restore_at ? rs_done : ss_done)
+                && dut->p_eip == ss_saved_eip) {
+                ss_resume_cyc = cyc;
+                ss_resume_vbl = n_vbl;
+                ss_eip_matched = true;
                 ss_eip_match_cyc = cyc;
-                printf("  SS: the CPU is back at the saved EIP %08X, cycle "
-                       "%llu\n", ss_saved_eip, (unsigned long long)cyc);
+                printf("  SS: resumed at the saved EIP %08X, cycle %llu\n",
+                       ss_saved_eip, (unsigned long long)cyc);
+            }
+            if (ss_hash_after && ss_resume_cyc && !ss_hashed
+                && cyc >= ss_resume_cyc + ss_hash_after) {
+                ss_hashed = true;
+                uint64_t hh = 1469598103934665603ULL;
+                for (uint32_t i = 0; i < 65536; i++) {
+                    dut->peek_addr = (uint16_t)i;
+                    dut->eval();
+                    uint32_t v = dut->peek_data;
+                    for (int b = 0; b < 4; b++) {
+                        hh ^= (v >> (8 * b)) & 0xFF;
+                        hh *= 1099511628211ULL;
+                    }
+                }
+                printf("  SS: RAM hash %llu cycles after resume (%llu vblanks "
+                       "since): %016llX\n",
+                       (unsigned long long)ss_hash_after,
+                       (unsigned long long)(n_vbl - ss_resume_vbl),
+                       (unsigned long long)hh);
             }
 
             if (ss_fired && !ss_entered && dut->p_ss_in_stub) {
                 ss_entered   = true;
                 ss_enter_cyc = cyc;
-                printf("  SS: entered the stub at cycle %llu (%llu after the "
-                       "NMI), EIP=%08X\n",
+                printf("  SS: in the stub at cycle %llu (%llu after asking), "
+                       "EIP=%08X\n",
                        (unsigned long long)cyc,
                        (unsigned long long)(cyc - ss_at), dut->p_eip);
             }
@@ -906,47 +799,44 @@ int main(int argc, char **argv)
            (int)(dut->p_cr0 & 1), (int)((dut->p_cr0 >> 31) & 1));
 
     if (ss_at) {
-        printf("\n-- savestate phase 0 --\n");
-        printf("NMI offered at cycle   : %llu (CS=%04X EIP=%08X)\n",
-               (unsigned long long)ss_at, ss_cs_at_fire, ss_eip_at_fire);
+        printf("\n-- savestates --\n");
+        printf("save asked at cycle    : %llu\n", (unsigned long long)ss_at);
         printf("gate reads answered    : %u  (0 = the CPU never fetched the "
-               "gate at all)\n", dut->p_ss_gate_reads);
-        printf("ss state at end        : %d, nmi=%d, hold=%d, snapshot=%d, "
-               "esp_out=%08X\n",
-               dut->p_ss_state, dut->p_ss_nmi, dut->p_ss_hold,
-               dut->p_ss_snapshot, dut->p_ss_esp_out);
-        if (!ss_entered) {
-            printf("stub entry             : NEVER -- the CPU did not take the "
-                   "overlaid gate\n");
-        } else {
-            printf("stub entry             : cycle %llu\n",
-                   (unsigned long long)ss_enter_cyc);
-            printf("stub writes            : %u\n", dut->p_ss_writes);
-            printf("last stub write        : [%08X] = %08X\n",
-                   dut->p_ss_last_wa, dut->p_ss_last_wd);
-            printf("  -> that write is `push eax` after `mov eax,esp`, so ESP "
-                   "after it = %08X and SS base = %08X\n",
-                   dut->p_ss_last_wd - 4,
-                   dut->p_ss_last_wa - (dut->p_ss_last_wd - 4));
-            printf("EIP now                : %08X (parked in `jmp $` at "
-                   "0x00040004)\n", dut->p_eip);
+               "overlaid gate)\n", dut->p_ss_gate_reads);
+        printf("stub entry             : %s\n",
+               ss_entered ? "yes" : "NEVER -- the gate was not taken");
+        printf("stub writes            : %u, last [%08X] = %08X\n",
+               dut->p_ss_writes, dut->p_ss_last_wa, dut->p_ss_last_wd);
+        printf("save completed         : %s\n", ss_done ? "yes" : "NO");
+        printf("DDR3 traffic           : %llu writes, %llu reads\n",
+               (unsigned long long)ddr_writes, (unsigned long long)ddr_reads);
 
-            // Read the frame back out of main RAM. The stub pushes downwards,
-            // so the lowest address is the last thing written; walking up from
-            // ESP gives the pushes in reverse order of issue.
-            static const char *frame[] = {
-                "ESP (mov eax,esp)", "EAX", "ECX", "EDX", "EBX",
-                "ESP (pushad)", "EBP", "ESI", "EDI",
-                "EIP (interrupt)", "CS (interrupt)", "EFLAGS (interrupt)"
-            };
-            uint32_t esp = dut->p_ss_last_wa;
-            printf("the frame the stub left on the game's stack:\n");
-            for (int i = 0; i < 12; i++) {
-                dut->peek_addr = (uint16_t)(((esp + 4u * i) >> 2) & 0xFFFF);
-                dut->eval();
-                printf("    [%08X] = %08X   %s\n",
-                       esp + 4u * i, dut->peek_data, frame[i]);
-            }
+        // The blob's own header, which is what Main_MiSTer reads: dword 0 is a
+        // generation counter it polls, dword 1 the length in dwords, and the
+        // file it writes is (length + 2) * 4 bytes.
+        printf("blob header            : gen=%08X len=%u dwords -> %u bytes\n",
+               (uint32_t)(ddr[0] & 0xFFFFFFFFu),
+               (uint32_t)(ddr[0] >> 32),
+               (uint32_t)(((ddr[0] >> 32) + 2) * 4));
+
+        // Walk the section records the way util/dump_pgmstate.py does, so the
+        // stream can be checked against what the sections claim to hold.
+        printf("sections:\n");
+        uint32_t w = 1;
+        for (int guard = 0; guard < 32; guard++) {
+            uint64_t hdr = ddr[w];
+            if ((hdr >> 56) == 0xFF) { printf("    terminator at dword %u\n", w); break; }
+            uint32_t cnt   = (uint32_t)(hdr & 0xFFFFFFFFu);
+            uint32_t wcode = (uint32_t)((hdr >> 32) & 3);
+            uint32_t idx   = (uint32_t)((hdr >> 56) & 0x1F);
+            static const char *nm[] = {"GLOBAL","MAIN_RAM","TILEMAP","PALETTE",
+                                       "SPRITE"};
+            static const int bytes[] = {1,2,4,8};
+            uint32_t payload = (cnt * bytes[wcode] + 7) / 8;
+            printf("    %-9s idx=%u count=%-6u width=%d-bit  %u payload "
+                   "dwords\n", idx < 5 ? nm[idx] : "?", idx, cnt,
+                   bytes[wcode] * 8, payload);
+            w += 1 + payload;
         }
     }
 
@@ -970,6 +860,30 @@ int main(int argc, char **argv)
     printf("cycles with EIP in stub: %llu\n",
            (unsigned long long)in_stub_cycles);
     if (ss_restore_at) {
+        printf("stub window            : %u reads, last idx=%02X data=%08X\n",
+               dut->p_ss_stub_reads, dut->p_ss_stub_idx, dut->p_ss_stub_data);
+        printf("esp the stub was given : %08X\n", dut->p_ss_esp_scratch);
+        {   // Is the stub's scratch address inside the stack segment at all?
+            uint64_t lim = dut->p_ss_limit;
+            uint64_t eff = dut->p_ss_g ? ((lim << 12) | 0xFFF) : lim;
+            printf("SS descriptor          : base=%08X limit=%05X G=%d type=%X"
+                   "  -> spans 0..%llX  (0x40204 %s)\n",
+                   dut->p_ss_base, dut->p_ss_limit, dut->p_ss_g, dut->p_ss_type,
+                   (unsigned long long)eff,
+                   (0x40204u <= eff) ? "INSIDE" : "OUTSIDE -- reads there fault");
+        }
+        // Did the CPU pass through the saved EIP on its way out of the stub?
+        // Not "is it there now": the settled probe reports whatever it reached
+        // after a few cycles, which is an instruction or two later.
+        bool hit = false;
+        for (int i = 0; i < trail_n; i++) if (trail[i] == ss_saved_eip) hit = true;
+        printf("saved EIP / settled at : %08X / %08X\n",
+               ss_saved_eip, dut->p_ss_resume_eip);
+        printf("resumed at the saved EIP: %s\n",
+               hit ? "YES" : "NO -- the iret did not land where it was saved");
+        printf("first EIPs after load  :");
+        for (int i = 0; i < trail_n; i++) printf(" %08X", trail[i]);
+        printf("\n");
         printf("restore                : %s\n",
                ss_eip_matched
                  ? "the CPU resumed at the saved CS:EIP"
@@ -978,23 +892,6 @@ int main(int argc, char **argv)
             printf("  resumed at cycle     : %llu\n",
                    (unsigned long long)ss_eip_match_cyc);
     }
-    if (ss_frame2_ok) {
-        static const char *nm[] = {
-            "marker", "EDI", "ESI", "EBP", "ESP(pushad)", "EBX", "EDX", "ECX",
-            "EAX", "EIP", "CS", "EFLAGS" };
-        int bad = 0;
-        printf("\nregisters, saved vs restored:\n");
-        printf("    %-12s %-10s %-10s\n", "", "at save", "after restore");
-        for (int i = 0; i < 12; i++) {
-            bool eq = ss_frame1[i] == ss_frame2[i];
-            if (!eq && i != 0) bad++;   // slot 0 is the marker, which is ESP-dependent
-            printf("    %-12s %08X   %08X   %s\n",
-                   nm[i], ss_frame1[i], ss_frame2[i], eq ? "" : "  <-- differs");
-        }
-        printf("registers restored     : %s (%d of 11 differ)\n",
-               bad ? "MISMATCH" : "all 11 match exactly", bad);
-    }
-
     printf("\nverdict: ");
     if (rom_fetches == 0)
         printf("CPU never fetched from ROM -- it is not executing at all.\n");

@@ -63,6 +63,12 @@ module z386
     output     [31:0]  dbg_IDT_base,
     output     [19:0]  dbg_IDT_limit,
     output     [31:0]  dbg_CR0,
+    // SS's descriptor cache, so the board can tell whether an address it wants
+    // the savestate stub to read is inside the stack segment at all.
+    output     [31:0]  dbg_SS_base,
+    output     [19:0]  dbg_SS_limit,
+    output      [3:0]  dbg_SS_type,
+    output             dbg_SS_G,
     output             dbg_pe,
     output             dbg_vm,
 
@@ -162,6 +168,10 @@ assign dbg_CS_base = CS_base;
 assign dbg_IDT_base  = seg_cache[SEG_IDT].base;
 assign dbg_IDT_limit = seg_cache[SEG_IDT].limit;
 assign dbg_CR0       = CR0;
+assign dbg_SS_base   = seg_cache[SEG_SS].base;
+assign dbg_SS_limit  = seg_cache[SEG_SS].limit;
+assign dbg_SS_type   = seg_cache[SEG_SS].seg_type;
+assign dbg_SS_G      = seg_cache[SEG_SS].G;
 assign dbg_pe  = pe;
 assign dbg_vm  = vm;
 wire [1:0] cpl = vm ? 2'd3 : !pe ? 2'd0 : CS[1:0];

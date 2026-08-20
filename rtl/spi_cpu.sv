@@ -142,6 +142,10 @@ module spi_cpu
 	output     [19:0] dbg_idt_limit,
 	output     [31:0] dbg_cs_base,
 	output     [31:0] dbg_cr0,
+	output     [31:0] dbg_ss_base,
+	output     [19:0] dbg_ss_limit,
+	output      [3:0] dbg_ss_type,
+	output            dbg_ss_g,
 
 	// ---- savestate: the 386 spills its own state ------------------------
 	// PLAN: the CPU is never instrumented. A savestate asserts NMI, overlays
@@ -151,8 +155,9 @@ module spi_cpu
 	// where the stack ended up.
 	input             ss_save_req,   // one clk_cpu pulse
 	input             ss_restore_req,// ...and the other direction
-	// The ESP the save recorded, handed back so the restore stub can bake it
-	// into its own `mov esp, imm32`.
+	// What the restore stub's `pop esp` will read: the saved ESP, plus four to
+	// step over the marker slot the save stub pushed, so `popad` lands on the
+	// pushad frame and `iret` on the interrupt's.
 	input      [31:0] ss_esp_in,
 	// High from the instant the save stub's marker write retires until the
 	// caller drops ss_hold_rel: the CPU is frozen and main RAM is quiet, which
@@ -186,6 +191,22 @@ module spi_cpu
 	output     [15:0] ss_dbg_gate_dw0,
 	output     [15:0] ss_dbg_gate_reads,
 	output            ss_dbg_hold,
+	// How many dwords the stub window has served, and the last index and datum.
+	// If the restore stub never reads SS_ESP_IDX, it never learned where the
+	// frame is and everything after that is consequence rather than cause.
+	output     [15:0] ss_dbg_stub_reads,
+	output      [7:0] ss_dbg_stub_idx,
+	output     [31:0] ss_dbg_stub_data,
+	// The EIP at the first instruction boundary after the CPU leaves the stub.
+	// Sampled in the clk_cpu domain at the exact edge, which is the only place
+	// it can be read without racing the CPU.
+	output     [31:0] ss_dbg_resume_eip,
+	// High while the video DMA holds or wants the main RAM port. The savestate
+	// must not take the port from underneath it: `ss_ram_own` overrides
+	// `dma_own` in the mux below, so a transfer that started before the freeze
+	// would keep advancing its address counter while reading the savestate's
+	// data, and write that into the video RAMs.
+	output            ss_dma_busy,
 	output            dbg_irq,
 	// Mirror of what the CPU writes to main RAM at 0x800, where the boot code
 	// builds the GDT it then LGDTs. If protected-mode entry fails, the first
@@ -291,6 +312,10 @@ module spi_cpu
 		.dbg_IDT_base       (dbg_idt_base),
 		.dbg_IDT_limit      (dbg_idt_limit),
 		.dbg_CR0            (dbg_cr0),
+		.dbg_SS_base        (dbg_ss_base),
+		.dbg_SS_limit       (dbg_ss_limit),
+		.dbg_SS_type        (dbg_ss_type),
+		.dbg_SS_G           (dbg_ss_g),
 		.dbg_pe             (),
 		.dbg_vm             (),
 		.triple_fault_reset ()
@@ -434,9 +459,40 @@ module spi_cpu
 	//                            that was just restored and quietly wreck it --
 	//                            the game's live ESP at restore time is within
 	//                            a few words of where the frame sits.
-	//   BC imm32  mov  esp, <saved ESP + 4>   baked in by the hardware, which
-	//   61        popad                       is why the stub needs no way to
-	//   CF        iret                        address memory of its own
+	//   2E 8B 25 imm32  mov esp, cs:[SS_STUB_ESP]   a CONSTANT address, whose
+	//                                      contents this module answers itself
+	//   61        popad
+	//   CF        iret
+	//
+	// HOW THE RESTORE LEARNS WHERE THE FRAME IS. Not from an immediate carrying
+	// the saved ESP: that is part of the instruction stream, so it would have to
+	// be right BEFORE the stub is fetched, and the saved ESP arrives from the
+	// blob, which cannot be streamed in until the CPU is already frozen inside
+	// the stub. Not from the stack either, which was the second attempt: `pop
+	// esp` off the marker slot works, but the marker slot is at the game's live
+	// ESP minus sixteen and the saved frame is a few words either side of that,
+	// so patching it CORRUPTS A SAVED REGISTER. Measured: the marker landed
+	// exactly on the frame's EAX slot, and the restore came back with EAX
+	// holding a stack address.
+	//
+	// So the stub loads ESP from a fixed address in this window, which this
+	// module answers combinationally out of `ss_esp_in` -- read as DATA, after
+	// the blob has landed, which is what makes a constant address sufficient.
+	// Nothing in the game's memory is written to make a restore work.
+	//
+	// THROUGH CS, and that prefix is load-bearing. The third attempt read the
+	// dword through the default segment for an ESP-relative access, which is
+	// SS -- and SS's LIMIT is per-game. rdfts's spans it and rdft2's does not:
+	// the read fell outside the stack segment, raised #SS, and the machine went
+	// off into its fault handler by way of the boot code. It looked like the
+	// iret misbehaving. CS has to span this address because CS spans the code
+	// doing the reading, which lives above 0x200000, and CS's base is zero.
+	// A code segment must also be marked readable for this to work; every set
+	// here is.
+	//
+	// The alternative would have been `push cs / pop ds`, which needs no
+	// prefix and destroys DS -- and DS is not in the frame, because `pushad`
+	// does not push segment registers.
 	//
 	// Everything else the restore needs -- the GDT, the IDT, the game's stack
 	// and the saved register frame sitting on it -- is main RAM, streamed back
@@ -444,6 +500,14 @@ module spi_cpu
 	//
 	// Padded with 0x90 so a cache-line fill never reads undefined bytes.
 	localparam [7:0] SS_RESTORE_IDX = 8'h10;   // dword index of offset 0x40
+	// Where the restore stub's stack points, and the dword index that answers
+	// it. 0x0004_0204 is inside this window and nothing else decodes there.
+	localparam [31:0] SS_STUB_ESP = SS_STUB_BASE + 32'h204;
+	// ...and the dword this window answers it from. Derived, not written out
+	// again: the address appears twice below as raw instruction bytes, and two
+	// hand-written copies of one number is how a stub reads the wrong dword
+	// after somebody moves the window.
+	localparam  [7:0] SS_ESP_IDX  = SS_STUB_ESP[9:2];
 
 	function automatic [31:0] ss_stub_rom(input [7:0] idx);
 		case (idx)
@@ -452,8 +516,14 @@ module spi_cpu
 			8'h02:   ss_stub_rom = 32'h909090CF;   // iret
 			SS_RESTORE_IDX:
 			         ss_stub_rom = 32'hBC50E089;   // mov eax,esp / push eax / mov esp,
-			8'h11:   ss_stub_rom = ss_restore_esp; //   ...the immediate itself
-			8'h12:   ss_stub_rom = 32'h9090CF61;   // popad / iret
+			8'h11:   ss_stub_rom = SS_STUB_ESP;    //   ...this constant address
+			8'h12:   ss_stub_rom = 32'h90CF615C;   // pop esp / popad / iret
+			// The datum the stub pops. Combinational, so it is whatever the
+			// caller has put there by the time the CPU reads it -- which is
+			// after the blob has been streamed in, and is why this works where
+			// an immediate could not.
+			SS_ESP_IDX:
+			         ss_stub_rom = ss_esp_in;
 			default: ss_stub_rom = 32'h90909090;
 		endcase
 	endfunction
@@ -475,7 +545,6 @@ module spi_cpu
 	reg        ss_nmi;
 	reg        ss_gate_armed;
 	reg        ss_mode_restore;   // which stub the gate points at
-	reg [31:0] ss_restore_esp;    // baked into the restore stub's immediate
 	reg        ss_hold;           // freeze the CPU: the snapshot instant
 	reg [31:0] ss_snoop_addr;
 	reg        ss_snoop_valid;
@@ -501,6 +570,60 @@ module spi_cpu
 
 	assign ss_dbg_state     = ss_state;
 	assign ss_dbg_hold      = ss_hold;
+
+	reg [15:0] ss_stub_reads;
+	reg  [7:0] ss_stub_idx;
+	reg [31:0] ss_stub_data;
+	assign ss_dbg_stub_reads = ss_stub_reads;
+	assign ss_dbg_stub_idx   = ss_stub_idx;
+	assign ss_dbg_stub_data  = ss_stub_data;
+
+	reg [31:0] ss_resume_eip;
+	reg  [2:0] ss_resume_hold;
+	reg        ss_in_stub_d;
+	assign ss_dbg_resume_eip = ss_resume_eip;
+
+	always @(posedge clk) begin
+		if (reset) begin
+			ss_resume_eip  <= 32'd0;
+			ss_resume_hold <= 3'd0;
+			ss_in_stub_d   <= 1'b0;
+		end
+		else begin
+			// NOT at the falling edge of ss_eip_in_stub. `dbg_eip` is EIP
+			// itself, and the iret's microcode assembles it in more than one
+			// step -- so the instant it first leaves the stub window it can be
+			// half written. Measured: rdfts's 0x0026D7D6 was caught as
+			// 0x0000D7D6, the low word in place and the high word not yet, and
+			// that reads exactly like a 16-bit iret bug that is not there.
+			// Waiting for it to hold still for four cycles costs nothing.
+			ss_in_stub_d <= ss_eip_in_stub;
+			if (ss_eip_in_stub) begin
+				ss_resume_hold <= 3'd0;
+			end
+			else if (ss_in_stub_d || (ss_resume_hold != 3'd7)) begin
+				if (dbg_eip != ss_resume_eip) begin
+					ss_resume_eip  <= dbg_eip;
+					ss_resume_hold <= 3'd0;
+				end
+				else if (ss_resume_hold != 3'd7)
+					ss_resume_hold <= ss_resume_hold + 3'd1;
+			end
+		end
+	end
+
+	always @(posedge clk) begin
+		if (reset) begin
+			ss_stub_reads <= 16'd0;
+			ss_stub_idx   <= 8'd0;
+			ss_stub_data  <= 32'd0;
+		end
+		else if (state == S_SS_RD) begin
+			ss_stub_reads <= ss_stub_reads + 16'd1;
+			ss_stub_idx   <= cur_dw[7:0];
+			ss_stub_data  <= ss_stub_rom(cur_dw[7:0]);
+		end
+	end
 	assign ss_dbg_nmi       = ss_nmi;
 	assign ss_dbg_gate_dw0  = ss_gate_dw0;
 
@@ -532,7 +655,6 @@ module spi_cpu
 			ss_last_wa      <= 32'd0;
 			ss_last_wd      <= 32'd0;
 			ss_mode_restore <= 1'b0;
-			ss_restore_esp  <= 32'd0;
 			ss_hold         <= 1'b0;
 			ss_snapshot     <= 1'b0;
 			ss_esp_out      <= 32'd0;
@@ -543,9 +665,6 @@ module spi_cpu
 			case (ss_state)
 			SS_IDLE: if (ss_save_req || ss_restore_req) begin
 				ss_mode_restore <= ss_restore_req && !ss_save_req;
-				// +4 skips the marker slot the save stub pushed, so `popad`
-				// lands on the pushad frame and `iret` on the interrupt's.
-				ss_restore_esp  <= ss_esp_in + 32'd4;
 
 				// Arm the overlay first, then evict the gate's cache line, and
 				// only then let the NMI in: if the line were still cached the
@@ -614,10 +733,11 @@ module spi_cpu
 				    && (ram_din == ({14'd0, ram_addr, 2'b00} + 32'd4))) begin
 					ss_hold     <= 1'b1;
 					ss_snapshot <= 1'b1;
-					// Only a save has an ESP worth keeping; a restore's marker
-					// is thrown away by its own `mov esp, imm32`.
-					if (!ss_mode_restore)
-						ss_esp_out <= {14'd0, ram_addr, 2'b00};
+					// Reported for BOTH directions. On a save it is the ESP to
+					// remember; on a restore it is the address of the slot
+					// `pop esp` is about to read, which is the one dword the
+					// caller has to patch.
+					ss_esp_out  <= {14'd0, ram_addr, 2'b00};
 				end
 			end
 		end
@@ -646,6 +766,7 @@ module spi_cpu
 	// read that has already been issued into the RAM's pipeline.
 	reg dma_own;
 	assign dma_gnt = dma_own;
+	assign ss_dma_busy = dma_own | dma_req;
 
 	wire [15:0] ram_addr_mux = ss_ram_own ? ss_ram_addr :
 	                           dma_own     ? dma_addr    : ram_addr;

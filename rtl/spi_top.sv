@@ -8,6 +8,7 @@
 //============================================================================
 
 module spi_top
+	import system_consts::*;
 (
 	input             clk_sys,     // 57.272727 MHz - video, I/O, sound
 	input             clk_cpu,     // 28.636364 MHz - the 386 (clk_sys / 2)
@@ -62,22 +63,22 @@ module spi_top
 	// modules are still in rtl/, just not instantiated. See PLAN.md 29.
 	input             freeze,
 
-	// ---- savestate (phase 0: the 386's own state spill) -----------------
-	input             ss_save_req,
-	input             ss_restore_req,
-	input      [31:0] ss_esp_in,
-	output            ss_snapshot,
-	input             ss_hold_rel,
-	output     [31:0] ss_esp_out,
-	input             ss_ram_own,
-	input      [15:0] ss_ram_addr,
-	input      [31:0] ss_ram_din,
-	input             ss_ram_we,
-	output     [31:0] ss_ram_dout,
-	input             ss_inval,
-	input       [7:0] ss_inval_set,
+	// ---- savestates -----------------------------------------------------
+	// The board owns the section map and the sequencing; the top level owns
+	// DDR3, the OSD and the slot. See rtl/spi_ss.sv and PLAN.md 38/39.
+	input             ss_save,
+	input             ss_load,
+	output            ss_busy,
+	output            ss_stream_write,
+	output            ss_stream_read,
+	input             ss_stream_busy,
+	ssbus_if.slave    ssbus,
 
+	// Probes, for sim/tb_boot_top only. Unconnected at the top level, so
+	// Quartus prunes them, exactly like the dbg_* surface above.
 	output            ss_in_stub,
+	output            ss_snapshot,
+	output     [31:0] ss_esp_out,
 	output     [15:0] ss_writes,
 	output     [31:0] ss_last_wa,
 	output     [31:0] ss_last_wd,
@@ -86,6 +87,15 @@ module spi_top
 	output     [15:0] ss_dbg_gate_dw0,
 	output     [15:0] ss_dbg_gate_reads,
 	output            ss_dbg_hold,
+	output     [15:0] ss_dbg_stub_reads,
+	output      [7:0] ss_dbg_stub_idx,
+	output     [31:0] ss_dbg_stub_data,
+	output     [31:0] ss_dbg_resume_eip,
+	output     [31:0] ss_dbg_esp_scratch,
+	output     [31:0] ss_dbg_ss_base,
+	output     [19:0] ss_dbg_ss_limit,
+	output      [3:0] ss_dbg_ss_type,
+	output            ss_dbg_ss_g,
 
 	// SDRAM ch1: 386 program ROM
 	output     [25:0] sdr_prg_addr,
@@ -333,16 +343,20 @@ module spi_top
 		.dbg_idt_limit (),
 		.dbg_cs_base   (),
 		.dbg_cr0       (),
+		.dbg_ss_base   (ss_dbg_ss_base),
+		.dbg_ss_limit  (ss_dbg_ss_limit),
+		.dbg_ss_type   (ss_dbg_ss_type),
+		.dbg_ss_g      (ss_dbg_ss_g),
 		.dbg_irq   (),
 		.dbg_gdt0(), .dbg_gdt1(),
 		.dbg_gdt2(), .dbg_gdt3(),
 		.dbg_gdt4(), .dbg_gdt5(),
 
-		.ss_save_req (ss_save_req),
-		.ss_restore_req (ss_restore_req),
-		.ss_esp_in   (ss_esp_in),
+		.ss_save_req (ss_cpu_save),
+		.ss_restore_req (ss_cpu_restore),
+		.ss_esp_in   (ss_esp_scratch),
 		.ss_snapshot (ss_snapshot),
-		.ss_hold_rel (ss_hold_rel),
+		.ss_hold_rel (ss_cpu_hold_rel),
 		.ss_esp_out  (ss_esp_out),
 		.ss_ram_own  (ss_ram_own),
 		.ss_ram_addr (ss_ram_addr),
@@ -361,6 +375,11 @@ module spi_top
 		.ss_dbg_gate_dw0   (ss_dbg_gate_dw0),
 		.ss_dbg_gate_reads (ss_dbg_gate_reads),
 		.ss_dbg_hold       (ss_dbg_hold),
+		.ss_dbg_stub_reads (ss_dbg_stub_reads),
+		.ss_dbg_stub_idx   (ss_dbg_stub_idx),
+		.ss_dbg_stub_data  (ss_dbg_stub_data),
+		.ss_dbg_resume_eip (ss_dbg_resume_eip),
+		.ss_dma_busy       (ss_dma_busy),
 
 		.vbl_toggle (vbl_toggle)
 	);
@@ -578,7 +597,73 @@ module spi_top
 	);
 
 	// ------------------------------------------------------------------
+	// Savestates: the section fan-out, and the sequencer
+	//
+	// One ssbus_if per section, muxed onto the single bus save_state_data
+	// drives. Every section this core has is inside the board, so the mux lives
+	// here rather than at the top level as it does in Arcade-IGSPGM.
+	// ------------------------------------------------------------------
+	ssbus_if ssb[SSIDX_COUNT]();
+
+	ssbus_mux #(.COUNT(SSIDX_COUNT)) ss_mux
+	(
+		.clk    (clk_sys),
+		.slave  (ssbus),
+		.masters(ssb)
+	);
+
+	wire        ss_cpu_save, ss_cpu_restore, ss_cpu_hold_rel;
+	wire [31:0] ss_esp_scratch;
+	wire        ss_dma_busy;
+	assign ss_dbg_esp_scratch = ss_esp_scratch;
+	wire        ss_ram_own, ss_ram_we;
+	wire [15:0] ss_ram_addr;
+	wire [31:0] ss_ram_din, ss_ram_dout;
+	wire        ss_inval;
+	wire  [7:0] ss_inval_set;
+
+	spi_ss ss
+	(
+		.clk             (clk_sys),
+		.reset           (sys_reset),
+
+		.ss_save         (ss_save),
+		.ss_load         (ss_load),
+
+		.stream_write    (ss_stream_write),
+		.stream_read     (ss_stream_read),
+		.stream_busy     (ss_stream_busy),
+
+		.ssbus_global    (ssb[SSIDX_GLOBAL]),
+		.ssbus_mainram   (ssb[SSIDX_MAIN_RAM]),
+
+		.cpu_save_req    (ss_cpu_save),
+		.cpu_restore_req (ss_cpu_restore),
+		.cpu_snapshot    (ss_snapshot),
+		.cpu_hold_rel    (ss_cpu_hold_rel),
+		.cpu_esp         (ss_esp_out),
+		.cpu_dma_busy    (ss_dma_busy),
+		.cpu_esp_out     (ss_esp_scratch),
+
+		.ram_own         (ss_ram_own),
+		.ram_addr        (ss_ram_addr),
+		.ram_din         (ss_ram_din),
+		.ram_we          (ss_ram_we),
+		.ram_dout        (ss_ram_dout),
+
+		.inval           (ss_inval),
+		.inval_set       (ss_inval_set),
+
+		.busy            (ss_busy)
+	);
+
+	// ------------------------------------------------------------------
 	// Video RAMs
+	//
+	// Each of the three is a savestate section. The write side is clk_cpu and
+	// the read side clk_sys, so the savestate reaches them through
+	// spi_ss_bridge on the write side -- WR_ONLY, because the read it needs is
+	// the video side's own port, taken below. Nothing here gains a port.
 	// ------------------------------------------------------------------
 	wire [11:0] tm_wa;   wire [31:0] tm_wd;   wire tm_we;
 	wire [11:0] pal_wa;  wire [29:0] pal_wd;  wire pal_we;
@@ -587,22 +672,59 @@ module spi_top
 	wire [11:0] tm_ra;   wire [31:0] tm_rd;
 	wire [11:0] pal_ra;  wire [29:0] pal_rd;
 
+	// The savestate's side of each of the three, and the muxes that let it in.
+	wire [11:0] ss_tm_ra,  ss_tm_wa;   wire [31:0] ss_tm_wd;
+	wire [11:0] ss_pal_ra, ss_pal_wa;  wire [29:0] ss_pal_wd;
+	wire  [9:0] ss_spr_wa;             wire [31:0] ss_spr_wd;
+	wire        ss_tm_rdown, ss_pal_rdown, ss_spr_rdown;
+	wire        ss_tm_we, ss_pal_we, ss_spr_we;
+	// The sprite RAM has no read port of its own here -- spi_sprite reads it
+	// through spr_ra below -- so its savestate read address joins that mux too.
+	wire  [9:0] ss_spr_ra;
+
+	spi_ss_vram #(.SS_IDX(SSIDX_TILEMAP_RAM), .AW(12), .DW(32), .ITEMS(4096))
+	ss_tilemap (
+		.clk(clk_sys), .ssbus(ssb[SSIDX_TILEMAP_RAM]),
+		.rd_own(ss_tm_rdown), .rd_addr(ss_tm_ra), .rd_data(tm_rd),
+		.wr_addr(ss_tm_wa), .wr_data(ss_tm_wd), .wr_en(ss_tm_we));
+
+	spi_ss_vram #(.SS_IDX(SSIDX_PALETTE_RAM), .AW(12), .DW(30), .ITEMS(4096))
+	ss_palette (
+		.clk(clk_sys), .ssbus(ssb[SSIDX_PALETTE_RAM]),
+		.rd_own(ss_pal_rdown), .rd_addr(ss_pal_ra), .rd_data(pal_rd),
+		.wr_addr(ss_pal_wa), .wr_data(ss_pal_wd), .wr_en(ss_pal_we));
+
+	spi_ss_vram #(.SS_IDX(SSIDX_SPRITE_RAM), .AW(10), .DW(32), .ITEMS(1024))
+	ss_sprite (
+		.clk(clk_sys), .ssbus(ssb[SSIDX_SPRITE_RAM]),
+		.rd_own(ss_spr_rdown), .rd_addr(ss_spr_ra), .rd_data(spr_rd),
+		.wr_addr(ss_spr_wa), .wr_data(ss_spr_wd), .wr_en(ss_spr_we));
+
 	spi_dpram #(.DW(32), .AW(12)) tilemap_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
-		 .wr_addr(tm_wa),  .wr_data(tm_wd),  .wr_en(tm_we),
-		 .rd_addr(tm_ra),  .rd_data(tm_rd));
+		 .wr_addr(ss_tm_we ? ss_tm_wa : tm_wa),
+		 .wr_data(ss_tm_we ? ss_tm_wd : tm_wd),
+		 .wr_en  (ss_tm_we | tm_we),
+		 .rd_addr(ss_tm_rdown ? ss_tm_ra : tm_ra),
+		 .rd_data(tm_rd));
 
 	spi_dpram #(.DW(30), .AW(12)) palette_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
-		 .wr_addr(pal_wa), .wr_data(pal_wd), .wr_en(pal_we),
-		 .rd_addr(pal_ra), .rd_data(pal_rd));
+		 .wr_addr(ss_pal_we ? ss_pal_wa : pal_wa),
+		 .wr_data(ss_pal_we ? ss_pal_wd : pal_wd),
+		 .wr_en  (ss_pal_we | pal_we),
+		 .rd_addr(ss_pal_rdown ? ss_pal_ra : pal_ra),
+		 .rd_data(pal_rd));
 
 	wire  [9:0] spr_ra;
 	wire [31:0] spr_rd;
 	spi_dpram #(.DW(32), .AW(10)) sprite_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
-		 .wr_addr(spr_wa), .wr_data(spr_wd), .wr_en(spr_we),
-		 .rd_addr(spr_ra), .rd_data(spr_rd));
+		 .wr_addr(ss_spr_we ? ss_spr_wa : spr_wa),
+		 .wr_data(ss_spr_we ? ss_spr_wd : spr_wd),
+		 .wr_en  (ss_spr_we | spr_we),
+		 .rd_addr(ss_spr_rdown ? ss_spr_ra : spr_ra),
+		 .rd_data(spr_rd));
 
 	// ------------------------------------------------------------------
 	// Video DMA

@@ -193,7 +193,36 @@ wire       rotate_cw       = status[11];
 
 `include "build_id.v"
 localparam CONF_STR = {
-	"SeibuSPI;;",
+	// SS<base>:<size> is how a core declares save states. Main_MiSTer parses it
+	// out of the SECOND semicolon-delimited field (user_io.cpp parse_config,
+	// i == 1), mmaps four slots of that size at that base, and polls a
+	// generation counter in each slot's first dword -- so the core writes the
+	// blob into DDR3 itself and nothing goes over ioctl. It works for an
+	// MRA-loaded core exactly as for a ROM-loaded one (user_io.cpp:1554).
+	// 4 x 512 KB at 0x3E000000; rtl/system_consts.sv is the other end of this.
+	"SeibuSPI;SS3E000000:80000;",
+	"-;",
+	"O[42:41],Savestate Slot,1,2,3,4;",
+	"O[40],Autoincrement Slot,Off,On;",
+	"R[43],Save state (Alt-F1);",
+	"R[44],Restore state (F1);",
+	"-;",
+	// The `I,` list is what savestate_ui's ss_info indexes into, so the OSD can
+	// say what just happened. Order is fixed by that module.
+	"I,",
+	"Slot=DPAD|Save/Load=Start+DPAD,",
+	"Active Slot 1,",
+	"Active Slot 2,",
+	"Active Slot 3,",
+	"Active Slot 4,",
+	"Save to slot 1,",
+	"Restore slot 1,",
+	"Save to slot 2,",
+	"Restore slot 2,",
+	"Save to slot 3,",
+	"Restore slot 3,",
+	"Save to slot 4,",
+	"Restore slot 4;",
 	"-;",
 	"P1,Video Settings;",
 	"P1O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -284,6 +313,13 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.buttons(buttons),
 	.status(status),
 	.status_menumask({~set_sxx2c, direct_video}),
+	// savestate_ui moves the slot when the pad changes it, and the OSD has to
+	// follow. status_in carries the whole word back with only the slot bits
+	// replaced; status_set is the one-cycle "take it" strobe.
+	.status_in({status[127:43], ss_slot, status[40:0]}),
+	.status_set(ss_status_set),
+	.info_req(ss_info_req),
+	.info(ss_info),
 
 	.ioctl_download(ioctl_download),
 	.ioctl_wr(ioctl_wr),
@@ -687,6 +723,7 @@ rom_loader rom_loader
 	.sdr_ack        (sdr_rw_ack),
 
 	.rom_ready      (rom_ready),
+
 	// The byte counters and the part-end marker were read over JTAG; nothing
 	// consumes them now.
 	.bytes_in       (),
@@ -1180,6 +1217,35 @@ spi_top spi_top
 
 	.freeze       (freeze),
 
+	.ss_save        (ss_save),
+	.ss_load        (ss_load),
+	.ss_busy        (),
+	.ss_stream_write(ss_stream_write),
+	.ss_stream_read (ss_stream_read),
+	.ss_stream_busy (ss_stream_busy),
+	.ssbus          (ssbus),
+	// Probes, for sim/tb_boot_top. Pruned here.
+	.ss_in_stub        (),
+	.ss_snapshot       (),
+	.ss_esp_out        (),
+	.ss_writes         (),
+	.ss_last_wa        (),
+	.ss_last_wd        (),
+	.ss_dbg_state      (),
+	.ss_dbg_nmi        (),
+	.ss_dbg_gate_dw0   (),
+	.ss_dbg_gate_reads (),
+	.ss_dbg_hold       (),
+	.ss_dbg_stub_reads (),
+	.ss_dbg_stub_idx   (),
+	.ss_dbg_stub_data  (),
+	.ss_dbg_resume_eip (),
+	.ss_dbg_esp_scratch(),
+	.ss_dbg_ss_base    (),
+	.ss_dbg_ss_limit   (),
+	.ss_dbg_ss_type    (),
+	.ss_dbg_ss_g       (),
+
 	.sdr_prg_addr (sdr_prg_addr),
 	.sdr_prg_dout (sdr_prg_dout),
 	.sdr_prg_req  (sdr_prg_req),
@@ -1336,6 +1402,64 @@ screen_rotate screen_rotate
 // display refills within a frame of the load finishing. A core that used DDRAM
 // for anything load-bearing during the load would need the FIFO.
 //
+// ---------------------------------------------------------------------------
+// Save states
+//
+// The OSD and keyboard side is Robert Peip's savestate_ui, unmodified; the
+// blob's format and its trip to DDR3 are Arcade-IGSPGM's memory_stream; the
+// sequencing and the 386's own part are ours (rtl/spi_ss.sv, PLAN.md 38).
+//
+// `allow_ss` is gated on the ROM being loaded and the board being out of reset.
+// Saving during the download would snapshot a machine that does not exist yet,
+// and restoring into one would be worse.
+// ---------------------------------------------------------------------------
+wire        ss_save, ss_load;
+wire  [1:0] ss_slot;
+wire        ss_status_set;
+wire        ss_info_req;
+wire  [7:0] ss_info;
+
+savestate_ui #(.INFO_TIMEOUT_BITS(25)) savestate_ui
+(
+	.clk           (clk_sys),
+	.ps2_key       (ps2_key[10:0]),
+	.allow_ss      (rom_ready && !reset),
+	.joySS         (joystick_p1[7] | joystick_p2[7]),   // Start
+	.joyRight      (joystick_p1[0] | joystick_p2[0]),
+	.joyLeft       (joystick_p1[1] | joystick_p2[1]),
+	.joyDown       (joystick_p1[2] | joystick_p2[2]),
+	.joyUp         (joystick_p1[3] | joystick_p2[3]),
+	.joyStart      (1'b0),
+	.joyRewind     (1'b0),
+	.rewindEnable  (1'b0),
+	.status_slot   (status[42:41]),
+	.autoincslot   (status[40]),
+	.OSD_saveload  (status[44:43]),
+	.ss_save       (ss_save),
+	.ss_load       (ss_load),
+	.ss_info_req   (ss_info_req),
+	.ss_info       (ss_info),
+	.statusUpdate  (ss_status_set),
+	.selected_slot (ss_slot)
+);
+
+ssbus_if ssbus();
+ddr_if   ss_ddr();
+
+wire ss_stream_write, ss_stream_read, ss_stream_busy;
+
+save_state_data ss_data
+(
+	.clk         (clk_sys),
+	.reset       (reset),
+	.ddr         (ss_ddr),
+	.read_start  (ss_stream_read),
+	.write_start (ss_stream_write),
+	.index       (ss_slot),
+	.busy        (ss_stream_busy),
+	.ssbus       (ssbus)
+);
+
 // DDRAM_CLK is driven here instead of by screen_rotate, which used to assign it
 // CLK_VIDEO. Same signal -- CLK_VIDEO is clk_sys -- but now it is stated once
 // where both masters can be seen.
@@ -1350,13 +1474,44 @@ wire [63:0] rot_din;
 wire  [7:0] rot_be;
 wire        rot_we, rot_rd;
 
+// Three masters now, in priority order.
+//
+// ddr_rom_active wins outright and always has: it is the fast download, the
+// board is in reset behind it, and rotate's writes are dropped for its duration
+// (the note above says why that is free).
+//
+// The savestate comes next, and it preempts screen_rotate for the few
+// milliseconds a transfer takes. That drops some framebuffer writes, so the
+// rotated display tears for one frame -- which is the same trade the download
+// already makes, and a save state is a deliberate act the player is expecting a
+// hitch from. It is NOT allowed to preempt the download, because during one
+// there is nothing worth saving.
+//
+// `ss_ddr.acquire` is memory_stream's own request line and it is deliberately
+// narrow: that module drops it in its gather and query states, which wait on the
+// ssbus rather than on DDR3, so rotate gets the bus back between accesses
+// instead of being locked out for the whole transfer.
+wire ss_ddr_active = ss_ddr.acquire && !ddr_rom_active;
+
 assign DDRAM_CLK      = clk_sys;
-assign DDRAM_BURSTCNT = ddr_rom_active ? 8'd1        : rot_burstcnt;
-assign DDRAM_ADDR     = ddr_rom_active ? ddr_rom_addr : rot_addr;
-assign DDRAM_DIN      = ddr_rom_active ? 64'd0       : rot_din;
-assign DDRAM_BE       = ddr_rom_active ? 8'hFF       : rot_be;
-assign DDRAM_WE       = ddr_rom_active ? 1'b0        : rot_we;
-assign DDRAM_RD       = ddr_rom_active ? ddr_rom_rd  : rot_rd;
+assign DDRAM_BURSTCNT = ddr_rom_active ? 8'd1         :
+                        ss_ddr_active  ? ss_ddr.burstcnt   : rot_burstcnt;
+assign DDRAM_ADDR     = ddr_rom_active ? ddr_rom_addr :
+                        ss_ddr_active  ? ss_ddr.addr[31:3] : rot_addr;
+assign DDRAM_DIN      = ddr_rom_active ? 64'd0        :
+                        ss_ddr_active  ? ss_ddr.wdata      : rot_din;
+assign DDRAM_BE       = ddr_rom_active ? 8'hFF        :
+                        ss_ddr_active  ? ss_ddr.byteenable : rot_be;
+assign DDRAM_WE       = ddr_rom_active ? 1'b0         :
+                        ss_ddr_active  ? ss_ddr.write      : rot_we;
+assign DDRAM_RD       = ddr_rom_active ? ddr_rom_rd   :
+                        ss_ddr_active  ? ss_ddr.read       : rot_rd;
+
+// memory_stream's side of it. `busy` has to read as busy whenever it does not
+// hold the bus, or it would issue into a mux that is pointing somewhere else.
+assign ss_ddr.rdata       = DDRAM_DOUT;
+assign ss_ddr.rdata_ready = ss_ddr_active && DDRAM_DOUT_READY;
+assign ss_ddr.busy        = !ss_ddr_active || DDRAM_BUSY;
 
 assign FB_FORCE_BLANK = 0;
 

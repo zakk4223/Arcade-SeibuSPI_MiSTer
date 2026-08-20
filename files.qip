@@ -26,6 +26,23 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_soundflash.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_nvram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ds2404.sv
 
+# Save states. system_consts.sv must come first: it is the package the rest
+# import. savestates.sv declares the ssbus_if interface every slave takes as a
+# port, so it has to precede them too.
+#
+# The first four are vendored from Arcade-IGSPGM_MiSTer and kept close to
+# upstream so they can be diffed against it; savestate_ui.sv is Robert Peip's,
+# via the same route. rtl/spi_ss*.sv are ours. PLAN.md 38 and 39.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/system_consts.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestates.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/memory_stream.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ss_ram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/savestate_ui.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_bridge.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ss_vram.sv
+
 # NOT BUILT, deliberately: rtl/spi_romcheck.sv, the checksum walker. Nothing
 # instantiates it, so nothing of it reaches the fabric -- and it is not listed
 # here, which is what this note exists to explain. It stays in the tree because
