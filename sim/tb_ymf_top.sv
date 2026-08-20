@@ -79,10 +79,19 @@ module tb_ymf_top
 	wire  [7:0] ext_ovr_data;
 	wire        dirty;
 
+	// The savestate's four sections on the chip. This testbench drives the
+	// register interface directly and never takes a state, so they are tied
+	// off -- but the interfaces still have to exist to connect.
+	ssbus_if ss_unused_regs(), ss_unused_par(), ss_unused_st(), ss_unused_fb();
+
 	ymf271 ymf
 	(
 		// The savestate's board-wide pause. Nothing here ever asserts it.
 		.pause    (1'b0),
+		.ssbus_regs (ss_unused_regs),
+		.ssbus_par  (ss_unused_par),
+		.ssbus_st   (ss_unused_st),
+		.ssbus_fb   (ss_unused_fb),
 		.clk      (clk),
 		.reset    (reset),
 		.stereo   (stereo),

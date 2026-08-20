@@ -44,7 +44,12 @@ module spi_sound
 	ssbus_if.slave    ssbus_z80ram,
 	ssbus_if.slave    ssbus_fifo,
 	ssbus_if.slave    ssbus_fifo2,
-	ssbus_if.slave    ssbus_regs,          // clk_sys, 57.272727 MHz
+	ssbus_if.slave    ssbus_regs,
+	// ...and the YMF271's four, passed straight through to the chip.
+	ssbus_if.slave    ssbus_ymf_regs,
+	ssbus_if.slave    ssbus_ymf_par,
+	ssbus_if.slave    ssbus_ymf_st,
+	ssbus_if.slave    ssbus_ymf_fb,          // clk_sys, 57.272727 MHz
 	input             reset,
 
 	// ---- 386 side. These cross from clk_cpu; see the CDC note below. -------
@@ -158,8 +163,17 @@ module spi_sound
 	// ------------------------------------------------------------------
 	// Z80 clock enable: 28.63636 / 4 = 7.1590909 MHz = clk_sys / 8, exact.
 	// ------------------------------------------------------------------
+	// The divider's PHASE is part of the machine's state: the Z80 steps one
+	// clk_sys cycle in eight, and which one decides exactly when it consumes a
+	// FIFO byte relative to the 386. Restore it wrong and a poll loop in the
+	// sound driver comes out the other way.
 	reg [2:0] ce_div;
-	always @(posedge clk) ce_div <= reset ? 3'd0 : ce_div + 3'd1;
+	always @(posedge clk) begin
+		if (reset) ce_div <= 3'd0;
+		else if (ss_rg_acc && ssbus_regs.write && (ssbus_regs.addr == 32'd1))
+			ce_div <= ssbus_regs.data[5:3];
+		else ce_div <= ce_div + 3'd1;
+	end
 	// `pause` stops the sound board with the rest of it. The divider keeps
 	// running so the Z80 comes back on its own phase rather than a new one.
 	wire ce_z80 = (ce_div == 3'd7) && !pause;
@@ -678,7 +692,7 @@ module spi_sound
 				ssbus_regs.read_response(SSIDX_SND_REGS,
 					(ssbus_regs.addr == 32'd0)
 						? {46'd0, fifo_wp, fifo_rp}
-						: {34'd0, f2_rp, f2_wp, 9'd0, rom_bank});
+						: {34'd0, f2_rp, f2_wp, 6'd0, ce_div, rom_bank});
 			else if (ssbus_regs.write) ssbus_regs.write_ack(SSIDX_SND_REGS);
 		end
 	end
@@ -699,6 +713,10 @@ module spi_sound
 		.clk      (clk),
 		.reset    (reset),
 		.pause    (pause),
+		.ssbus_regs (ssbus_ymf_regs),
+		.ssbus_par  (ssbus_ymf_par),
+		.ssbus_st   (ssbus_ymf_st),
+		.ssbus_fb   (ssbus_ymf_fb),
 		// The board, not the set: the single-board PCB sums the chip's four
 		// outputs to one speaker, the cartridge splits 0 and 1 left/right.
 		// That is exactly the mod byte's bit 0, which is already here.

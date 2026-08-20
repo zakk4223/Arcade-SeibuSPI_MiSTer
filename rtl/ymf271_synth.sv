@@ -39,9 +39,18 @@
 //============================================================================
 
 module ymf271_synth
+	import system_consts::*;
 (
 	input                clk,
 	input                reset,
+
+	// ---- the savestate's three sections on this engine ------------------
+	// Every one of them steals the port its own client uses, which is safe
+	// because `pause` stops new sample ticks rather than freezing mid-pass, so
+	// the engine has drained to S_IDLE long before the stream reaches these.
+	ssbus_if.slave       ssbus_par,
+	ssbus_if.slave       ssbus_st,
+	ssbus_if.slave       ssbus_fb,
 
 	// The cartridge board wires chip output 0 to the left speaker and 1 to the
 	// right (MAME's spi(): add_route(0,"speaker",1.0,0) and (1,...,1)); the
@@ -124,15 +133,25 @@ module ymf271_synth
 	// ------------------------------------------------------------------
 	reg   [7:0] par_ra;
 	wire [63:0] par_q;
+	wire  [7:0] par_ra_mux = ss_par_acc ? ssbus_par.addr[7:0] : par_ra;
 
 	genvar b;
 	generate
 		for (b = 0; b < 8; b = b + 1) begin : par_lane
 			reg [7:0] mem [0:255];
 			reg [7:0] q;
+			// ONE write statement per lane, and the mux OUTSIDE it. Writing
+			// `if (a) mem[x] <= p; else if (b) mem[y] <= q;` is still two
+			// writes as far as Quartus is concerned, else-if or not: it stops
+			// inferring memory and builds all 2 KB out of flip-flops. That is
+			// what the sound FIFOs did, and this is the same mistake made
+			// again one commit after the comment warning about it was written.
+			wire [7:0] wa = ss_par_we ? ssbus_par.addr[7:0] : par_addr;
+			wire [7:0] wd = ss_par_we ? ssbus_par.data[b*8 +: 8] : par_data;
+			wire       we = ss_par_we | (par_we && (par_byte == b[2:0]));
 			always @(posedge clk) begin
-				if (par_we && (par_byte == b[2:0])) mem[par_addr] <= par_data;
-				q <= mem[par_ra];
+				if (we) mem[wa] <= wd;
+				q <= mem[par_ra_mux];
 			end
 			assign par_q[b*8 +: 8] = q;
 			initial for (int j = 0; j < 256; j = j + 1) mem[j] = 8'd0;
@@ -149,8 +168,10 @@ module ymf271_synth
 	reg        st_we;
 
 	always @(posedge clk) begin
-		if (st_we) st_mem[st_wa] <= st_wd;
-		st_q <= st_mem[st_ra];
+		if (ss_st_commit)  st_mem[ss_st_slot] <= {ssbus_st.data[31:0],
+		                                          ss_st_stage[63:0]};
+		else if (st_we)    st_mem[st_wa] <= st_wd;
+		st_q <= st_mem[ss_st_acc ? ss_st_slot : st_ra];
 	end
 
 	// {feedback_modulation0, feedback_modulation1}, only meaningful for the
@@ -161,8 +182,104 @@ module ymf271_synth
 	reg        fb_we;
 
 	always @(posedge clk) begin
-		if (fb_we) fb_mem[fb_wa] <= fb_wd;
-		fb_q <= fb_mem[fb_ra];
+		if (ss_fb_commit)  fb_mem[ss_fb_slot] <= {ssbus_fb.data[21:0],
+		                                          ss_fb_stage[31:0]};
+		else if (fb_we)    fb_mem[fb_wa] <= fb_wd;
+		fb_q <= fb_mem[ss_fb_acc ? ss_fb_slot : fb_ra];
+	end
+
+	// ------------------------------------------------------------------
+	// The savestate's three sections.
+	//
+	// st_mem is 96 bits wide and fb_mem 54, while the stream carries 32-bit
+	// items -- so a slot is three words and two respectively. A write stages
+	// the earlier words and COMMITS on the last one, which is what lets the
+	// array keep a single write port and stay inferred as memory.
+	// ------------------------------------------------------------------
+	wire ss_par_acc = ssbus_par.access(SSIDX_YMF_PAR);
+	wire ss_par_we  = ss_par_acc && ssbus_par.write;
+	reg  ss_par_d;
+	always @(posedge clk) begin
+		ssbus_par.setup(SSIDX_YMF_PAR, 32'd256, 3);   // 64-bit items
+		if (ss_par_acc) begin
+			if (ssbus_par.write) ssbus_par.write_ack(SSIDX_YMF_PAR);
+			else if (ssbus_par.read) begin
+				if (ss_par_d) ssbus_par.read_response(SSIDX_YMF_PAR, par_q);
+				ss_par_d <= 1'b1;
+			end
+		end
+		else ss_par_d <= 1'b0;
+	end
+
+	// 48 slots x FOUR words -- three of state and one unused -- then two words
+	// each of keyon and keyoff pending.
+	//
+	// Four, not three, purely so the index arithmetic is a shift and a mask.
+	// Three words per slot needs a divide and a modulo by 3, and on a 32-bit
+	// index that is a full divider in the combinational path: it cost 36 ns of
+	// negative slack, on a clock whose period is 17.5. The fourth word is 192
+	// bytes of blob nobody reads, which is the cheapest trade in this file.
+	localparam int SS_ST_ITEMS = 48*4 + 4;
+	localparam int SS_ST_KEY   = 48*4;
+
+	wire        ss_st_acc  = ssbus_st.access(SSIDX_YMF_ST);
+	wire [31:0] ss_st_idx  = ssbus_st.addr;
+	wire  [5:0] ss_st_slot = ss_st_idx[7:2];
+	wire  [1:0] ss_st_word = ss_st_idx[1:0];
+	wire ss_key_wr = ss_st_acc && ssbus_st.write && (ss_st_idx >= SS_ST_KEY);
+	wire ss_st_commit = ss_st_acc && ssbus_st.write
+	                    && (ss_st_idx < SS_ST_KEY) && (ss_st_word == 2'd2);
+	reg [63:0] ss_st_stage;
+	reg        ss_st_d;
+
+	always @(posedge clk) begin
+		ssbus_st.setup(SSIDX_YMF_ST, SS_ST_ITEMS[31:0], 2);
+		if (ss_st_acc) begin
+			if (ssbus_st.write) begin
+				if (ss_st_idx < SS_ST_KEY) begin
+					if (ss_st_word == 2'd0) ss_st_stage[31:0]  <= ssbus_st.data[31:0];
+					if (ss_st_word == 2'd1) ss_st_stage[63:32] <= ssbus_st.data[31:0];
+				end
+				ssbus_st.write_ack(SSIDX_YMF_ST);
+			end
+			else if (ssbus_st.read) begin
+				if (ss_st_d)
+					ssbus_st.read_response(SSIDX_YMF_ST, {32'd0,
+						(ss_st_idx >= SS_ST_KEY)
+						  ? (ss_st_word == 2'd0 ? keyon_pend[31:0]  :
+						     ss_st_word == 2'd1 ? {16'd0, keyon_pend[47:32]} :
+						     ss_st_word == 2'd2 ? keyoff_pend[31:0] :
+						                          {16'd0, keyoff_pend[47:32]})
+						  : (ss_st_word == 2'd0 ? st_q[31:0]  :
+						     ss_st_word == 2'd1 ? st_q[63:32] : st_q[95:64])});
+				ss_st_d <= 1'b1;
+			end
+		end
+		else ss_st_d <= 1'b0;
+	end
+
+	wire        ss_fb_acc  = ssbus_fb.access(SSIDX_YMF_FB);
+	wire [31:0] ss_fb_idx  = ssbus_fb.addr;
+	wire  [5:0] ss_fb_slot = 6'(ss_fb_idx >> 1);
+	wire        ss_fb_word = ss_fb_idx[0];
+	wire ss_fb_commit = ss_fb_acc && ssbus_fb.write && ss_fb_word;
+	reg  [31:0] ss_fb_stage;
+	reg         ss_fb_d;
+
+	always @(posedge clk) begin
+		ssbus_fb.setup(SSIDX_YMF_FB, 32'd96, 2);
+		if (ss_fb_acc) begin
+			if (ssbus_fb.write) begin
+				if (!ss_fb_word) ss_fb_stage <= ssbus_fb.data[31:0];
+				ssbus_fb.write_ack(SSIDX_YMF_FB);
+			end
+			else if (ssbus_fb.read) begin
+				if (ss_fb_d) ssbus_fb.read_response(SSIDX_YMF_FB, {32'd0,
+					ss_fb_word ? {10'd0, fb_q[53:32]} : fb_q[31:0]});
+				ss_fb_d <= 1'b1;
+			end
+		end
+		else ss_fb_d <= 1'b0;
 	end
 
 	// {valid, tag[19:0]} plus the eight bytes the line holds. The tags live in
@@ -1013,6 +1130,14 @@ module ymf271_synth
 
 		// A key event arriving in the same cycle the pass clears the slot's
 		// flag has to win, or the note is lost; hence after the case.
+		// The savestate owns these outright, read and written in this file's own
+		// section; the register-file side is frozen, so nothing competes.
+		if (ss_key_wr) begin
+			if (ss_st_word == 2'd0) keyon_pend[31:0]   <= ssbus_st.data[31:0];
+			if (ss_st_word == 2'd1) keyon_pend[47:32]  <= ssbus_st.data[15:0];
+			if (ss_st_word == 2'd2) keyoff_pend[31:0]  <= ssbus_st.data[31:0];
+			if (ss_st_word == 2'd3) keyoff_pend[47:32] <= ssbus_st.data[15:0];
+		end
 		if (key_on)  keyon_pend[key_slot]  <= 1'b1;
 		if (key_off) keyoff_pend[key_slot] <= 1'b1;
 

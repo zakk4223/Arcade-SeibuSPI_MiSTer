@@ -62,9 +62,28 @@ package system_consts;
 	parameter int SSIDX_SND_FIFO2    = 10; // Z80 -> 386, 512 bytes
 	parameter int SSIDX_SND_REGS     = 11; // the pointers and the ROM bank
 
+	// The YMF271. Its timer IRQ drives the Z80's INT_n, so it is in the 386's
+	// causal path by way of the sound program: restore it wrong and the Z80's
+	// interrupt timing is wrong and the FIFO the 386 polls follows.
+	//
+	// Only the PERSISTENT state is here. The synthesis engine's pipeline --
+	// group, step, the operator accumulators, the working copies of a slot's
+	// state -- is transient within one 44.1 kHz pass, and `pause` stops new
+	// ticks rather than freezing mid-pass, so the engine has always drained to
+	// S_IDLE by the time these sections are read. Same argument as parking the
+	// raster one tick before vblank: choose the moment and the state stops
+	// needing to be carried.
+	//
+	// The sample-line cache is absent for the other reason -- it caches sample
+	// memory in SDRAM, which a savestate does not change.
+	parameter int SSIDX_YMF_REGS     = 12; // registers, timers, IRQ, tick phase
+	parameter int SSIDX_YMF_PAR      = 13; // 256 x 64, the slot parameter RAM
+	parameter int SSIDX_YMF_ST       = 14; // 48 slots x 96 bits, + key pending
+	parameter int SSIDX_YMF_FB       = 15; // 48 slots x 54 bits of feedback
+
 	// Sections after this point arrive with the later phases; the count below
 	// is what `memory_stream` is told to walk, so it has to grow with them.
-	parameter int SSIDX_COUNT       = 12;
+	parameter int SSIDX_COUNT       = 16;
 
 	// ---- the DDR3 window -------------------------------------------------
 	//

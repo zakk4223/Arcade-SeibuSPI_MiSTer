@@ -60,6 +60,7 @@ obj_dir/Vtb_ymf_top: $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/ymf271_table
                  $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv $(RTL)/spi_defs.vh tb_ymf_top.sv \
                  tb_ymf271.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module tb_ymf_top tb_ymf_top.sv \
+	    $(RTL)/system_consts.sv $(RTL)/savestates.sv \
 	    $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv \
 	    tb_ymf271.cpp
 

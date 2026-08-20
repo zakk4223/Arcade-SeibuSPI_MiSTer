@@ -23,12 +23,24 @@
 //============================================================================
 
 module ymf271
+	import system_consts::*;
 (
 	input             clk,
 	input             reset,
 	// Hold the 44.1 kHz tick, and with it every voice, envelope and timer in
 	// the chip: nothing in here advances except on a tick.
 	input             pause,
+
+	// ---- the savestate ---------------------------------------------------
+	// SSIDX_YMF_REGS is this file's persistent state: the register file, the
+	// two timers and their IRQ, the external-memory port and the sample tick's
+	// own phase. The write fan-out sequencer is absent because it is idle
+	// between register writes, and the 386 is frozen.
+	ssbus_if.slave    ssbus_regs,
+	// ...and the three sections inside the engine, passed straight through.
+	ssbus_if.slave    ssbus_par,
+	ssbus_if.slave    ssbus_st,
+	ssbus_if.slave    ssbus_fb,
 	input             stereo,      // cartridge board: out 0 left, out 1 right
 
 	// ---- Z80 bus, 0x6000-0x600F ------------------------------------------
@@ -466,10 +478,53 @@ module ymf271
 		end
 	endgenerate
 
+	// ------------------------------------------------------------------
+	// SSIDX_YMF_REGS -- twelve dwords, laid out here and nowhere else.
+	// ------------------------------------------------------------------
+	wire ss_rg_acc = ssbus_regs.access(SSIDX_YMF_REGS);
+	wire [31:0] ss_rg_i = ssbus_regs.addr;
+
+	function automatic [31:0] ymf_ss_rd(input [31:0] i);
+		case (i)
+			32'd0: ymf_ss_rd = {regs_main[3],  regs_main[2],
+			                    regs_main[1],  regs_main[0]};
+			32'd1: ymf_ss_rd = {regs_main[7],  regs_main[6],
+			                    regs_main[5],  regs_main[4]};
+			32'd2: ymf_ss_rd = {regs_main[11], regs_main[10],
+			                    regs_main[9],  regs_main[8]};
+			32'd3: ymf_ss_rd = {regs_main[15], regs_main[14],
+			                    regs_main[13], regs_main[12]};
+			32'd4: ymf_ss_rd = {8'd0, grp_sync[11], grp_sync[10], grp_sync[9],
+			                    grp_sync[8], grp_sync[7], grp_sync[6],
+			                    grp_sync[5], grp_sync[4], grp_sync[3],
+			                    grp_sync[2], grp_sync[1], grp_sync[0]};
+			32'd5: ymf_ss_rd = {2'd0, irqstate, status, enable, timerB, timerA};
+			32'd6: ymf_ss_rd = {14'd0, timB_run, timA_run, end_status};
+			32'd7: ymf_ss_rd = {8'd0, timB_cnt, timA_cnt};
+			32'd8: ymf_ss_rd = {5'd0, tick_acc};
+			32'd9: ymf_ss_rd = {6'd0, ext_pend, ext_req, ext_rw, ext_addr};
+			32'd10: ymf_ss_rd = {24'd0, ext_latch};
+			default: ymf_ss_rd = 32'd0;
+		endcase
+	endfunction
+
+	always @(posedge clk) begin
+		ssbus_regs.setup(SSIDX_YMF_REGS, 32'd11, 2);
+		if (ss_rg_acc) begin
+			if (ssbus_regs.read)
+				ssbus_regs.read_response(SSIDX_YMF_REGS,
+					{32'd0, ymf_ss_rd(ss_rg_i)});
+			else if (ssbus_regs.write) ssbus_regs.write_ack(SSIDX_YMF_REGS);
+		end
+	end
+
 	ymf271_synth synth
 	(
 		.clk         (clk),
 		.reset       (reset),
+		.ssbus_par   (ssbus_par),
+		.ssbus_st    (ssbus_st),
+		.ssbus_fb    (ssbus_fb),
 		.stereo      (stereo),
 		.grp_sync_flat (grp_sync_flat),
 		.par_we      (par_we),
