@@ -441,6 +441,10 @@ module spi_top
 		.z80dl_stall(z80dl_stall),
 		.z80dl_end  (z80dl_end),
 		.z80_rst_n  (z80_rst_n),
+		.ss_addr    (io_ss_addr),
+		.ss_din     (io_ss_din),
+		.ss_we      (io_ss_we),
+		.ss_dout    (io_ss_dout),
 		.clk              (clk_cpu),
 		.reset            (cpu_reset),
 
@@ -709,6 +713,26 @@ module spi_top
 			end
 		end
 	end
+
+	// SSIDX_SPI_IO, through the same bridge as main RAM: spi_io is clk_cpu and
+	// the ssbus is clk_sys.
+	wire  [4:0] io_ss_addr;
+	wire [31:0] io_ss_din, io_ss_dout;
+	wire        io_ss_we;
+
+	spi_ss_bridge #(
+		.SS_IDX (SSIDX_SPI_IO),
+		.AW     (5),
+		.DW     (32),
+		.ITEMS  (26)
+	) io_bridge (
+		.clk      (clk_sys),
+		.ssbus    (ssb[SSIDX_SPI_IO]),
+		.ram_addr (io_ss_addr),
+		.ram_din  (io_ss_din),
+		.ram_we   (io_ss_we),
+		.ram_dout (io_ss_dout)
+	);
 
 	// ------------------------------------------------------------------
 	// Video RAMs

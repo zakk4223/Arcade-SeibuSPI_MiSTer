@@ -44,9 +44,15 @@ package system_consts;
 	// counters within a line.
 	parameter int SSIDX_VIDEO_TIMING = 5;  // {div, vcnt, hcnt}
 
+	// spi_io's configuration: the whole 20-dword CRTC window, the six scroll
+	// registers, the layer enables and banks, and the DMA source and length.
+	// Not the strobes and not the boot-time Z80 download -- see the port
+	// comment in rtl/spi_io.sv for what is left out and why.
+	parameter int SSIDX_SPI_IO       = 6;  // 26 dwords
+
 	// Sections after this point arrive with the later phases; the count below
 	// is what `memory_stream` is told to walk, so it has to grow with them.
-	parameter int SSIDX_COUNT       = 6;
+	parameter int SSIDX_COUNT       = 7;
 
 	// ---- the DDR3 window -------------------------------------------------
 	//

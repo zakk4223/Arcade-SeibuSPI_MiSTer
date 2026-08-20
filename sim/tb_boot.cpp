@@ -263,6 +263,10 @@ int main(int argc, char **argv)
     uint32_t ss_marker = 0;
     uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
     uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
+    const size_t LONG_MAX_N = 400000; size_t long_n = 0;
+    const char *lt_path = getenv("SS_TRAIL");
+    uint32_t *long_trail = lt_path ? new uint32_t[LONG_MAX_N] : nullptr;
+    const size_t LONG_MAX = LONG_MAX_N;
     uint64_t ss_snap_vbl = 0, ss_busy_start = 0, ss_hash_anchor = 0;
 
     for (uint64_t t = 0; t < max_steps; t++) {
@@ -412,6 +416,12 @@ int main(int argc, char **argv)
                 // released: where the restore stub's iret actually landed.
                 if (in_stub_d && trail_armed && trail_n < 24)
                     trail[trail_n++] = dut->p_eip;
+                // The full instruction trail after the last operation finished.
+                // Diffing two of these names the exact instruction at which a
+                // restored machine first goes a different way, which is a fact
+                // rather than a guess about which section is missing.
+                if (long_trail && ss_hash_anchor && long_n < LONG_MAX)
+                    long_trail[long_n++] = dut->p_eip;
                 eip_last = dut->p_eip;
             }
             if (dut->p_ss_in_stub) in_stub_cycles++;
@@ -957,6 +967,12 @@ int main(int argc, char **argv)
             printf("  resumed at cycle     : %llu\n",
                    (unsigned long long)ss_eip_match_cyc);
     }
+    if (long_trail) {
+        FILE *f = fopen(lt_path, "wb");
+        if (f) { fwrite(long_trail, 4, long_n, f); fclose(f); }
+        printf("wrote %zu EIPs after the operation to %s\n", long_n, lt_path);
+    }
+
     printf("\nverdict: ");
     if (rom_fetches == 0)
         printf("CPU never fetched from ROM -- it is not executing at all.\n");
