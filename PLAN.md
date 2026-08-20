@@ -9632,3 +9632,193 @@ a compile, is the acceptance test for that swap.
 
 And the honest summary of phase 0: **the 386 was the risk and it is answered; the
 fabric was the assumed obstacle and it is still unmeasured.**
+
+## 39. Save states, the rest of it: nineteen sections, and what measurement cost (2026-08-20)
+
+38 answered the question the whole thing turned on -- whether a vendored,
+pipelined 386 could be snapshotted without instrumenting it -- and left
+everything else. This is everything else. It fits, it works at one save point in
+three, and the way it got there is worth more than the result.
+
+    ALMs 36,512 (87 %)   RAM blocks 487 (88 %)   worst slack +0.060, TNS 0.000
+    blob 311,640 bytes in a 512 KB slot, nineteen sections
+
+### 39.1 The framework, and why PGM's rather than ours
+
+`savestates.sv`, `memory_stream.sv`, `ddram.sv`, `ss_ram.sv` and
+`savestate_ui.sv` are vendored from `Arcade-IGSPGM_MiSTer`, near enough
+unmodified so they can be diffed against it. The blob's format, the DDR3 engine
+and the section-tagged stream are all upstream's and all already proven against
+the HPS protocol this core has to speak. One bug fixed in `ss_ram.sv`: the width
+CODE was computed as a byte count, right at 8 and 16 bits and wrong at 32, where
+it yields the code for 64 -- so every section would have been written at twice
+its size with every other word blank. Upstream carries a FIXME saying so and
+only ever instantiates it at 8 and 16.
+
+Ours are `system_consts.sv` (the section map, and what is deliberately absent
+from it), `spi_ss.sv` (the sequencer), and two adaptors.
+
+### 39.2 The clocks, which is why there are two adaptors
+
+`memory_stream` has to run on clk_sys because that is the DDR3 domain, and the
+ssbus protocol is a STREAMING one: the master holds `read` asserted and expects
+one `ack` per cycle. spi_mainram, spi_io and spi_cpu are clk_cpu, half the rate,
+so a slave acking there would present `ack` for two clk_sys cycles and be
+counted twice.
+
+`spi_ss_bridge` crosses that without deriving a phase relationship no constraint
+states: it holds every transaction's controls for three cycles, which is long
+enough that which clk_sys edges coincide with a clk_cpu edge cannot matter. A
+write may then be captured twice, which is harmless because writing the same
+datum to the same address twice is idempotent -- that is the property being
+relied on and it is worth saying out loud. Seven cycles an item, 8 ms for the
+386's 256 KB, once, while the machine is frozen and nothing waits on it.
+
+`spi_ss_vram` is the same idea for the video RAMs, whose two ports are on two
+clocks: the savestate reads through the port it is already on (clk_sys, the
+renderers') and writes through the other one (clk_cpu, the DMA's).
+
+The DS2404 is clk_ram, FASTER than clk_sys, which is the easy direction -- the
+same bridge, with its hold now generous rather than tight.
+
+### 39.3 Choosing the moment beats carrying the consequences
+
+Three times a piece of state stopped needing to be saved because the snapshot
+was taken somewhere better. This is the technique the section is really about.
+
+**The raster.** A savestate arms and waits for `vbl_next` -- the exact condition
+spi_video_timing uses to set `vbl_rise`, evaluated one cycle earlier -- and
+parks the board there. At that instant this frame's interrupt has not been
+raised and the previous frame's has long since been acknowledged, so
+`irq_pending` is clear and the acknowledge machine is idle. Releasing lets
+`vbl_rise` happen on the very next tick, so the interrupt is deferred with
+everything else rather than lost.
+
+**The YMF271's pipeline.** `pause` stops new 44.1 kHz ticks rather than freezing
+mid-pass, so the engine always drains to S_IDLE before the stream reaches it.
+Group, step, the operator accumulators and the working copies of a slot are all
+transient within one pass and none of them is in the blob.
+
+**The 386's registers.** 38's trick, restated: they are not a section at all,
+because the CPU pushes them onto its own stack and that is inside SSIDX_MAIN_RAM.
+
+### 39.4 The board-wide pause, and why `freeze` is not it
+
+Freezing only the 386 is not enough: a transfer takes ~14 ms and in that time the
+raster, the sound board and the vblank interrupt run on, so the CPU comes back
+into a machine that has moved without it. Measured -- a save taken while rdfts
+drove its display loop left the run with 1,567 I/O writes against a baseline
+1,569 and a different main RAM hash, while the same save at a quiet point in boot
+was bit-identical.
+
+It is deliberately NOT wired to `freeze`. That signal reaches exactly one place,
+`spi_cpu.cpu_en`, and STATUS.md documents the behaviour on purpose: only the 386
+stops, so a frozen frame stays on screen to be studied. That is the opposite of
+what a savestate wants and a useful thing to keep.
+
+The pause has one root: gating `spi_video_timing`'s counters stops the raster and
+with it the tile and sprite engines, the mixer and the vblank interrupt, without
+any of those modules knowing. The Z80 already had a clock enable; the YMF271
+needed one line; the DS2404 needed two, for its RTC tick and its copy loop.
+`spi_io` needed none -- it has no counter, no timer and no raster input, so a
+pause there would have been dead logic.
+
+### 39.5 tv80, and a simulator that was lying
+
+The Z80 is tv80 now, and only because of savestates: `state_module.py` -- what
+makes a CPU's state free in Arcade-IGSPGM -- reads Verilog, and `rtl/t80` is
+VHDL. PGM's already-generated `tv80_auto_ss.sv` drops in and the Z80's state
+comes along without anything hand-instrumented. It is SMALLER than what it
+replaced: 358 registers against T80's 401.
+
+The side effect is the important part. `sim/T80s.sv` was a Verilator stand-in
+that never executed a cycle, because Verilator cannot read the VHDL core -- every
+boot run in this repo's history printed "Z80 fetches (ch3): 0 (expected: the
+Verilator T80 is a stub)". It now prints 95,135. **Every measurement of the sound
+path ever taken in simulation was taken with an inert sound board**, and every
+determinism number before the swap was too.
+
+### 39.6 What the divergence actually was, after four sections of guessing
+
+The restored machine ran a few instructions and then took a branch the saved one
+did not. Four sections were added on the strength of stories about what the
+differing bytes looked like -- the DS2404's serial pattern, a loop that resembled
+a FIFO poll -- and not one of them moved the number.
+
+What worked was two instruments, and they should have been built first:
+
+    SS_TRAIL   every EIP after the operation completes. Align two runs and the
+               first difference names the INSTRUCTION.
+    SS_IORD    every I/O read with its value. The first difference names the
+               REGISTER.
+
+They found both real causes in about an hour.
+
+**`irq_pending`.** Probed at the moment the machine is handed back: 1 on a
+save-only run, 0 on a save-then-restore. The restored 386 sat in its vblank-wait
+loop an extra frame. It is spi_cpu's state, not the 386's, and it is now
+SSIDX_CPU_IRQ. It has to be saved explicitly: the toggle compare only ever SETS
+it and an acknowledge is what clears it.
+
+**The DS2404's clock.** With that fixed, the first differing I/O read was 0x6DC
+-- the chip's data port -- returning 0x0D against 0x12. Five ticks at 256 Hz is
+the 20 ms between the save and the load. The RTC keeps real time and a savestate
+does not rewind it. The game stores what it reads at 0x000369B8, which is the
+one main-RAM word that had been differing since the raster was fixed and which
+three separate write-ups called a mystery.
+
+Instruction agreement at that save point went 4 -> 41,742 -> 167,678, and every
+one of the 24,283 I/O reads a restored run makes is now identical to the saved
+one's.
+
+### 39.7 Two write statements to one array
+
+This cost two fits and one wrong conclusion, and it happened twice.
+
+Quartus will not infer a memory from two write statements to the same array.
+`else if` does not help. It builds the whole thing out of flip-flops instead, and
+Verilator's -Wall says nothing.
+
+* The two sound FIFOs: 8,192 flops, and the fitter refused the design at 4,453
+  LABs against 4,191. That was written up as "the Cyclone V has no room left"
+  before it was diagnosed. It was not a device limit; it was 1 KB of FIFO built
+  out of registers.
+* The YMF271's slot parameter RAM, one commit later, in a block carrying a
+  comment warning about exactly this: 16,384 flops, same failure.
+
+The form that works is the mux OUTSIDE the always block and one write statement.
+And when a fit fails or the register count jumps, the per-entity table in
+`output_files/SeibuSPI.map.rpt` names the module in one `awk`. It was consulted
+last, twice.
+
+A third of the same family: indexing a section by three words per slot means
+`idx / 3` and `idx % 3` on a 32-bit index, which is a full divider in the
+combinational path -- 36.278 ns of negative slack on a 17.5 ns clock. Pad to a
+power-of-two stride and it is a shift and a mask.
+
+### 39.8 Where it stands, honestly
+
+A save is transparent -- compared at the same LOGICAL point, main RAM differs in
+6 dwords of 65,536, five of them the stub's footprint on dead stack, and does not
+grow over a 75 % longer run. A restore is exact in memory and the 386 resumes at
+the saved CS:EIP. All three sets.
+
+Determinism is save-point dependent and the good number should not be quoted
+alone. Instruction agreement on rdfts: 16 at a save 900,000 cycles in, 167,678 at
+2,600,000, 10 at 4,100,000. The early ones are boot-time saves, where the
+sample-flash derivation and the SXX2C Z80 download are running with state that is
+not in the blob and was never meant to be. Whether that is the whole explanation
+is the next thing to establish, and it wants a sweep of save points across a long
+run to see whether agreement is bimodal.
+
+**The determinism hash sweep is a bad instrument and should not be quoted
+without the trail number beside it.** It hashes main RAM at a fixed offset after
+the operation, which cannot distinguish "in lockstep for 167,678 instructions and
+then drifting" from "wrong immediately", and a small timing shift moves where the
+hash lands. It read 4 of 12 at the point the underlying agreement had improved
+four orders of magnitude.
+
+Nothing has run on hardware. And the tv80 swap replaced a Z80 inside a subsystem
+matched against MAME over two minutes of rdft2 attract (14); the unit tests pass
+but that correlation has not been redone, and for a CPU swap it is the
+measurement that counts.

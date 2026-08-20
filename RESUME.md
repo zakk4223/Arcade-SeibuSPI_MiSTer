@@ -1,8 +1,56 @@
 # Where this is, and what to do next
 
-Live state as of 2026-08-18. `PLAN.md` is the design record and stays
+Live state as of 2026-08-20. `PLAN.md` is the design record and stays
 chronological; this file is the short answer to "what was I doing". Delete the
 finished parts as they go.
+
+## SAVE STATES, on branch `savestate-phase0` -- this is where the work is
+
+Twelve commits, none of them on `main`, nothing pushed. `PLAN.md` 38 and 39 are
+the design record; the plan file is
+`~/.claude/plans/what-would-be-involved-calm-stearns.md`.
+
+It fits and it mostly works:
+
+    ALMs 36,512 (87 %)   RAM blocks 487 (88 %)   worst slack +0.060, TNS 0.000
+    blob 311,640 bytes in a 512 KB slot, nineteen sections
+
+The 386 is never instrumented -- it is NMI'd into a six-instruction stub that
+pushes its own registers onto the game's stack, which is main RAM and is in the
+blob anyway (38). The board is paused at a chosen instant, one tick before the
+raster raises vblank, which is what makes the interrupt state knowable rather
+than something to carry (39.3).
+
+**Proven in simulation, three sets:** a save is transparent (6 dwords of 65,536
+differ at the same logical point, five of them the stub's own footprint on dead
+stack, and it does not grow); a restore is exact in memory; the 386 resumes at
+the saved CS:EIP; every one of 24,283 I/O reads matches.
+
+**Not proven:** determinism in general. Instruction agreement after a restore on
+rdfts is 16 / 167,678 / 10 at saves 900 k / 2.6 M / 4.1 M cycles in. The good one
+is a game running its display loop; the others are boot-time saves, where the
+sample-flash derivation and the SXX2C Z80 download have state that is not in the
+blob. **Establish whether "do not save during boot" is the whole explanation
+before adding another section** -- four were added on guesses and moved nothing.
+
+**The two instruments that work**, and the one that does not:
+
+    SS_TRAIL=<f>   every EIP after the operation; align two runs, the first
+                   difference names the instruction
+    SS_IORD=<f>    every I/O read with its value; names the register
+    SS_HASH_AFTER  the determinism sweep -- DISTRUST IT. It read 4 of 12 at the
+                   point the trail agreement had improved four orders of
+                   magnitude. Never quote it without a trail number beside it.
+
+Also still open: nothing has run on hardware; the sound path's MAME correlation
+has not been redone since T80 was swapped for tv80, and for a CPU swap that is
+the measurement that counts; and Quartus keeps re-adding files to `SeibuSPI.qsf`'s
+stale duplicate list, which is reverted after every fit.
+
+**If a fit fails or the register count jumps**, read
+`output_files/SeibuSPI.map.rpt`'s per-entity table FIRST. Two write statements to
+one array stops Quartus inferring memory and builds it out of flip-flops; it
+happened twice here and once got written up as "the device is full" (39.7).
 
 ## The goal that is nearly done
 
