@@ -263,6 +263,9 @@ int main(int argc, char **argv)
     uint32_t ss_marker = 0;
     uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
     uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
+    const size_t IO_RD_MAX = 400000; size_t io_rd_n = 0; bool io_rd_d = false;
+    const char *iort = getenv("SS_IORD");
+    uint32_t *io_rd_trail = iort ? new uint32_t[IO_RD_MAX] : nullptr;
     const size_t LONG_MAX_N = 400000; size_t long_n = 0;
     const char *lt_path = getenv("SS_TRAIL");
     uint32_t *long_trail = lt_path ? new uint32_t[LONG_MAX_N] : nullptr;
@@ -585,6 +588,11 @@ int main(int argc, char **argv)
                 // the two comparable at all.
                 if (ss_hash_after && !(ss_restore_at && !rs_done))
                     ss_hash_anchor = cyc;
+                // The vblank interrupt's state at the moment the machine is
+                // handed back. It is spi_cpu's, not the 386's, and it is not in
+                // the blob -- so if the two runs disagree here, that is what a
+                // vblank-wait loop is diverging on.
+                printf("  SS: at release: irq_pending=%d\n", dut->p_cpu_irq);
             }
             ss_busy_d = dut->p_ss_busy;
 
@@ -668,6 +676,17 @@ int main(int argc, char **argv)
                        (unsigned long long)cyc,
                        (unsigned long long)(cyc - ss_at), dut->p_eip);
             }
+
+            // Every I/O read the 386 makes after the operation finishes, with
+            // what it got back. Diffing two of these says what a poll loop is
+            // actually looking at, which is the question four sections were
+            // added without ever asking.
+            if (io_rd_trail && ss_hash_anchor && dut->p_io_rd && !io_rd_d
+                && io_rd_n + 2 < IO_RD_MAX) {
+                io_rd_trail[io_rd_n++] = dut->p_io_raddr * 4;
+                io_rd_trail[io_rd_n++] = dut->p_io_rdata;
+            }
+            io_rd_d = dut->p_io_rd;
 
             if (dut->p_io_wr && !io_wr_d) {
                 io_wr_total++; b_io++;
@@ -966,6 +985,12 @@ int main(int argc, char **argv)
         if (ss_eip_matched)
             printf("  resumed at cycle     : %llu\n",
                    (unsigned long long)ss_eip_match_cyc);
+    }
+    if (io_rd_trail) {
+        FILE *f = fopen(iort, "wb");
+        if (f) { fwrite(io_rd_trail, 4, io_rd_n, f); fclose(f); }
+        printf("wrote %zu I/O reads after the operation to %s\n",
+               io_rd_n / 2, iort);
     }
     if (long_trail) {
         FILE *f = fopen(lt_path, "wb");

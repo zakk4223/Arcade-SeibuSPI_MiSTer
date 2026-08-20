@@ -87,6 +87,13 @@ module spi_top
 	output     [15:0] ss_dbg_gate_dw0,
 	output     [15:0] ss_dbg_gate_reads,
 	output            ss_dbg_hold,
+	// Every I/O register the 386 READS, and what it got back. Writes have been
+	// visible to the testbench since the beginning; reads have not, and a poll
+	// loop is made of reads.
+	output            p_cpu_irq,
+	output            p_io_rd,
+	output      [8:0] p_io_raddr,
+	output     [31:0] p_io_rdata,
 	output     [15:0] ss_dbg_stub_reads,
 	output      [7:0] ss_dbg_stub_idx,
 	output     [31:0] ss_dbg_stub_data,
@@ -352,7 +359,7 @@ module spi_top
 		.dbg_ss_limit  (ss_dbg_ss_limit),
 		.dbg_ss_type   (ss_dbg_ss_type),
 		.dbg_ss_g      (ss_dbg_ss_g),
-		.dbg_irq   (),
+		.dbg_irq   (p_cpu_irq),
 		.dbg_gdt0(), .dbg_gdt1(),
 		.dbg_gdt2(), .dbg_gdt3(),
 		.dbg_gdt4(), .dbg_gdt5(),
@@ -385,6 +392,9 @@ module spi_top
 		.ss_dbg_stub_data  (ss_dbg_stub_data),
 		.ss_dbg_resume_eip (ss_dbg_resume_eip),
 		.ss_dma_busy       (ss_dma_busy),
+		.ss_irq_din        (irq_ss_din),
+		.ss_irq_we         (irq_ss_we),
+		.ss_irq_dout       (irq_ss_dout),
 
 		.vbl_toggle (vbl_toggle)
 	);
@@ -428,6 +438,10 @@ module spi_top
 	// Its outputs are stable register values read by clk_sys logic; both clocks
 	// come from the same PLL and sit in the same clock group, so TimeQuest
 	// analyses those transfers normally.
+	assign p_io_rd    = io_rd;
+	assign p_io_raddr = io_addr;
+	assign p_io_rdata = io_rdata;
+
 	spi_io io
 	(
 		.set_sxx2c  (set_sxx2c),
@@ -508,6 +522,14 @@ module spi_top
 		// which is the easy direction: a level held for a clk_sys cycle is
 		// sampled twice here rather than missed.
 		.pause    (ss_pause),
+		.ss_addr     (ds_ss_addr),
+		.ss_din      (ds_ss_din),
+		.ss_we       (ds_ss_we),
+		.ss_dout     (ds_ss_dout),
+		.ss_ram_addr (ds_ram_addr),
+		.ss_ram_din  (ds_ram_din),
+		.ss_ram_we   (ds_ram_we),
+		.ss_ram_dout (ds_ram_dout),
 		.clk      (clk_ram),
 		.reset    (reset),
 
@@ -742,6 +764,45 @@ module spi_top
 		.ram_we   (io_ss_we),
 		.ram_dout (io_ss_dout)
 	);
+
+	// SSIDX_CPU_IRQ: one dword, and the same bridge as everything else that has
+	// to reach into clk_cpu.
+	wire [31:0] irq_ss_din, irq_ss_dout;
+	wire        irq_ss_we;
+	/* verilator lint_off PINCONNECTEMPTY */
+	spi_ss_bridge #(.SS_IDX(SSIDX_CPU_IRQ), .AW(1), .DW(32), .ITEMS(1))
+	irq_bridge (
+		.clk      (clk_sys),
+		.ssbus    (ssb[SSIDX_CPU_IRQ]),
+		.ram_addr (),
+		.ram_din  (irq_ss_din),
+		.ram_we   (irq_ss_we),
+		.ram_dout (irq_ss_dout)
+	);
+	/* verilator lint_on PINCONNECTEMPTY */
+
+	// The DS2404's two sections. It is clk_ram, faster than the ssbus's
+	// clk_sys, so the bridge's hold discipline is generous here rather than
+	// tight -- but it is the same bridge, because a fourth hand-rolled crossing
+	// is how the last one went wrong.
+	wire  [3:0] ds_ss_addr;
+	wire [31:0] ds_ss_din, ds_ss_dout;
+	wire        ds_ss_we;
+	wire  [8:0] ds_ram_addr;
+	wire  [7:0] ds_ram_din, ds_ram_dout;
+	wire        ds_ram_we;
+
+	spi_ss_bridge #(.SS_IDX(SSIDX_DS2404), .AW(4), .DW(32), .ITEMS(16))
+	ds_bridge (
+		.clk (clk_sys), .ssbus (ssb[SSIDX_DS2404]),
+		.ram_addr (ds_ss_addr), .ram_din (ds_ss_din),
+		.ram_we (ds_ss_we), .ram_dout (ds_ss_dout));
+
+	spi_ss_bridge #(.SS_IDX(SSIDX_DS2404_RAM), .AW(9), .DW(8), .ITEMS(512))
+	ds_ram_bridge (
+		.clk (clk_sys), .ssbus (ssb[SSIDX_DS2404_RAM]),
+		.ram_addr (ds_ram_addr), .ram_din (ds_ram_din),
+		.ram_we (ds_ram_we), .ram_dout (ds_ram_dout));
 
 	// ------------------------------------------------------------------
 	// Video RAMs

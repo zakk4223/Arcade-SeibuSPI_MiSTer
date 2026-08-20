@@ -207,6 +207,14 @@ module spi_cpu
 	// would keep advancing its address counter while reading the savestate's
 	// data, and write that into the video RAMs.
 	output            ss_dma_busy,
+	// SSIDX_CPU_IRQ, one dword, through spi_ss_bridge like everything else that
+	// crosses from the ssbus's clk_sys into this file's clk_cpu. The first
+	// attempt at this section hand-rolled that crossing and was wrong.
+	/* verilator lint_off UNUSEDSIGNAL */
+	input      [31:0] ss_irq_din,   // five bits of it; the section is a dword
+	/* verilator lint_on UNUSEDSIGNAL */
+	input             ss_irq_we,
+	output reg [31:0] ss_irq_dout,
 	output            dbg_irq,
 	// Mirror of what the CPU writes to main RAM at 0x800, where the boot code
 	// builds the GDT it then LGDTs. If protected-mode entry fails, the first
@@ -340,9 +348,20 @@ module spi_cpu
 	reg       vbl_tgl_d;
 
 	always @(posedge clk) begin
-		inta_ready <= 1'b0;
+		inta_ready  <= 1'b0;
+		ss_irq_dout <= {27'd0, vbl_tgl_d, inta_responded, istate, irq_pending};
 
-if (reset) begin
+		if (ss_irq_we) begin
+			// Written only while the machine is frozen. irq_pending is in the
+			// word explicitly: the toggle compare below only ever SETS it, and
+			// what clears it is an interrupt acknowledge, so it cannot be
+			// reconstructed from vbl_tgl_d.
+			irq_pending    <= ss_irq_din[0];
+			istate         <= ss_irq_din[2:1];
+			inta_responded <= ss_irq_din[3];
+			vbl_tgl_d      <= ss_irq_din[4];
+		end
+		else if (reset) begin
 			istate         <= I_IDLE;
 			inta_responded <= 1'b0;
 			irq_pending    <= 1'b0;

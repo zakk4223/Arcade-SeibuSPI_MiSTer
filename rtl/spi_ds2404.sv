@@ -62,6 +62,19 @@ module spi_ds2404
 	// is already still, and the SRAM's ports are deliberately left live because
 	// the savestate reaches the array through them.
 	input             pause,
+
+	// ---- the savestate ---------------------------------------------------
+	// Sixteen dwords of register state and the 512-byte SRAM as its own
+	// section. This file is clk_ram, which is FASTER than the ssbus's clk_sys,
+	// so spi_ss_bridge's three-cycle hold is generous rather than tight.
+	input       [3:0] ss_addr,
+	input      [31:0] ss_din,
+	input             ss_we,
+	output reg [31:0] ss_dout,
+	input       [8:0] ss_ram_addr,
+	input       [7:0] ss_ram_din,
+	input             ss_ram_we,
+	output      [7:0] ss_ram_dout,
 	// The state machine only. The SRAM deliberately survives reset: it is
 	// battery-backed on the board, and it is loaded from the save file while the
 	// rest of the core is still held down.
@@ -148,6 +161,14 @@ module spi_ds2404
 	// ------------------------------------------------------------------
 	reg [7:0] sram [0:511];
 	reg [7:0] game_q;
+	reg [7:0] ss_ram_q;
+	assign ss_ram_dout = ss_ram_q;
+
+	wire [8:0] sram_wa = ss_ram_we ? ss_ram_addr
+	                   : nv_we     ? nv_addr : copy_addr[8:0];
+	wire [7:0] sram_wd = ss_ram_we ? ss_ram_din
+	                   : nv_we     ? nv_din  : pad[copy_i[4:0]];
+	wire       sram_we = ss_ram_we | nv_we | copy_sram;
 
 	wire       in_sram = (address < 16'h0200);
 	wire       in_rtc  = (address >= 16'h0202) && (address <= 16'h0206);
@@ -224,6 +245,29 @@ module spi_ds2404
 		for (k = 0; k < 512; k = k + 1) sram[k] = 8'h00;
 	end
 
+	// ------------------------------------------------------------------
+	// SSIDX_DS2404 -- sixteen dwords. The scratchpad is here rather than in a
+	// section of its own because thirty-two bytes is eight dwords and a
+	// section boundary would cost more than it saves.
+	// ------------------------------------------------------------------
+	integer sk;
+	always @(posedge clk) begin
+		case (ss_addr)
+			4'd0:  ss_dout <= rtc[31:0];
+			4'd1:  ss_dout <= {24'd0, rtc[39:32]};
+			4'd2:  ss_dout <= {{(32-TICK_W){1'b0}}, tick_cnt};
+			4'd3:  ss_dout <= {st[7], st[6], st[5], st[4],
+			                   st[3], st[2], st[1], st[0]};
+			4'd4:  ss_dout <= {7'd0, offset, sptr, address};
+			4'd5:  ss_dout <= {8'd0, end_off, a2, a1};
+			4'd6:  ss_dout <= {3'd0, arm, copy_addr, copy_i, copying};
+			default: ss_dout <= {pad[{ss_addr[2:0], 2'd3}],
+			                     pad[{ss_addr[2:0], 2'd2}],
+			                     pad[{ss_addr[2:0], 2'd1}],
+			                     pad[{ss_addr[2:0], 2'd0}]};
+		endcase
+	end
+
 	always @(posedge clk) begin
 		// The state stack, the address bytes and the pointer as they are BEFORE
 		// the edge that stores them, as variables local to this process. MAME's
@@ -237,6 +281,30 @@ module spi_ds2404
 		automatic logic [3:0] cur_st;
 		automatic logic       armed;
 		automatic integer     i;
+		// A restore drops the chip's state in wholesale. Everything below is
+		// either frozen by `pause` or driven by a 386 that is not running, so
+		// nothing is competing for these.
+		if (ss_we) begin
+			case (ss_addr)
+				4'd0: rtc[31:0]  <= ss_din;
+				4'd1: rtc[39:32] <= ss_din[7:0];
+				4'd2: tick_cnt   <= ss_din[TICK_W-1:0];
+				4'd3: for (sk = 0; sk < 8; sk = sk + 1)
+				          st[sk] <= ss_din[sk*4 +: 4];
+				4'd4: begin address <= ss_din[15:0];
+				            sptr    <= ss_din[18:16];
+				            offset  <= ss_din[24:19]; end
+				4'd5: begin a1 <= ss_din[7:0];  a2 <= ss_din[15:8];
+				            end_off <= ss_din[23:16]; end
+				4'd6: begin copying   <= ss_din[0];
+				            copy_i    <= ss_din[8:1];
+				            copy_addr <= ss_din[24:9];
+				            arm       <= ss_din[28:25]; end
+				default: for (sk = 0; sk < 4; sk = sk + 1)
+				             pad[{ss_addr[2:0], sk[1:0]}] <= ss_din[sk*8 +: 8];
+			endcase
+		end
+
 		req_s1 <= req;
 		req_s2 <= req_s1;
 		req_s3 <= req_s2;
@@ -247,9 +315,11 @@ module spi_ds2404
 		// A load wins over the game, which costs nothing: the two cannot
 		// overlap. nv_dout follows nv_addr for the save side, game_q follows
 		// the read pointer for the 386's.
-		if (nv_we)        sram[nv_addr]        <= nv_din;
-		else if (copy_sram) sram[copy_addr[8:0]] <= pad[copy_i[4:0]];
-		nv_dout <= sram[nv_addr];
+		// One write statement, savestate first. Two would stop Quartus
+		// inferring the memory, which cost the fit twice in this work already.
+		if (sram_we) sram[sram_wa] <= sram_wd;
+		nv_dout    <= sram[nv_addr];
+		ss_ram_q   <= sram[ss_ram_addr];
 		game_q  <= sram[address[8:0]];
 
 		// ---- the RTC, 40 bits at 256 Hz ------------------------------

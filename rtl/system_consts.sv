@@ -81,9 +81,33 @@ package system_consts;
 	parameter int SSIDX_YMF_ST       = 14; // 48 slots x 96 bits, + key pending
 	parameter int SSIDX_YMF_FB       = 15; // 48 slots x 54 bits of feedback
 
+	// The vblank interrupt's own state, which lives in spi_cpu rather than in
+	// the 386: whether IRQ0 is asserted, where the two-cycle acknowledge got
+	// to, and the toggle that carries vblank across from clk_sys.
+	//
+	// MEASURED, not guessed at this time. A save-only run hands the machine
+	// back with irq_pending = 1 and a save-then-restore run hands it back with
+	// 0, so the restored 386 sits in its vblank-wait loop for an extra frame --
+	// which is the whole of the divergence that survived saving the raster, the
+	// I/O registers, the DS2404, the Z80, the FIFOs and the YMF271.
+	parameter int SSIDX_CPU_IRQ      = 16;
+
+	// The DS2404. Its RTC counts real time at 256 Hz and a savestate does not
+	// stop time passing between a save and the load that follows it -- so
+	// without this the restored machine reads a clock that has moved on.
+	//
+	// MEASURED, and it is the last thing in the 386's causal path: the first
+	// I/O read where a restored run differs from a saved one is 0x6DC, the
+	// chip's data port, returning 0x0D against 0x12. Five ticks, which at
+	// 256 Hz is the 21 ms between the save and the load in that test. The game
+	// stores what it reads at 0x000369B8, which is the one main-RAM word that
+	// had been differing since the raster was fixed.
+	parameter int SSIDX_DS2404       = 17; // RTC, state machine, scratchpad
+	parameter int SSIDX_DS2404_RAM   = 18; // the 512 bytes of bookkeeping SRAM
+
 	// Sections after this point arrive with the later phases; the count below
 	// is what `memory_stream` is told to walk, so it has to grow with them.
-	parameter int SSIDX_COUNT       = 16;
+	parameter int SSIDX_COUNT       = 19;
 
 	// ---- the DDR3 window -------------------------------------------------
 	//
