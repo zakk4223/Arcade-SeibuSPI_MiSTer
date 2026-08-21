@@ -10112,3 +10112,139 @@ log and is right either way; a human skimming the log should filter on 332148.
 The QSF did not re-add its stale duplicate file list this time -- 56 file
 assignments, no duplicates, hash unchanged across three compiles. Only
 `build_id.v` is dirty, which is generated.
+
+## 42. The raster never stops: PGM's approach, and the scaler that found it (2026-08-21)
+
+41 put the first savestate bitstream on hardware. rdft booted, ran its attract,
+and then a save and a load were both **visibly disruptive to the low-latency
+scaler**. 40.3 predicted the load half of this in one sentence and nobody had
+looked; the save half was not predicted at all.
+
+The cause is one line, and PGM -- which this framework was vendored from -- makes
+the same class of mistake impossible by construction.
+
+### 42.1 What the pause actually stopped
+
+`ss_pause` reached four places (`spi_top.sv` 175, 527, 568, 702). Three of them
+are right. The fourth was the video timing generator:
+
+    rtl/spi_video_timing.sv:85     else if (pause) begin
+                                       ce_pix <= 1'b0; ...
+
+`div`, `hcnt` and `vcnt` advanced only in the final `else`, so they froze with
+it -- and HSync, VSync, HBlank and VBlank are **combinational decodes of those
+counters**. So for the length of a transfer, `CE_PIXEL` sat at 0 and there was
+not one sync edge. `spi_top.sv:673` puts a transfer at about 14 ms; the frame is
+18.5 ms at 53.99 Hz. MiSTer's scaler is a line-locked consumer and saw a single
+scanline stretch to hundreds of times its length, three-quarters of every frame
+in which an operation happened.
+
+The module header said what it was doing -- "gating them here freezes the whole
+video side without any of those modules needing to know" -- so this was a design
+decision that happened to be a bug, not an oversight. Which is the more useful
+kind to write down.
+
+### 42.2 PGM cannot do this, and that is the interesting part
+
+    PGM.sv:130     wire ce_50m = 1;                              // a literal
+    igs023.sv:75   assign ce_pixel = ce_50m & ce_pixel_shift[4]; // mod-5 rotator
+    igs023.sv:153  if (ce_pixel) begin hcnt <= hcnt + 1; ...     // no pause term
+    PGM.sv:422     wire clocks_enabled = ss_cpu_execute | ~paused;
+
+`clocks_enabled` reaches the 68000, the ARM7 and the ICS2115. It does not reach
+the video. The only thing PGM's pause does to the display is halve R/G/B after
+ten seconds (`pause.sv:100`), which is cosmetic. Its transfer is LONGER than ours
+in wall-clock and is invisible.
+
+And PGM gets its canonical instant the other way round from us: `pause_ack` is
+registered only when the scanline counter reaches 221 (`igs023.sv:401`). It
+**observes** the raster to choose the moment. It never stops it, and
+`system_consts.sv` there has no video index at all -- its raster is not state.
+
+### 42.3 What pause gates now, and why the interrupt is still safe
+
+One bit: the vblank interrupt. And it is DEFERRED, not dropped. `vbl_pend`
+remembers a crossing that falls during a freeze and raises `vbl_rise` the moment
+the board is let go -- which is exactly the semantics `spi_ss.sv`'s header was
+already claiming ("deferred by the length of the transfer along with everything
+else"), now obtained without stopping the display.
+
+A single bit is the right width. A pause spanning two crossings collapses to one
+interrupt, and that is correct rather than lossy: the game's time was frozen, so
+it should see one vblank on resume, not a burst.
+
+`line_start` deliberately keeps running. The tile and sprite engines then keep
+refilling their line buffers from a frozen VRAM and the display shows a correct
+still picture instead of a smear. Neither engine touches the main RAM port the
+transfer owns, and the DMA that does is started by the 386, which is frozen.
+
+### 42.4 The phase is re-acquired, not carried
+
+`SSIDX_VIDEO_TIMING` is gone. Indices renumbered contiguous 0..17, `SSIDX_COUNT`
+19 -> 18, and an existing `.ss` is incompatible.
+
+What replaces it is `S_WAITVBL`: after the transfer, hold the board until the
+raster comes back round to `vbl_next`, then release. The 386 resumes at the
+raster phase it was frozen at, which is the entire thing the old section bought
+by jamming the counters -- and it costs no state.
+
+Tracing the cycles, the change is narrower than it looks. `pause` is
+combinational on `st`, and `st` leaves `S_ARM` on the edge ENDING the `vbl_next`
+cycle, so `vbl_rise` fires one cycle into the pause in the old code and the new
+one alike. `S_WAITVBL` exits on `vbl_next` and the counters advance one more
+tick, leaving the raster at VBSTART -- exactly where the old code's
+parked-then-released counters left it, and exactly what a load used to jam them
+to. Both ends are behaviour-preserving; only the middle differs.
+
+### 42.5 Measured against the old code, rdft2, save 3 M / restore 8 M
+
+    main RAM restored     E73FBF128614EDC5   EXACT, identical to old
+    resumed at EIP        002A1359           identical to old
+    RAM hash +200 k       67181BD5C945E779   BYTE-IDENTICAL to old
+
+The restore produces the same trajectory, not merely a passing one. The bench's
+own line confirms the deferral never fires on a save -- **"0 vblanks passed"** --
+because the transfer starts at vblank entry and fits inside the frame.
+
+The board is frozen longer: 2,103,622 cycles against 1,912,112 on a save
+(+3.3 ms), and 1,347,078 against 767,412 on a load (+10 ms), the difference being
+the wait for the raster. Both are invisible, because the display is live for all
+of it. The audio gap is the real cost.
+
+### 42.6 The fit got better
+
+    setup  +0.016 -> +0.039  (pll_hdmi, ascal)     hold  +0.134 -> +0.239
+    ALMs   36,418 -> 36,359 (87 %)                 registers 35,343 -> 35,261
+    RAM blocks 487 (88 %) and 3,563,997 memory bits unchanged.   SEED 3
+    RBF 2a58c390, deployed md5-verified.
+
+Removing the section gave back 82 registers and 59 ALMs and more than doubled the
+margin on the thin `ascal` path 41 flagged. Worth noting that the fix for a
+correctness bug was also the cheaper design; that is not usually how it goes.
+
+### 42.7 Two traps, one of them pre-existing and serious
+
+**A restore offset tuned to the old timing is now a back-to-back test.** The save
+ends about 191 k cycles later, so `SS_RESTORE_AT=5000000` -- clear of the save
+before -- now lands one cycle after it releases. That produced a
+`restore: FAILED` here that was entirely my own test, and it cost a round of
+investigation. Whoever re-runs the 86-point sweep has to move the restore offsets
+out first.
+
+**save -> load about one cycle apart WEDGES THE BOARD.** Armed, then no stub
+entry and no completion; the CPU sits on one address and the bench times out. It
+reproduces IDENTICALLY on the unmodified tree, so it is pre-existing and this
+work neither caused nor cured it. `S_SETTLE` does not cover it -- that guard is
+about the CPU still being inside a stub, and here the stub was left long before.
+It is user-reachable (press load as a save completes) and it wants its own fix.
+Only save->load has been demonstrated; load->load is adjacent and untested.
+
+### 42.8 A dead end worth recording
+
+`SeibuSPI.sv:1389` wires `screen_rotate`'s `DDRAM_BUSY` to `1'b0`, and the
+savestate preempts rotate, so its framebuffer writes are dropped rather than
+stalled. That looks like a second bug and is not one: **`screen_rotate` takes
+`DDRAM_BUSY` as an input and never reads it** (`sys/arcade_video.v` -- the only
+assignment is `DDRAM_WE = ram_wr`). Giving it real back-pressure would change
+nothing. The tear on rotated output during a transfer is inherent to that module
+and is not what was breaking the scaler.

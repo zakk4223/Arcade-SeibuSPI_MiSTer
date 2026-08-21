@@ -12,18 +12,21 @@ Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
 
 It fits and it mostly works:
 
-    ALMs 36,418 (87 %)   RAM blocks 487 (88 %)   registers 35,343
-    clk_ram +0.175   clk_sys +0.953   clk_cpu +1.790   pll_hdmi +0.016
-    hold +0.134, TNS 0.000 everywhere, SEED 3, md5 4da63a7e
-    blob 311,640 bytes in a 512 KB slot, nineteen sections
+    ALMs 36,359 (87 %)   RAM blocks 487 (88 %)   registers 35,261
+    pll_hdmi +0.039 (ascal)   hold +0.239   TNS 0.000, SEED 3, md5 2a58c390
+    blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
-**The fit is current as of PLAN.md 41** -- 40's three RTL files and 39's four are
-all in it, and there is an assembled RBF containing save states for the first
-time (the one on disk before this was dated BEFORE the first savestate commit).
-Nothing savestate-related is in the worst 25 paths. The +0.016 is `ascal`, the
-framework's HDMI scaler, which nothing here runs on; the core's own worst path is
-`rom_loader|in_off[3] -> part_size_r[21]` at +0.175 on clk_ram. **Do not re-roll
-the seed for margin on it** -- seed 1 now FAILS at -0.110 on clk_ram (41.1).
+**IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
+boots and plays on the savestate bitstream; save and load were then visibly
+disruptive to the low-latency scaler, because `spi_video_timing` gated its
+counters with the savestate pause and sync went flat for 14 ms of an 18.5 ms
+frame. Fixed the way PGM does it -- **the raster never stops now** -- and the
+restore is byte-identical to the old code's on the determinism hash. PLAN.md 42.
+
+The fit is current and IMPROVED by that change (82 registers and 59 ALMs back,
+and the thin `ascal` margin more than doubled). Worst paths are all `ascal`, the
+framework's HDMI scaler, which nothing here runs on. **Do not re-roll the seed
+for margin on it** -- seed 1 FAILS at -0.110 on clk_ram (41.1).
 
 The 386 is never instrumented -- it is NMI'd into a six-instruction stub that
 pushes its own registers onto the game's stack, which is main RAM and is in the
@@ -83,15 +86,27 @@ The bench's `resumed at the saved EIP: NO` line is keyed on a short trail that i
 usually empty and was a FALSE VERDICT throughout 39. Believe the
 `restore : the CPU resumed at the saved CS:EIP` line beside it.
 
-Also still open: **nothing has run on hardware, and that is now the top of the
-list** -- a load jumps the raster mid-frame instead of at vblank, which is a
-visible behaviour change 40.3 made and nobody has looked at; the sound path's
-MAME correlation has not been redone since T80 was swapped for tv80, and for a
-CPU swap that is the measurement that counts; the OSD and pad path has never been
-driven; and Quartus keeps re-adding files to `SeibuSPI.qsf`'s stale duplicate
-list -- though it did NOT re-add it across the three compiles in 41, so this may
-be less frequent than it looked. **The fit HAS been re-run and it passes**
-(PLAN.md 41); the numbers above are current.
+Still open, and the list is shorter than it was:
+
+* **A pre-existing HANG.** save -> load issued about one cycle apart wedges the
+  board -- armed, no stub entry, no completion. It reproduces IDENTICALLY on the
+  unmodified tree, so it is not 42's doing, and `S_SETTLE` does not cover it. It
+  is user-reachable: press load as a save completes. Only save->load is
+  demonstrated; load->load is adjacent and untested. **This wants fixing before
+  anyone else touches the hardware**, and it is the reason not to try a rapid
+  double-load on the board.
+* **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
+  naively: the save now ends ~191 k cycles later, so any restore offset tuned to
+  the old timing silently becomes a back-to-back test. Move them out first. A
+  bad offset produced a false `restore: FAILED` here and cost a round.
+* The sound path's MAME correlation has still not been redone since T80 was
+  swapped for tv80, and for a CPU swap that is the measurement that counts.
+* **The OSD and pad path is still undriven on hardware** -- slot switching,
+  autoincrement, and the OSD's own save/restore entries. Audio continuity across
+  a load has not been listened to either.
+* Quartus keeps re-adding files to `SeibuSPI.qsf`'s stale duplicate list --
+  though it did NOT across the four compiles in 41 and 42, so this may be less
+  frequent than it looked.
 
 **If a fit fails or the register count jumps**, read
 `output_files/SeibuSPI.map.rpt`'s per-entity table FIRST. Two write statements to
