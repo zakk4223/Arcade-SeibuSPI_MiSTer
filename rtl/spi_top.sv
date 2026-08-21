@@ -87,6 +87,9 @@ module spi_top
 	output     [15:0] ss_dbg_gate_dw0,
 	output     [15:0] ss_dbg_gate_reads,
 	output            ss_dbg_hold,
+	// {io_stall, z80dl_stall, ds_stall} -- which of the two I/O holds is
+	// keeping the 386 off an instruction boundary. Diagnostic only.
+	output      [2:0] ss_dbg_stalls,
 	// Every I/O register the 386 READS, and what it got back. Writes have been
 	// visible to the testbench since the beginning; reads have not, and a poll
 	// loop is made of reads.
@@ -242,6 +245,7 @@ module spi_top
 	wire  [7:0] z80dl_data;
 	wire        z80dl_req;
 	wire        z80dl_stall;
+	assign ss_dbg_stalls = {z80dl_stall | ds_stall, z80dl_stall, ds_stall};
 	wire [18:0] z80dl_end;
 	wire        z80_rst_n;
 
@@ -301,6 +305,7 @@ module spi_top
 		// Any I/O write still in flight to another clock domain: the Z80
 		// program download, and now the DS2404's ports.
 		.io_stall    (z80dl_stall | ds_stall),
+
 		// Only the sets with a second sound ROM read sound1.u0222's window, and
 		// only their loader tables put anything behind it -- see spi_cpu.sv's
 		// map. rdft's Z80 program is inside `maincpu` instead and rdfts has a
@@ -512,6 +517,11 @@ module spi_top
 	// stalled. The 386 is the side that crosses, and spi_io holds it off with
 	// ds_stall while a byte is in flight. See spi_ds2404.sv.
 	// ------------------------------------------------------------------
+	// The DS2404's freeze, registered in clk_sys before it crosses. See the
+	// .pause connection below for why it is gated on the snapshot at all.
+	reg        ds_pause;
+	always @(posedge clk_sys) ds_pause <= ss_pause && ss_snapshot;
+
 	wire       ds_req, ds_ack, ds_stall;
 	wire [1:0] ds_port;
 	wire [7:0] ds_data, ds_dout;
@@ -521,7 +531,34 @@ module spi_top
 		// clk_ram, so this level crosses from clk_sys into a FASTER clock --
 		// which is the easy direction: a level held for a clk_sys cycle is
 		// sampled twice here rather than missed.
-		.pause    (ss_pause),
+		//
+		// GATED ON THE SNAPSHOT, not on ss_pause alone, and this is load-bearing
+		// (PLAN.md 43). spi_ds2404's `if (pause)` is the first branch of a chain
+		// that also covers `req_edge`, so while it is asserted a request from
+		// the 386 is not delayed -- it is never seen, and `ack` never comes. On
+		// a LOAD, pause asserts while the 386 is STILL RUNNING (it has to run,
+		// to walk to the stub), so it can issue a DS2404 access into a chip that
+		// has stopped listening. spi_io then holds `ds_stall`, spi_top ORs it
+		// into `io_stall`, spi_cpu's `mem_accept` is gated on `!io_stall`, and
+		// the CPU can never reach the instruction boundary where it would take
+		// the NMI. Measured, not deduced: the wedge reads `io=1 ds=1` with
+		// ss_hold=0 and the CPU parked at 0x600 forever.
+		//
+		// Waiting for the snapshot is SAFE rather than merely later: `io_stall`
+		// is exactly what holds the 386 off an instruction boundary while a byte
+		// is in flight, so by construction nothing is in flight at the moment it
+		// freezes. And the chip only has to be still while the blob is read or
+		// written, which is from the snapshot onward -- 40.5's tick_cnt hold
+		// still sees `pause` throughout a restore, because the writes land in
+		// S_STREAMING with the CPU frozen.
+		//
+		// REGISTERED, and that is not tidiness. Doing the AND combinationally
+		// here failed the fit at -0.077 on clk_ram: `ss_snapshot` comes from
+		// spi_cpu on clk_cpu, so the gate put two domains' logic in front of a
+		// crossing into the FASTER clock. 31.7 hit the same endpoint the same
+		// way and answered it the same way. One flop in clk_sys, then a single
+		// level crosses, exactly as bare `ss_pause` did before.
+		.pause    (ds_pause),
 		.dbg_rtc     (p_ds_rtc),
 		.dbg_tick    (p_ds_tick),
 		.ss_addr     (ds_ss_addr),

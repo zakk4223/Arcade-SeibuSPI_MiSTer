@@ -768,6 +768,16 @@ int main(int argc, char **argv)
                    (unsigned)(dut->p_cpu_addr << 2), dut->p_cpu_valid,
                    dut->p_cpu_ready, dut->p_cpu_inta, dut->p_cpu_state,
                    dut->p_dma_own, dut->p_dma_busy, dut->p_prg_outstanding);
+            // Why is the CPU not advancing? spi_cpu's mem_accept is an AND of
+            // several holds and the columns above show only some of them. These
+            // are the savestate's, and a wedged load is one of them stuck on.
+            printf("         ss: hold=%u snapshot=%u in_stub=%u nmi=%u state=%u"
+                   "  irq=%u\n",
+                   dut->p_ss_hold, dut->p_ss_snapshot, dut->p_ss_in_stub,
+                   dut->p_ss_nmi, dut->p_ss_state, dut->p_cpu_irq);
+            printf("         stalls: io=%u z80dl=%u ds=%u\n",
+                   (dut->p_ss_stalls >> 2) & 1, (dut->p_ss_stalls >> 1) & 1,
+                   dut->p_ss_stalls & 1);
             printf("         frames=%llu  non-black pixels in last frame=%llu / %d\n",
                    (unsigned long long)frames,
                    (unsigned long long)nonblack_last, FW * FH);

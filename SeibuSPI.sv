@@ -1236,6 +1236,7 @@ spi_top spi_top
 	.ss_dbg_gate_dw0   (),
 	.ss_dbg_gate_reads (),
 	.ss_dbg_hold       (),
+	.ss_dbg_stalls     (),
 	.p_cpu_irq         (),
 	.p_ds_rtc          (),
 	.p_ds_tick         (),

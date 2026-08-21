@@ -10248,3 +10248,109 @@ stalled. That looks like a second bug and is not one: **`screen_rotate` takes
 assignment is `DDRAM_WE = ram_wr`). Giving it real back-pressure would change
 nothing. The tear on rotated output during a transfer is inherent to that module
 and is not what was breaking the scaler.
+
+## 43. The lockup: a chip that stops listening while the CPU is still talking (2026-08-21)
+
+42 went to hardware and the video was stable through save and load. Then: "rapid
+reload leads to eventual lockup". 42.7 had already found the same hang in
+simulation as save -> load one cycle apart and recorded it as pre-existing; the
+hardware report is load -> load, and it is the same bug.
+
+It is not pre-existing in the sense of ancient. **40.3 introduced it**, by
+removing the load's arm wait so that `pause` asserts immediately. Four commits.
+
+### 43.1 Three wrong answers, and what finally worked
+
+Worth writing down because the wrong turns were all the same mistake.
+
+1. "A DS2404 copy in flight freezes and never acks." Plausible, built from real
+   code, and wrong: draining `copying` changed nothing.
+2. "`ss_dbg_state`=3 is spi_ss's S_STREAMING, so memory_stream is stuck." Wrong
+   about the probe -- `ss_dbg_state` is **spi_cpu's** machine, and 3 is `SS_RUN`.
+3. Both of those were reasoning forward from source. What settled it in one run
+   was adding `ss_dbg_stalls = {io_stall, z80dl_stall, ds_stall}` and reading it.
+
+The instrument is three lines and it named the bug immediately. 39.8 and 40.1
+both say a version of this about the determinism hash; the same lesson applies to
+reading code as an instrument.
+
+### 43.2 What it actually is
+
+`spi_ds2404.sv`'s `if (pause)` is the FIRST branch of an if/else chain that also
+covers `req_edge`. So a paused DS2404 does not defer a request. **It never sees
+it**, and `ack` never comes:
+
+    if (pause)              begin ... end   // swallows everything below
+    else if (copying)       begin ... ack <= req_s2; end
+    else if (arm != S_IDLE) begin ... ack <= req_s2; end
+    else if (req_edge)      begin ... end   // a request arriving here is DROPPED
+
+On a LOAD, `pause` asserts while the 386 is **still running** -- it has to run, to
+walk to the stub. So it can issue a DS2404 access into a chip that has stopped
+listening. Then:
+
+    ack never comes -> spi_io holds ds_stall -> spi_top ORs it into io_stall
+    -> spi_cpu's mem_accept is gated on !io_stall (spi_cpu.sv:893)
+    -> the 386 never reaches an instruction boundary
+    -> it never takes the NMI -> the sequencer waits for it forever
+
+Measured at the wedge, which is what turned this from a story into a diagnosis:
+
+    cpu: 00000600 vld=1 rdy=0      (forever)
+    ss:  hold=0 snapshot=0 in_stub=0 state=3(SS_RUN)
+    stalls: io=1 z80dl=0 ds=1
+
+`hold=0` is the line that kills every "the savestate froze the CPU" theory, and
+`ds=1` names the chip.
+
+**Why "eventual".** The window needs the 386 to touch the DS2404 during the
+pause. Rapid repeated operations keep rolling that dice; a sweep that never
+issues two operations close together never rolls it at all, which is exactly why
+86 points missed it.
+
+### 43.3 The fix, and why waiting for the snapshot is safe
+
+    ds_pause <= ss_pause && ss_snapshot;    // registered, clk_sys
+
+The chip only has to be still while the blob is read or written, which is from
+the snapshot onward. Before that the 386 is running and must be able to finish
+what it starts.
+
+Safe by construction rather than by timing luck: `io_stall` is precisely what
+holds the 386 off an instruction boundary while a byte is in flight, so nothing
+can be mid-transaction at the moment it freezes. 40.5's `tick_cnt` hold still
+sees `pause` for the whole restore, because the blob's writes land in S_STREAMING
+with the CPU already frozen.
+
+### 43.4 It has to be registered, and 31.7 said so first
+
+Written as a combinational AND at the instantiation it **failed the fit at -0.077
+on clk_ram**, TNS -0.077, one critical warning:
+
+    combinational   setup -0.077  FAIL   1 critical warning
+    registered      setup +0.121  PASS   0 critical warnings
+
+`spi_ds2404` runs on clk_ram; `ss_snapshot` comes from spi_cpu on clk_cpu. The
+gate put two domains' logic in front of a crossing into the FASTER clock. 31.7
+failed on this same endpoint for this same reason and answered it the same way --
+one flop -- and the answer did not survive as a rule, only as a story about one
+signal. It is a rule: **nothing combinational goes in front of that crossing.**
+
+    ALMs 36,456 (87 %)   RAM blocks 487 (88 %)   registers 35,395
+    setup +0.121   hold +0.243   TNS 0.000   SEED 3   RBF e4037a48
+
+### 43.5 Measured
+
+    back-to-back load (the wedge)   WEDGE -> passes, hash 67181BD5C945E779
+    normal load (8 M)               passes, hash unchanged
+    make verify                     exit 0, all ds2404 and nvram checks pass
+
+The determinism hash is the same value a healthy load produces, so the fix clears
+the hang without moving the trajectory.
+
+### 43.6 New instrument
+
+`ss_dbg_stalls` on spi_top, `{io_stall, z80dl_stall, ds_stall}`, stubbed `()` in
+SeibuSPI.sv like every other `ss_dbg_*` and printed by tb_boot. Keep it. It is the
+only thing that distinguishes "the savestate froze the CPU" from "the CPU is
+stalled on an I/O hold", and those look identical from every other angle.
