@@ -230,6 +230,18 @@ int main(int argc, char **argv)
     const uint64_t ss_at = ss_env ? strtoull(ss_env, nullptr, 0) : 0;
     const char *rst_env = getenv("SS_RESTORE_AT");
     const uint64_t ss_restore_at = rst_env ? strtoull(rst_env, nullptr, 0) : 0;
+    // SS_RELOADS is how many loads to fire in total, back to back, each one
+    // SS_RELOAD_GAP cycles after the previous finished. 1 (the default) is the
+    // old single-restore behaviour exactly. This exists because the hardware
+    // lockup is a REPEATED load -- "2-3 reloads of the same state one after
+    // another" -- and a single restore never reproduced it. PLAN.md 44.
+    const char *rn_env = getenv("SS_RELOADS");
+    const unsigned ss_reloads = rn_env ? (unsigned)strtoul(rn_env, nullptr, 0) : 1;
+    const char *rg_env = getenv("SS_RELOAD_GAP");
+    const uint64_t ss_reload_gap = rg_env ? strtoull(rg_env, nullptr, 0) : 1000;
+    unsigned rs_count = 0;          // loads fired so far
+    uint64_t rs_next  = 0;          // cycle the next one may fire at
+
     const char *ha_env = getenv("SS_HASH_AFTER");
     const uint64_t ss_hash_after = ha_env ? strtoull(ha_env, nullptr, 0) : 0;
 
@@ -290,6 +302,11 @@ int main(int argc, char **argv)
         // rdata_ready, so a lazier model would only make the transfer longer.
         if ((t & 3) == 0) {
             bool acq = dut->ddr_acquire;
+            // SS_DDR_BUSY models a SECOND MASTER on DDR3 -- which on hardware is
+            // screen_rotate, and which this bench has never had. It matters now:
+            // before 42 the raster froze during a transfer so rotate was idle,
+            // and now video free-runs and rotate bursts throughout. Deterministic
+            // (no rand) so a failure reproduces. PLAN.md 44.
             dut->ddr_rdata_ready = 0;
             if (ddr_lat == 0) {
                 dut->ddr_rdata = ddr[(ddr_lat_addr >> 3) & 0xFFFF];
@@ -476,10 +493,16 @@ int main(int argc, char **argv)
                 printf("  SS: save asked for at cycle %llu, CS=%04X EIP=%08X\n",
                        (unsigned long long)cyc, dut->p_cs, dut->p_eip);
             }
-            if (ss_restore_at && ss_done && !rs_fired
-                && cyc >= ss_restore_at && !dut->p_ss_busy) {
-                rs_fired = true;
+            if (ss_restore_at && ss_done && rs_count < ss_reloads
+                && cyc >= (rs_count ? rs_next : ss_restore_at)
+                && !dut->p_ss_busy) {
+                rs_count++;
+                rs_fired = true;           // the first one still gates the
+                                           // existing verdicts and hashes
+                rs_next  = cyc + ss_reload_gap;
                 dut->ss_load = 1;
+                if (ss_reloads > 1)
+                    printf("  SS: --- load %u of %u ---\n", rs_count, ss_reloads);
                 printf("  SS: RTC at request: %llu (tick %u)\n",
                        (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
                 printf("  SS: load asked for at cycle %llu, CS=%04X EIP=%08X\n",
