@@ -1385,6 +1385,13 @@ screen_rotate screen_rotate
 
 	// DDRAM is shared with the ROM reader now, so screen_rotate drives wires
 	// and the mux below decides who reaches the pins.
+	//
+	// The 1'b0 is not a shortcut and feeding it a real busy would change
+	// NOTHING: screen_rotate takes DDRAM_BUSY as an input and never reads it
+	// (sys/arcade_video.v -- the only assignment is `DDRAM_WE = ram_wr`). It
+	// has no back-pressure to offer, so a preempted write is dropped rather
+	// than stalled whatever this is wired to. Checked while chasing the
+	// savestate video glitch (PLAN.md 42); the glitch was the raster, not this.
 	.DDRAM_CLK      (),
 	.DDRAM_BUSY     (1'b0),
 	.DDRAM_BURSTCNT (rot_burstcnt),

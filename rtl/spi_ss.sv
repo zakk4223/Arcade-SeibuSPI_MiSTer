@@ -8,18 +8,22 @@
 //
 //  WHEN a save happens is chosen, not taken as it comes. The request arms, and
 //  nothing else happens until the raster is one tick from raising the vblank
-//  interrupt -- `vbl_next` -- at which point the board is paused and the raster
-//  is left parked there.
+//  interrupt -- `vbl_next` -- at which point the board is paused. The raster
+//  itself KEEPS RUNNING (PLAN.md 42): freezing it held HSync and VSync flat for
+//  14 ms and broke the scaler on every operation. The board is released at
+//  `vbl_next` too, so the 386 still resumes at the raster phase it was frozen
+//  at, and the vblank the raster crossed in between is deferred rather than
+//  dropped -- spi_video_timing holds it in `vbl_pend` and raises it on release.
 //
 //  That instant is worth waiting for because it makes the interrupt state
-//  KNOWN rather than something that has to be carried in the blob. Parked
+//  KNOWN rather than something that has to be carried in the blob. Frozen
 //  there, this frame's interrupt has not been raised yet and the previous
 //  frame's has long since been acknowledged and returned from, so `irq_pending`
 //  is clear and spi_cpu's two-cycle acknowledge machine is idle. There is
-//  nothing to save because there is nothing in flight. Releasing lets the very
-//  next tick raise vbl_rise exactly as it would have, so the interrupt is not
-//  lost either -- it is deferred by the length of the transfer along with
-//  everything else.
+//  nothing to save because there is nothing in flight. Releasing at the same
+//  instant lets the very next tick raise vbl_rise exactly as it would have, so
+//  the interrupt is not lost either -- it is deferred by the length of the
+//  transfer along with everything else.
 //
 //  Measured: a save taken wherever the request happened to land failed the
 //  determinism test at the one point in five where the game was inside its
@@ -193,6 +197,7 @@ module spi_ss
 	                 S_STREAM    = 4'd2,
 	                 S_STREAMING = 4'd3,
 	                 S_INVAL     = 4'd4,
+	                 S_WAITVBL   = 4'd10,  // hold until the raster comes round
 	                 S_RELEASE   = 4'd5,
 	                 S_DONE      = 4'd6;
 
@@ -242,11 +247,14 @@ module spi_ss
 			// window -- the whole of the difference, and it read the clock five
 			// ticks early because of it. Three write-ups called that an RTC bug.
 			//
-			// A load needs no canonical instant, because it does not have to
-			// INFER anything: the raster counters, the vblank interrupt and the
-			// acknowledge machine all arrive in the blob and are written
-			// wholesale. So go straight to S_ASK, where `pause` is already
-			// asserted, and let the 386 walk to the stub on a frozen board.
+			// A load needs no canonical instant to START at, because it does
+			// not have to INFER anything: the vblank interrupt and the
+			// acknowledge machine arrive in the blob and are written wholesale.
+			// So go straight to S_ASK, where `pause` is already asserted, and
+			// let the 386 walk to the stub on a frozen board. It still has to
+			// RELEASE at one -- see S_WAITVBL -- because the raster is no
+			// longer part of the blob and the phase has to be re-acquired
+			// rather than jammed.
 			S_IDLE: if (ss_save || ss_load) begin
 				is_load <= ss_load && !ss_save;
 				st      <= (ss_load && !ss_save) ? S_SETTLE : S_ARM;
@@ -291,7 +299,7 @@ module spi_ss
 			S_STREAMING: if (!stream_busy && !stream_read && !stream_write) begin
 				inval_set <= 8'd0;
 				inval_ph  <= 2'd0;
-				st        <= is_load ? S_INVAL : S_RELEASE;
+				st        <= is_load ? S_INVAL : S_WAITVBL;
 			end
 
 			// Memory moved underneath the CPU, so both L1s have to go. One
@@ -311,10 +319,26 @@ module spi_ss
 				inval <= 1'b1;
 				inval_ph <= inval_ph + 2'd1;
 				if (inval_ph == 2'd3) begin
-					if (inval_set == 8'd255) st <= S_RELEASE;
+					if (inval_set == 8'd255) st <= S_WAITVBL;
 					else inval_set <= inval_set + 8'd1;
 				end
 			end
+
+			// The raster runs throughout a transfer now (PLAN.md 42), so it
+			// has moved on by the time the blob has landed. Wait for it to come
+			// back round to the canonical instant before letting the board go,
+			// and the 386 resumes at the raster phase it was frozen at -- which
+			// is what SSIDX_VIDEO_TIMING used to buy by jamming the counters.
+			//
+			// The wait is bounded and short: the transfer STARTS at vbl_next,
+			// so what is left of the frame when it finishes is one frame minus
+			// the transfer -- about 4 ms of the 18.5 ms frame on a save. It
+			// costs nothing visible, because the display is live for all of it.
+			//
+			// The vblank the raster crossed while frozen is not lost. It is
+			// held in spi_video_timing's `vbl_pend` and raised on release, so
+			// the interrupt is deferred exactly as this module's header argues.
+			S_WAITVBL: if (vbl_next) st <= S_RELEASE;
 
 			S_RELEASE: begin
 				cpu_hold_rel <= 1'b1;

@@ -174,9 +174,6 @@ module spi_top
 		.reset      (sys_reset),
 		.pause      (ss_pause),
 		.vbl_next   (vbl_next),
-		.ss_state   (vt_ss_state),
-		.ss_state_in(vt_ss_in),
-		.ss_state_we(vt_ss_we),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
@@ -729,27 +726,12 @@ module spi_top
 		.busy            (ss_busy)
 	);
 
-	// SSIDX_VIDEO_TIMING: one 32-bit item, the raster counters. Small enough to
-	// answer inline rather than through an adaptor.
-	wire [22:0] vt_ss_state;
+	// The raster used to be a section here. It is not saved at all now: a
+	// transfer starts and ends at `vbl_next`, so the phase is re-acquired
+	// rather than carried, and the counters are never written from outside.
+	// PLAN.md 42, and rtl/system_consts.sv says the same thing where the index
+	// used to be.
 	wire        vbl_next;
-	reg  [22:0] vt_ss_in;
-	reg         vt_ss_we;
-
-	always @(posedge clk_sys) begin
-		ssb[SSIDX_VIDEO_TIMING].setup(SSIDX_VIDEO_TIMING, 32'd1, 2);
-		vt_ss_we <= 1'b0;
-		if (ssb[SSIDX_VIDEO_TIMING].access(SSIDX_VIDEO_TIMING)) begin
-			if (ssb[SSIDX_VIDEO_TIMING].read)
-				ssb[SSIDX_VIDEO_TIMING].read_response(SSIDX_VIDEO_TIMING,
-					{41'd0, vt_ss_state});
-			else if (ssb[SSIDX_VIDEO_TIMING].write) begin
-				vt_ss_in <= ssb[SSIDX_VIDEO_TIMING].data[22:0];
-				vt_ss_we <= 1'b1;
-				ssb[SSIDX_VIDEO_TIMING].write_ack(SSIDX_VIDEO_TIMING);
-			end
-		end
-	end
 
 	// SSIDX_SPI_IO, through the same bridge as main RAM: spi_io is clk_cpu and
 	// the ssbus is clk_sys.

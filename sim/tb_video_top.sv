@@ -104,13 +104,10 @@ module tb_video_top
 
 	spi_video_timing timing
 	(
-		// The savestate's board-wide pause and raster section. Nothing here
-		// ever asserts either.
+		// The savestate's vblank hold. Nothing here ever asserts it, and the
+		// raster is no longer savestate state at all (PLAN.md 42).
 		.pause      (1'b0),
 		.vbl_next   (),
-		.ss_state   (),
-		.ss_state_in(23'd0),
-		.ss_state_we(1'b0),
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
 		.hcnt(hcnt), .vcnt(vcnt),
 		.hsync(hsync), .vsync(vsync), .hblank(hblank), .vblank(vblank),
