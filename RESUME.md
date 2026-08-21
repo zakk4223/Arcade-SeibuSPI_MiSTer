@@ -12,8 +12,8 @@ Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
 
 It fits and it mostly works:
 
-    ALMs 36,359 (87 %)   RAM blocks 487 (88 %)   registers 35,261
-    pll_hdmi +0.039 (ascal)   hold +0.239   TNS 0.000, SEED 3, md5 2a58c390
+    ALMs 36,456 (87 %)   RAM blocks 487 (88 %)   registers 35,395
+    setup +0.121   hold +0.243   TNS 0.000, SEED 3, md5 e4037a48
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -23,7 +23,7 @@ counters with the savestate pause and sync went flat for 14 ms of an 18.5 ms
 frame. Fixed the way PGM does it -- **the raster never stops now** -- and the
 restore is byte-identical to the old code's on the determinism hash. PLAN.md 42.
 
-The fit is current and IMPROVED by that change (82 registers and 59 ALMs back,
+The fit is current as of 43. 42 improved it (82 registers and 59 ALMs back,
 and the thin `ascal` margin more than doubled). Worst paths are all `ascal`, the
 framework's HDMI scaler, which nothing here runs on. **Do not re-roll the seed
 for margin on it** -- seed 1 FAILS at -0.110 on clk_ram (41.1).
@@ -88,13 +88,16 @@ usually empty and was a FALSE VERDICT throughout 39. Believe the
 
 Still open, and the list is shorter than it was:
 
-* **A pre-existing HANG.** save -> load issued about one cycle apart wedges the
-  board -- armed, no stub entry, no completion. It reproduces IDENTICALLY on the
-  unmodified tree, so it is not 42's doing, and `S_SETTLE` does not cover it. It
-  is user-reachable: press load as a save completes. Only save->load is
-  demonstrated; load->load is adjacent and untested. **This wants fixing before
-  anyone else touches the hardware**, and it is the reason not to try a rapid
-  double-load on the board.
+* **The lockup is FIXED** (PLAN.md 43) and deployed, but proven only in
+  simulation and by one hardware boot -- **the rapid-reload retest on hardware
+  has not been reported back yet**, and those are not the same thing. The cause
+  was `spi_ds2404` SWALLOWING a request rather than deferring it while paused, so
+  `ds_stall` held `io_stall` and the 386 could never reach an instruction
+  boundary to take the NMI. 40.3 introduced it by making a load assert `pause`
+  while the CPU is still running. The fix is `ds_pause <= ss_pause &&
+  ss_snapshot`, REGISTERED -- combinational it fails the fit at -0.077 on
+  clk_ram, which is 31.7's endpoint and 31.7's answer. New probe
+  `ss_dbg_stalls` is what found it; keep it.
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
