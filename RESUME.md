@@ -12,8 +12,18 @@ Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
 
 It fits and it mostly works:
 
-    ALMs 36,512 (87 %)   RAM blocks 487 (88 %)   worst slack +0.060, TNS 0.000
+    ALMs 36,418 (87 %)   RAM blocks 487 (88 %)   registers 35,343
+    clk_ram +0.175   clk_sys +0.953   clk_cpu +1.790   pll_hdmi +0.016
+    hold +0.134, TNS 0.000 everywhere, SEED 3, md5 4da63a7e
     blob 311,640 bytes in a 512 KB slot, nineteen sections
+
+**The fit is current as of PLAN.md 41** -- 40's three RTL files and 39's four are
+all in it, and there is an assembled RBF containing save states for the first
+time (the one on disk before this was dated BEFORE the first savestate commit).
+Nothing savestate-related is in the worst 25 paths. The +0.016 is `ascal`, the
+framework's HDMI scaler, which nothing here runs on; the core's own worst path is
+`rom_loader|in_off[3] -> part_size_r[21]` at +0.175 on clk_ram. **Do not re-roll
+the seed for margin on it** -- seed 1 now FAILS at -0.110 on clk_ram (41.1).
 
 The 386 is never instrumented -- it is NMI'd into a six-instruction stub that
 pushes its own registers onto the game's stack, which is main RAM and is in the
@@ -79,8 +89,9 @@ visible behaviour change 40.3 made and nobody has looked at; the sound path's
 MAME correlation has not been redone since T80 was swapped for tv80, and for a
 CPU swap that is the measurement that counts; the OSD and pad path has never been
 driven; and Quartus keeps re-adding files to `SeibuSPI.qsf`'s stale duplicate
-list, which is reverted after every fit. **The fit has not been re-run since 40**
--- three RTL files changed, so `make && make timing` before believing 87 %/+0.060.
+list -- though it did NOT re-add it across the three compiles in 41, so this may
+be less frequent than it looked. **The fit HAS been re-run and it passes**
+(PLAN.md 41); the numbers above are current.
 
 **If a fit fails or the register count jumps**, read
 `output_files/SeibuSPI.map.rpt`'s per-entity table FIRST. Two write statements to

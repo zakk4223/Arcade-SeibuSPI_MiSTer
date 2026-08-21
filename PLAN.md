@@ -10025,3 +10025,90 @@ made that trail populate -- which is luck, not a repair.
 Also pre-existing and not ours, in case it looks alarming: `BR TARGET MISMATCH`
 from `z386.sv:2094` fires 73 times on rfjet and 81 on rdft2 in runs with NO
 savestate at all. It trips when an interrupt lands on a branch.
+
+## 41. The fit, re-run at last: it holds, and seed 1 does not (2026-08-21)
+
+40 changed three RTL files after the fit that produced "87 % / +0.060", and 39's
+four before that, so the number everything was being judged against described a
+tree that no longer existed. Worse than stale: `output_files/SeibuSPI.rbf` was
+dated two days BEFORE `51147eb`, the first savestate commit. No bitstream
+containing save states had ever been assembled at all.
+
+It fits, and the savestate work is not what this design is limited by.
+
+    ALMs            36,418 / 41,910  ( 87 % )       was 36,512 ( 87 % )
+    RAM blocks         487 / 553     ( 88 % )       unchanged
+    registers       35,343                          was 35,314
+    block mem bits  3,563,997 / 5,662,720 ( 63 % )  identical to the bit
+    DSP 61   PLLs 3   0 errors   SEED 3
+
+    clk_ram  +0.175   clk_sys  +0.953   clk_cpu  +1.790   pll_hdmi +0.016
+    hold     +0.134   TNS 0.000 on every clock
+
+    output_files/SeibuSPI.rbf   4,402,272 bytes   md5 4da63a7e
+
+**255 insertions came in 94 ALMs CHEAPER than what they replaced.** S_SETTLE, the
+DS2404 tick-hold rework and the arm-window fix all landed net-downward. And the
+block memory bit count is identical to the previous fit's TO THE BIT, which is
+the cheap proof that 39.7's trap did not re-trip -- two write statements to one
+array would have moved that number down and the register count up.
+
+**No savestate logic appears in the worst 25 setup paths.** The convergence point
+is `ascal` and `rom_loader`; the core's own worst path is
+`rom_loader|in_off[3] -> part_size_r[21]` at +0.175 on clk_ram. The
+`sdram|ch2_rq -> command[1]` endpoint that 19.16, 26.4 and 28.3 all chased is not
+in the list either.
+
+### 41.1 Seed 1 fails now, and on our clock rather than the framework's
+
+34 measured seed 1 at +0.101 and seed 3 at +0.187, both passing. On this tree:
+
+    seed 3   setup +0.016 on pll_hdmi (ascal)                 PASSES
+    seed 1   setup -0.110 on clk_ram, TNS -0.110              fails
+
+So the seed ranking does not survive the design changing, and a seed that passed
+once is not a seed to fall back on. Do not re-roll hoping for margin on
+`ascal`: the historical pass rate is about two in five and the failures land on
+clk_ram, which is ours, where `ascal` is not.
+
+**+0.016 is sixteen picoseconds, and it is worth knowing whose it is.** The path
+is `ascal:ascal|o_vcpt_pre3[1]`, `sys/ascal.vhd`, the framework's scaler on the
+HDMI clock -- nothing of this core runs on it. 18.x recorded it at -0.215 and
+closed it with a seed change; 34 saw it swing from -0.261 to +0.433. It passes,
+and the consequence of it not passing is HDMI scaling, not the board. The reason
+to record it is so that video trouble during hardware bring-up is not spent
+suspecting the 386.
+
+### 41.2 A fit is reproducible across an intervening fit, not just back-to-back
+
+31.8 established that recompiling one seed reproduces it to the byte. This is a
+stronger version of that test, obtained by accident: the seed-1 compile left its
+own placement in `db/`, and seed 3 recompiled on top of it to an
+**md5-identical RBF**, `4da63a7e`. So `db/` carries no memory that changes the
+answer, and the seed really is a property of the design.
+
+Which is why the seed-1 RBF was not simply overwritten with the backup copy.
+Copying a good bitstream over a bad one leaves `db/` and every report in
+`output_files/` describing the FAILING placement, so `make timing` would have
+answered for seed 1 about a seed-3 file. Same family as 36.1 and as the bench
+that reported the old behaviour while make said "up to date": the failure mode
+this project keeps meeting is an instrument that reads plausibly about the wrong
+thing. Recompiling costs thirteen minutes and leaves the tree self-consistent.
+
+### 41.3 The critical-warning tell needs its code checked, not its count
+
+34's cheapest tell -- every failing seed threw exactly one critical warning,
+every passing one threw none -- still holds, but only if the code is read:
+
+    332148   Timing requirements not met            the real one; seed 1 threw it
+    127005   MIF depth 1799 in a 2048-deep array    ymf271_synth, design intent
+
+`127005` appears only when the `.mif` is regenerated, so a COLD build of a
+perfectly good tree throws one critical warning and a warm rebuild of the same
+tree throws none. The first seed-3 compile here read 1 and the second read 0 with
+an identical RBF. `tools/check_timing.py` reads the STA report rather than the
+log and is right either way; a human skimming the log should filter on 332148.
+
+The QSF did not re-add its stale duplicate file list this time -- 56 file
+assignments, no duplicates, hash unchanged across three compiles. Only
+`build_id.v` is dirty, which is generated.
