@@ -253,6 +253,12 @@ int main(int argc, char **argv)
     uint64_t ss_snap_cyc = 0;
     uint32_t ss_saved_esp = 0;
     bool     ss_busy_d = false;
+    uint64_t ds_rtc_d = 0;
+    // SS_DSTRACE: every RTC tick during an operation, and every non-zero read
+    // of the DS2404's data port with the cycle and the counter behind it. The
+    // cycle is the part that matters -- a value difference alone cannot say
+    // whether the clock is wrong or the game arrived at a different time.
+    const bool ds_trace = getenv("SS_DSTRACE") != nullptr;
     uint64_t ss_resume_cyc = 0, ss_resume_vbl = 0;
     bool     ss_hashed = false;
     uint32_t ss_saved_eip = 0;
@@ -465,6 +471,8 @@ int main(int argc, char **argv)
             if (ss_at && !ss_fired && cyc >= ss_at && !dut->p_ss_busy) {
                 ss_fired = true;
                 dut->ss_save = 1;
+                printf("  SS: RTC at request: %llu (tick %u)\n",
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
                 printf("  SS: save asked for at cycle %llu, CS=%04X EIP=%08X\n",
                        (unsigned long long)cyc, dut->p_cs, dut->p_eip);
             }
@@ -472,6 +480,8 @@ int main(int argc, char **argv)
                 && cyc >= ss_restore_at && !dut->p_ss_busy) {
                 rs_fired = true;
                 dut->ss_load = 1;
+                printf("  SS: RTC at request: %llu (tick %u)\n",
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
                 printf("  SS: load asked for at cycle %llu, CS=%04X EIP=%08X\n",
                        (unsigned long long)cyc, dut->p_cs, dut->p_eip);
             }
@@ -501,7 +511,22 @@ int main(int argc, char **argv)
             }
 
             // busy falls when the whole operation is over.
-            if (!ss_busy_d && dut->p_ss_busy) ss_busy_start = cyc;
+            // Every RTC tick that happens while a savestate is in progress,
+            // with the sequencer state it happened in. `pause` is deliberately
+            // NOT asserted in S_ARM, so ticking there is correct on a SAVE --
+            // the machine is live. On a load it was the leak that made three
+            // write-ups blame the RTC; see rtl/spi_ss.sv.
+            if (ds_trace && dut->p_ss_busy && dut->p_ds_rtc != ds_rtc_d)
+                printf("    SS: RTC tick -> %llu at cycle %llu, ss_state=%u\n",
+                       (unsigned long long)dut->p_ds_rtc,
+                       (unsigned long long)cyc, dut->p_ss_state);
+            ds_rtc_d = dut->p_ds_rtc;
+
+            if (!ss_busy_d && dut->p_ss_busy) {
+                ss_busy_start = cyc;
+                printf("  SS: RTC when the operation was armed: %llu (tick %u)\n",
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+            }
             if (ss_busy_d && !dut->p_ss_busy) {
                 printf("  SS: the board was paused for %llu cycles = %llu "
                        "model steps\n",
@@ -592,7 +617,9 @@ int main(int argc, char **argv)
                 // handed back. It is spi_cpu's, not the 386's, and it is not in
                 // the blob -- so if the two runs disagree here, that is what a
                 // vblank-wait loop is diverging on.
-                printf("  SS: at release: irq_pending=%d\n", dut->p_cpu_irq);
+                printf("  SS: at release: irq_pending=%d, RTC=%llu (tick %u)\n",
+                       dut->p_cpu_irq, (unsigned long long)dut->p_ds_rtc,
+                       dut->p_ds_tick);
             }
             ss_busy_d = dut->p_ss_busy;
 
@@ -613,6 +640,10 @@ int main(int argc, char **argv)
                         hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
                     }
                 }
+                printf("  SS: RTC %llu cycles after the operation: %llu "
+                       "(tick %u)\n",
+                       (unsigned long long)ss_hash_after,
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
                 printf("  SS: RAM hash %llu cycles after the operation "
                        "finished: %016llX\n",
                        (unsigned long long)ss_hash_after,
@@ -681,6 +712,18 @@ int main(int argc, char **argv)
             // what it got back. Diffing two of these says what a poll loop is
             // actually looking at, which is the question four sections were
             // added without ever asking.
+            // Every non-zero read of the DS2404's data port, with the cycle
+            // and the RTC behind it. The value alone cannot say whether a
+            // difference is the clock being wrong or the game arriving at a
+            // different time; the cycle says which.
+            if (ds_trace && dut->p_io_rd && !io_rd_d
+                && dut->p_io_raddr * 4 == 0x6DC && dut->p_io_rdata != 0)
+                printf("    DS: 0x6DC -> %02X at cycle %llu (anchor+%lld), "
+                       "RTC=%llu tick=%u\n",
+                       dut->p_io_rdata, (unsigned long long)cyc,
+                       (long long)(cyc - (long long)ss_hash_anchor),
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+
             if (io_rd_trail && ss_hash_anchor && dut->p_io_rd && !io_rd_d
                 && io_rd_n + 2 < IO_RD_MAX) {
                 io_rd_trail[io_rd_n++] = dut->p_io_raddr * 4;
@@ -760,7 +803,13 @@ int main(int argc, char **argv)
     // even when everything works. The frame itself is verified elsewhere, by
     // replaying MAME's captured state (PLAN.md 12).
     printf("Z80 fetches (ch3)      : %llu%s\n", (unsigned long long)cz80.count,
-           cz80.count ? "" : "  (expected: the Verilator T80 is a stub)");
+           // Was "expected: the Verilator T80 is a stub" -- true when the
+           // Z80 was VHDL and Verilator could not read it, and a lie since
+           // tv80 replaced it (PLAN.md 39.5). Zero fetches is now a real
+           // finding: on a cartridge set it means the 386 has not finished
+           // downloading the sound program yet.
+           cz80.count ? "" : "  (the Z80 has not fetched anything yet -- on a "
+                             "cartridge set, the download is not done)");
     printf("Z80 out-of-reset cycles: %llu, last opcode fetch at %04X\n",
            (unsigned long long)z80_run_cycles, dut->p_snd_pc);
     printf("sound01 fetches        : %llu\n", (unsigned long long)snd01_fetches);

@@ -75,6 +75,14 @@ module spi_ds2404
 	input       [7:0] ss_ram_din,
 	input             ss_ram_we,
 	output      [7:0] ss_ram_dout,
+
+	// A read-only tap on the counter and its divider, for the testbench. Both
+	// alter nothing; the top level leaves them unconnected and Quartus folds
+	// them away. Here because a savestate that gets the RTC wrong is invisible
+	// from outside until a game reads the clock, and then it looks like a
+	// divergence with no cause.
+	output     [39:0] dbg_rtc,
+	output     [31:0] dbg_tick,
 	// The state machine only. The SRAM deliberately survives reset: it is
 	// battery-backed on the board, and it is loaded from the save file while the
 	// rest of the core is still held down.
@@ -150,6 +158,8 @@ module spi_ds2404
 	reg  [7:0] pad [0:31];        // the scratchpad, 256 bits
 	reg [39:0] rtc;               // five bytes, low first, as MAME orders them
 	reg [TICK_W-1:0] tick_cnt;
+	assign dbg_rtc  = rtc;
+	assign dbg_tick = {{(32-TICK_W){1'b0}}, tick_cnt};
 
 	// ------------------------------------------------------------------
 	// 512 bytes of SRAM, two read ports and one write port. The write port is
@@ -328,16 +338,25 @@ module spi_ds2404
 		// scheduler would give one or the other whole. Five cycles out of
 		// 447,444 per tick, during a copy a game does once at boot if ever, and
 		// arbitrating it would cost more logic than the divergence is worth.
-		if (pause) begin
-			// Held, not reset: the tick has to come back on its own phase or
-			// the RTC gains or loses a fraction of a second on every save.
-			tick_cnt <= tick_cnt;
+		// Held, not reset, while paused: the tick has to come back on its own
+		// phase or the RTC gains or loses a fraction of a second on every save.
+		//
+		// HELD BY NOT BEING ASSIGNED, and that is the whole point. This used to
+		// read `if (pause) tick_cnt <= tick_cnt;`, which holds the register just
+		// as well and ALSO silently discarded the restore: it is later in this
+		// same always block than the `ss_we` case that writes tick_cnt, so the
+		// last assignment won and a load put the counter back to the value it
+		// had at LOAD time. `pause` is asserted throughout a restore, so the
+		// clobber was unconditional -- the one field of this chip that never
+		// came back. Everything else the savestate writes is inside the
+		// `if (pause)` chains below and is therefore left alone.
+		if (!pause) begin
+			if (tick_cnt == TICK_LAST) begin
+				tick_cnt <= '0;
+				rtc      <= rtc + 40'd1;
+			end
+			else tick_cnt <= tick_cnt + 1'd1;
 		end
-		else if (tick_cnt == TICK_LAST) begin
-			tick_cnt <= '0;
-			rtc      <= rtc + 40'd1;
-		end
-		else tick_cnt <= tick_cnt + 1'd1;
 
 		// ---- 0x6DC ---------------------------------------------------
 		// Reading it has no side effect in any reachable state: MAME advances

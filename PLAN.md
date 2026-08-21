@@ -9822,3 +9822,206 @@ Nothing has run on hardware. And the tv80 swap replaced a Z80 inside a subsystem
 matched against MAME over two minutes of rdft2 attract (14); the unit tests pass
 but that correlation has not been redone, and for a CPU swap it is the
 measurement that counts.
+
+## 40. The save-point sweep, and the leak it found (2026-08-21)
+
+39.8 asked for one thing before anything else was added: a sweep of save points
+across a long run, to see whether the agreement figures were bimodal and whether
+"do not save during boot" was the whole explanation. The sweep says no on both
+counts, and it says so because the metric 39 was quoting is the wrong one.
+
+Three sets, 86 save points, 250,000 to 100,000,000 cycles -- 4 ms to 1.75 s of
+board time. One defect, in one line of `spi_ss.sv`, accounts for nearly all of
+it.
+
+### 40.1 The metric was measuring the skew, not the divergence
+
+`SS_TRAIL` records every EIP after the operation; two runs are aligned and the
+first difference names the instruction. The alignment is the part 39 left
+implicit, and it is where the numbers came from.
+
+A save-only run's anchor is set with the CPU already back in game code. A
+restored run's is set with the CPU still in the restore stub, so its trail opens
+with the stub's last instructions and the `iret`'s landing -- three entries at
+the 2.6 M point, fourteen at 900 k. Compared at offset zero, a run that is in
+perfect lockstep at a 40-instruction offset reads about 10.
+
+That is the whole of "16 / 167,678 / 10". The three numbers differ because the
+skew was about 500, then -1, then -40. 167,678 was not a good save point; it was
+the one save point whose skew happened to be -1. Reproducing all three exactly
+and then aligning properly was the first thing done here, and it inverted the
+ranking: the "catastrophic" 4.1 M point turned out to be tracking for 204,000
+instructions and the "good" 2.6 M point to be genuinely diverging after 167,678.
+
+The metric this section uses instead is three numbers, and the third is the one
+that matters:
+
+    skew       the constant instruction offset, found by a BOUNDED search.
+               An unbounded one finds false matches -- a 256-instruction
+               window recurs 62,000 times in a game loop, so the longest
+               match comes from whichever iteration lines up.
+    lockstep   how far the two streams then run identically at that skew
+    per-register value sequences
+               for each I/O register, the sequence of values it returned.
+               Immune to the interleaving shift a poll-phase offset causes,
+               which is what a whole-stream diff mistakes for a wrong value.
+
+### 40.2 What the sweep found, before the fix
+
+rdfts, 48 points at 250 k intervals, then 18 more out to 100 M. Not bimodal --
+four bands, and the good one is a narrow window early on:
+
+    250 k -- 750 k     57,241 of 57,245 I/O reads identical. The only real
+                       difference: two reads of 0x6DC returning 0D/0E against
+                       08/09 -- five ticks of DS2404 clock.
+    1.0 M -- 1.75 M    genuinely divergent, 572 edits. The restored machine
+                       ends up in a LATER boot loop (0x203F4x) than the
+                       save-only one (0x26D78x).
+    2.0 M -- 2.75 M    clean. skew -1, all 24,125 reads identical.
+    3.0 M -- 100 M     34 points, uniform: skew -40, lockstep ~204,000, and
+                       the only I/O difference one extra poll of 0x600.
+
+So the bad points are the early ones, but not because "boot is messy" -- and the
+later ones are not clean either, they carry a persistent 40-instruction skew.
+Two apparently separate problems. They were one.
+
+### 40.3 It was never the clock
+
+The 5-tick difference looked exactly like 39.6's RTC finding coming back, and the
+temptation was to read it that way again. What settled it was timestamping the
+read rather than comparing its value:
+
+                        read at            RTC
+    save-only        anchor+2,134,199       13
+    restored         anchor+1,073,355        8
+
+**The clock was right for the cycle it was read at.** The restored machine simply
+arrived 1,060,844 cycles early. The arm window it skipped was 1,061,156 cycles.
+
+`pause = busy && (st != S_ARM)`. S_ARM is the state that waits for `vbl_next`,
+and it deliberately leaves the board running, because the raster has to keep
+running or the instant it is waiting for never comes. On a save that costs
+nothing: the machine is live, and its being live is what is about to be
+recorded. **On a load it was a leak.** The board ran for up to a whole frame
+with the OLD state, the blob was then written over the top, and anything not in
+the blob kept the progress it had made in the meantime.
+
+A load needs no canonical instant, because it does not have to INFER anything:
+the raster counters, `irq_pending` and the acknowledge machine all arrive in the
+blob and are written wholesale. So a load goes straight to S_ASK, where `pause`
+is already asserted, and the 386 walks to the stub on a frozen board.
+
+    save at        prefix agreement, before -> after
+    1.0 M                16 -> 165,688
+    2.5 M           167,678 -> 167,594
+    3.0 M                10 -> 211,773
+    20 M -- 100 M        10 -> 201,431 .. 208,721   (9 points)
+
+Both bands, fixed by one line. The 40-instruction skew was the same leak seen
+from the other end.
+
+A load also became less than half as slow -- 1.83 M cycles to 0.77 M -- because
+the frame-long wait is gone. And it now jumps the raster mid-frame instead of at
+vblank, which is a visible behaviour change and has not been seen on hardware.
+
+### 40.4 S_ARM was also hiding a hazard
+
+Removing the load's arm wait broke the load outright, and the reason is worth
+keeping. The bench's load request fires as soon as the save completes, and with
+the frame-long delay gone the restore NMI was offered while the 386 was still in
+the SAVE stub, one instruction from its `iret`. The interrupt frame it pushed
+pointed into the stub. S_ARM had been covering that for free by delaying every
+operation by up to a frame.
+
+So there is a new state, S_SETTLE, which a load passes through with `pause`
+asserted, waiting on `spi_cpu`'s `ss_in_stub` and `cpu_snapshot`. It costs tens
+of cycles rather than the tens of thousands a frame costs. **A latent hazard
+masked by an unrelated delay is worse than an open one**, and this one would
+have fired the first time a user loaded twice in quick succession.
+
+### 40.5 One field of the DS2404 never came back
+
+Found on the way, and real, though it was not the 5 ticks:
+
+    if (pause) begin
+        tick_cnt <= tick_cnt;      // "held, not reset"
+    end
+
+`tick_cnt` is written by the `ss_we` case earlier in the same always block. This
+is later, so the last assignment wins -- and `pause` is asserted throughout a
+restore, so the clobber was unconditional. The RTC's counter was restored and
+its divider was not; the chip came back with the load-time sub-tick phase, a
+permanent 115,492-clk_ram error. Holding by NOT ASSIGNING fixes it and keeps the
+intent. Measured: tick 262,501 against 377,993 at the release, and identical
+after.
+
+Every other field the savestate writes is inside one of the `if (pause)` chains,
+whose bodies are empty when paused, so nothing else was competing. Same family
+as 39.7's two-writes-to-one-array: **in this file, what a clocked block does
+LATER silently outranks what the savestate did earlier.**
+
+### 40.6 The bench was rebuilding without the chip in it
+
+`spi_ds2404.sv` was not in `sim/Makefile`'s `CORE_SRCS`. Verilator finds it under
+`-I$(RTL)` so every build worked; make simply never rebuilt a bench when the chip
+changed.
+
+This cost a whole diagnostic round. The `tick_cnt` fix was applied, the bench
+re-run, and it reported the OLD behaviour to the digit -- with make saying "up to
+date". The fix was very nearly reverted as ineffective. Same silent-staleness
+family as the three benches that had stopped building (21.6, 22.3, 28), and the
+same lesson: **a build that succeeds is not evidence that it built what you
+edited.**
+
+### 40.7 Where all three sets stand
+
+rdfts 66 points, rdft2 and rfjet 10 each, 250 k to 100 M cycles. Main RAM
+restores EXACT and the 386 resumes at the saved CS:EIP at every one.
+
+    set      DS2404 read sequence      per-register values      lockstep
+    rdfts    identical, 737/737        identical, all points    167 k .. 399 k
+    rdft2    identical, 1006/1006      identical, all points    284 k .. 399 k
+    rfjet    identical,  936/936       identical, 9 of 10       165 k .. 399 k
+
+**The cartridge sets' boot engines are not a problem, and that retires 39.8's
+hypothesis by measurement.** rdft2 and rfjet are the sets that run the SXX2C Z80
+download -- 131,072 and 245,760 writes -- and their boot-time save points at
+250 k and 1 M now reach lockstep of 399,472 and 264,590 with identical DS2404 and
+per-register sequences. The download was never state the blob was missing.
+
+The one exception, rfjet at 20 M, survives inspection: 0x684 -- the sound FIFO
+status, d1 = Z80->386 FIFO not empty -- reads 1 against 3 at poll 26,734, so the
+restored machine sees "data ready" one poll early. The FIFO DATA is
+byte-identical, `91 53 88 F5 8F 57 8D 87 81 49 81 49`, the restored run's being a
+strict prefix. Worth recording that the first pass called this eight value
+mismatches on 0x680 and 0x684: aligning two read streams on their ADDRESS
+sequence mispairs the data reads across a one-poll shift. Per-register sequences
+do not, which is why 40.1 defines the metric that way.
+
+### 40.8 What is left, and what is still unproven
+
+The residual is a poll-loop phase offset: a few tens of instructions on rdfts
+(-2 to +43), a few hundred on the cartridge sets (-498 to +164). It lands on
+0x600 and 0x60C, both hardwired constants in `spi_io.sv`, and on the sound FIFO
+status. No read returns a wrong value at any of the 86 points. Tightening it
+means finding why the CPU is released a few hundred cycles off the raster phase
+it was saved at; nothing measured here says that is worth doing before hardware.
+
+Still unproven, and none of it moved this session: nothing has run on hardware;
+the tv80 swap's MAME correlation over two minutes of rdft2 attract has not been
+redone, and for a CPU swap that is the measurement that counts; the OSD and pad
+path has never been driven; and the trail caps at 400,000 entries, so "lockstep
+399,472" means "as far as the instrument reaches", not "forever".
+
+Two instrument notes for whoever reads this next. `SS_TRAIL` does nothing unless
+`SS_HASH_AFTER` is also set -- the anchor that arms the trail is only assigned
+inside the hash block, which is awkward given the trail is the trusted instrument
+and the hash is the distrusted one. And the bench's `resumed at the saved EIP:
+NO` line was a false verdict for the whole of 39: it is keyed on a short trail
+that is usually empty, and printed NO on all 66 points while the authoritative
+line beside it said the CPU resumed correctly. It reads YES now, because the fix
+made that trail populate -- which is luck, not a repair.
+
+Also pre-existing and not ours, in case it looks alarming: `BR TARGET MISMATCH`
+from `z386.sv:2094` fires 73 times on rfjet and 81 on rdft2 in runs with NO
+savestate at all. It trips when an interrupt lands on a branch.

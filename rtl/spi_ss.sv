@@ -97,6 +97,12 @@ module spi_ss
 	output reg        cpu_save_req,
 	output reg        cpu_restore_req,
 	input             cpu_snapshot,
+	// EIP is inside the stub window. A LOAD must not be asked for while the
+	// CPU is still finishing the PREVIOUS operation's stub: the restore NMI
+	// would be taken inside the save stub and the frame it pushes would point
+	// there. S_ARM used to hide this by delaying every operation by up to a
+	// frame; with the load's arm wait gone it has to be checked for.
+	input             cpu_in_stub,
 	output reg        cpu_hold_rel,
 	// The marker slot's address, valid at snapshot: on a save this is the ESP
 	// the blob has to carry.
@@ -182,6 +188,7 @@ module spi_ss
 	// ------------------------------------------------------------------
 	localparam [3:0] S_IDLE      = 4'd0,
 	                 S_ARM       = 4'd8,   // wait for the canonical instant
+	                 S_SETTLE    = 4'd9,   // a load: wait for the stub to end
 	                 S_ASK       = 4'd1,   // hold the request until it is taken
 	                 S_STREAM    = 4'd2,
 	                 S_STREAMING = 4'd3,
@@ -220,16 +227,44 @@ module spi_ss
 		end
 		else begin
 			case (st)
+			// A SAVE arms and waits for the canonical instant. A LOAD does
+			// NOT, and that asymmetry is the point.
+			//
+			// S_ARM is the one state where `pause` is deliberately low: the
+			// raster has to keep running or `vbl_next` never arrives. On a save
+			// that costs nothing -- the machine is live, and it being live is
+			// what we are about to record. On a LOAD it was a leak. The board
+			// ran for up to a whole frame with the OLD state, everything in the
+			// blob was then written over the top, and anything NOT in the blob
+			// kept the progress it had made in the meantime. Measured on rdfts:
+			// the game reached a DS2404 read 1,060,844 cycles sooner after a
+			// restore than after a plain save, against a 1,061,156-cycle arm
+			// window -- the whole of the difference, and it read the clock five
+			// ticks early because of it. Three write-ups called that an RTC bug.
+			//
+			// A load needs no canonical instant, because it does not have to
+			// INFER anything: the raster counters, the vblank interrupt and the
+			// acknowledge machine all arrive in the blob and are written
+			// wholesale. So go straight to S_ASK, where `pause` is already
+			// asserted, and let the 386 walk to the stub on a frozen board.
 			S_IDLE: if (ss_save || ss_load) begin
 				is_load <= ss_load && !ss_save;
-				st      <= S_ARM;
+				st      <= (ss_load && !ss_save) ? S_SETTLE : S_ARM;
 			end
 
 			// The machine runs on until the raster reaches the one place a
-			// snapshot is cheap to take.
+			// snapshot is cheap to take. Saves only; see the note above.
 			S_ARM: if (vbl_next) begin
-				cpu_save_req    <= !is_load;
-				cpu_restore_req <=  is_load;
+				cpu_save_req <= 1'b1;
+				st           <= S_ASK;
+			end
+
+			// A load's wait, and `pause` is asserted throughout it -- which is
+			// the entire point of not reusing S_ARM. All this waits for is the
+			// 386 leaving whatever stub it is in, which is tens of cycles, not
+			// the tens of thousands a frame costs.
+			S_SETTLE: if (!cpu_in_stub && !cpu_snapshot) begin
+				cpu_restore_req <= 1'b1;
 				st              <= S_ASK;
 			end
 

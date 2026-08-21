@@ -91,6 +91,9 @@ module spi_top
 	// visible to the testbench since the beginning; reads have not, and a poll
 	// loop is made of reads.
 	output            p_cpu_irq,
+	// The DS2404's counter and its divider. Read-only taps; see spi_ds2404.sv.
+	output     [39:0] p_ds_rtc,
+	output     [31:0] p_ds_tick,
 	output            p_io_rd,
 	output      [8:0] p_io_raddr,
 	output     [31:0] p_io_rdata,
@@ -522,6 +525,8 @@ module spi_top
 		// which is the easy direction: a level held for a clk_sys cycle is
 		// sampled twice here rather than missed.
 		.pause    (ss_pause),
+		.dbg_rtc     (p_ds_rtc),
+		.dbg_tick    (p_ds_tick),
 		.ss_addr     (ds_ss_addr),
 		.ss_din      (ds_ss_din),
 		.ss_we       (ds_ss_we),
@@ -695,6 +700,7 @@ module spi_top
 		.ss_load         (ss_load),
 		.vbl_next        (vbl_next),
 		.pause           (ss_pause),
+		.cpu_in_stub     (ss_in_stub),
 
 		.stream_write    (ss_stream_write),
 		.stream_read     (ss_stream_read),

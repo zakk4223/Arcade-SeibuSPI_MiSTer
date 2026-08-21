@@ -1,13 +1,13 @@
 # Where this is, and what to do next
 
-Live state as of 2026-08-20. `PLAN.md` is the design record and stays
+Live state as of 2026-08-21. `PLAN.md` is the design record and stays
 chronological; this file is the short answer to "what was I doing". Delete the
 finished parts as they go.
 
 ## SAVE STATES, on branch `savestate-phase0` -- this is where the work is
 
-Twelve commits, none of them on `main`, nothing pushed. `PLAN.md` 38 and 39 are
-the design record; the plan file is
+Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
+40 are the design record; the plan file is
 `~/.claude/plans/what-would-be-involved-calm-stearns.md`.
 
 It fits and it mostly works:
@@ -26,26 +26,61 @@ differ at the same logical point, five of them the stub's own footprint on dead
 stack, and it does not grow); a restore is exact in memory; the 386 resumes at
 the saved CS:EIP; every one of 24,283 I/O reads matches.
 
-**Not proven:** determinism in general. Instruction agreement after a restore on
-rdfts is 16 / 167,678 / 10 at saves 900 k / 2.6 M / 4.1 M cycles in. The good one
-is a game running its display loop; the others are boot-time saves, where the
-sample-flash derivation and the SXX2C Z80 download have state that is not in the
-blob. **Establish whether "do not save during boot" is the whole explanation
-before adding another section** -- four were added on guesses and moved nothing.
+**The sweep 39.8 asked for is done, and it found the bug** (`PLAN.md` 40). 86
+save points, three sets, 250 k to 100 M cycles. Main RAM restores EXACT and the
+386 resumes at the saved CS:EIP at every one; the DS2404's read sequence is
+identical on all three sets; every register's value sequence is identical at 85
+of the 86.
 
-**The two instruments that work**, and the one that does not:
+    set      DS2404 reads          per-register values     lockstep
+    rdfts    identical 737/737     identical, all          167 k .. 399 k
+    rdft2    identical 1006/1006   identical, all          284 k .. 399 k
+    rfjet    identical  936/936    identical, 9 of 10      165 k .. 399 k
+
+**"Do not save during boot" was NOT the explanation, and neither was the RTC.**
+`pause` was low in S_ARM -- correct on a save, a leak on a load, where the board
+ran up to a frame with the old state before the blob was written over the top.
+One line. Prefix agreement at the bad points went 10 -> 201,431..211,773 and
+16 -> 165,688. The cartridge sets' SXX2C Z80 download was never missing state:
+rdft2 and rfjet boot-time saves now reach 399,472 and 264,590.
+
+**Do not quote a raw prefix number.** It is dominated by the SKEW: a run in
+perfect lockstep at a 40-instruction offset reads about 10 at offset zero. The
+old 16 / 167,678 / 10 triple is that artefact and nothing else. Align first, then
+report skew, lockstep, and PER-REGISTER value sequences -- a whole-stream diff
+mistakes a one-poll phase shift for a wrong value, which it did once here.
+
+**The three instruments that work**, and the one that does not:
 
     SS_TRAIL=<f>   every EIP after the operation; align two runs, the first
-                   difference names the instruction
+                   difference names the instruction. NEEDS SS_HASH_AFTER SET
+                   as well -- the anchor that arms it is only assigned inside
+                   the hash block.
     SS_IORD=<f>    every I/O read with its value; names the register
+    SS_DSTRACE     every RTC tick during an operation, and every non-zero read
+                   of the DS2404 data port WITH THE CYCLE. The cycle is the
+                   part that matters: a value difference alone cannot say
+                   whether the clock is wrong or the game arrived early.
     SS_HASH_AFTER  the determinism sweep -- DISTRUST IT. It read 4 of 12 at the
                    point the trail agreement had improved four orders of
                    magnitude. Never quote it without a trail number beside it.
 
-Also still open: nothing has run on hardware; the sound path's MAME correlation
-has not been redone since T80 was swapped for tv80, and for a CPU swap that is
-the measurement that counts; and Quartus keeps re-adding files to `SeibuSPI.qsf`'s
-stale duplicate list, which is reverted after every fit.
+The residual is a poll-loop phase offset -- tens of instructions on rdfts,
+hundreds on the cartridge sets -- landing on 0x600 and 0x60C, both hardwired
+constants. No read returns a wrong value anywhere.
+
+The bench's `resumed at the saved EIP: NO` line is keyed on a short trail that is
+usually empty and was a FALSE VERDICT throughout 39. Believe the
+`restore : the CPU resumed at the saved CS:EIP` line beside it.
+
+Also still open: **nothing has run on hardware, and that is now the top of the
+list** -- a load jumps the raster mid-frame instead of at vblank, which is a
+visible behaviour change 40.3 made and nobody has looked at; the sound path's
+MAME correlation has not been redone since T80 was swapped for tv80, and for a
+CPU swap that is the measurement that counts; the OSD and pad path has never been
+driven; and Quartus keeps re-adding files to `SeibuSPI.qsf`'s stale duplicate
+list, which is reverted after every fit. **The fit has not been re-run since 40**
+-- three RTL files changed, so `make && make timing` before believing 87 %/+0.060.
 
 **If a fit fails or the register count jumps**, read
 `output_files/SeibuSPI.map.rpt`'s per-entity table FIRST. Two write statements to

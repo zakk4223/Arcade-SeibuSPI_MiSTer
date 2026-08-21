@@ -272,10 +272,17 @@ SS_SRCS := $(RTL)/system_consts.sv $(RTL)/savestates.sv $(RTL)/memory_stream.sv 
            $(RTL)/ddram.sv $(RTL)/spi_ss.sv $(RTL)/spi_ss_bridge.sv \
            $(RTL)/spi_ss_vram.sv
 
+# spi_ds2404.sv belongs here even though Verilator finds it under -I$(RTL)
+# anyway: without it in the list make never rebuilds a bench when the chip
+# changes. That cost a whole diagnostic round -- a fix to the RTC was applied,
+# the bench was re-run, and it reported the OLD behaviour with make saying
+# "up to date". Same silent-staleness family as the three benches that had
+# stopped building (PLAN.md 21.6, 22.3, 28).
 CORE_SRCS := $(SS_SRCS) $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RTL)/spi_snd_window.sv \
              $(RTL)/spi_io.sv $(RTL)/spi_mainram.sv $(RTL)/spi_reset_sync.sv \
              $(RTL)/spi_dpram.sv $(RTL)/spi_dma.sv $(RTL)/spi_layers.sv \
              $(RTL)/spi_mixer.sv $(RTL)/spi_tile_decrypt.sv \
+             $(RTL)/spi_ds2404.sv \
              $(RTL)/seibu_partial_add.sv $(SOUND_SRCS)
 
 lint: lint-derive
