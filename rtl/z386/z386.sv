@@ -22,7 +22,10 @@ module z386
     // Uncacheable data window, (addr & MASK) == BASE. Defaults to the PC VGA
     // aperture at A0000-BFFFF. -- SeibuSPI
     parameter [31:0] DCACHE_UNCACHED_MASK = 32'hFFFE_0000,
-    parameter [31:0] DCACHE_UNCACHED_BASE = 32'h000A_0000
+    parameter [31:0] DCACHE_UNCACHED_BASE = 32'h000A_0000,
+    // A second uncacheable window; defaults to matching nothing. -- SeibuSPI
+    parameter [31:0] DCACHE_UNCACHED2_MASK = 32'hFFFF_FFFF,
+    parameter [31:0] DCACHE_UNCACHED2_BASE = 32'hFFFF_FFFE
 )
 (
     input              clk,
@@ -836,7 +839,9 @@ l1_cache #(
     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
     .SET_BITS(DCACHE_SET_BITS),
     .UNCACHED_MASK(DCACHE_UNCACHED_MASK),
-    .UNCACHED_BASE(DCACHE_UNCACHED_BASE)
+    .UNCACHED_BASE(DCACHE_UNCACHED_BASE),
+    .UNCACHED2_MASK(DCACHE_UNCACHED2_MASK),
+    .UNCACHED2_BASE(DCACHE_UNCACHED2_BASE)
 ) dcache_inst (
     .clk(clk),
     .reset(!reset_n),

@@ -10798,3 +10798,114 @@ replays six clean loads, so it can no longer reproduce anything. Take a fresh
 in-game save off the board before debugging any future wedge; the file is kept
 because it is still the only real in-game save in the tree and it is what 46 was
 found with.
+
+## 47. The deterministic version: an uncacheable window and a handshake (2026-08-22)
+
+46 shipped a margin and said so. This replaces it with something that cannot
+race, and in doing so found that the root defect was smaller and dumber than 46
+made it look.
+
+### 47.1 The real defect: a hardware window that was never marked uncacheable
+
+This design has always known that a window the fabric answers combinationally
+must not be cached. `spi_cpu.sv` has said so since the beginning:
+
+    .DCACHE_UNCACHED_MASK (32'hFFFF_FC00),   // I/O window
+    .DCACHE_UNCACHED_BASE (32'h0000_0400)
+
+**The savestate stub window at 0x40000 is answered by the same module, in the
+same way, and was never added to that list.** Every symptom in 46 follows from
+that one omission -- the stale line, the stall that vanished on the second load,
+the line fill that walked past a dword-granular gate, the need to snoop.
+
+It is fixed where it belonged all along. `l1_cache` and `z386` take a SECOND
+mask/base pair (defaulting to a base outside its own mask, so it matches nothing
+and no other instantiation changes), because 0x400 and 0x40000 are too far apart
+for one mask and the stub cannot move: main RAM is below it and the game's IDT
+sits at 0x900.
+
+The snoop 46 added for the ESP slot is deleted. There is no line to evict now.
+The GATE's snoop stays -- the gate lives in main RAM, which is cached and must be.
+
+### 47.2 There is no halt, and that is why the answer is a poll
+
+Checked before designing anything, because "add a spin loop" is only right if
+nothing better exists:
+
+* z386 has **no clock enable and no stall input**. The only backpressure is
+  `ready` on a single outstanding access.
+* `single_step` looked like a halt -- "Halt after each instruction" -- and is
+  not. It sets `halted <= 1'b1` at `z386.sv:2509` and **that latch is never
+  cleared anywhere in the file**. It is a one-way kill switch for tests.
+
+So `ss_hold` can only ever stop the NEXT memory access. It cannot stop an
+instruction whose operands are already in cache or prefetch, which is exactly
+what `popad` and `iret` are. **The design was treating memory backpressure as a
+halt for nine sections. It is not one.**
+
+Given a CPU that cannot be stopped, the correct primitive is to make it ASK.
+That is not a workaround for the missing halt; it is what software does when
+hardware cannot be trusted to have finished.
+
+### 47.3 The second defect: synchronising on an implicit side-effect
+
+The freeze triggered on "the marker write retired" -- a write issued several
+instructions earlier, retiring whenever write-buffer pressure allowed. That is an
+observation with a hopeful assumption attached, not a handshake. It was
+well-ordered on the first load of a session and not after.
+
+Both stubs now poll a flag this module answers:
+
+    SAVE, at 0x00                        RESTORE, at 0x40
+      60              pushad               89 E0           mov  eax, esp
+      89 E0           mov  eax, esp        50              push eax     <- marker
+      50              push eax  <- marker  2E 8B 05 imm32  mov eax,cs:[GO]
+      2E 8B 05 imm32  mov eax,cs:[GO]      85 C0           test eax, eax
+      85 C0           test eax, eax        74 F5           jz   0x43
+      74 F5           jz   0x04            BC imm32        mov  esp, SS_STUB_ESP
+      83 C4 04        add  esp, 4          5C              pop  esp
+      61              popad                61              popad
+      CF              iret                 CF              iret
+
+    ss_go = !ss_active     one dword at SS_STUB_BASE + 0x208
+
+`ss_active` is set when the request is latched and cleared only in the
+`hold_rel` branch, so the flag reads zero for exactly the interval during which
+the CPU must not proceed. EAX is clobbered by the poll after `pushad` has
+already saved it and `popad` puts it back; EFLAGS likewise, restored by `iret`.
+
+**Why a poll and not a stall.** 46.5 measured that the z386 will not drain its
+write buffer while a read is outstanding, at `mem_accept` and at the response
+both -- so refusing the read refuses the marker write the freeze is waiting for,
+and it deadlocks. A poll read COMPLETES, so the buffer drains between
+iterations. Once the marker does retire, `ss_hold` blocks the next poll and the
+CPU parks with nothing left pending. Both orderings are correct and neither is
+timed.
+
+**The save gets it too**, and needed it: the save stub's `add esp,4 / popad /
+iret` read the stack out of cache exactly as the restore's did, so the same race
+could have let the 386 resume while the blob was still being streamed -- a torn
+save rather than a wrecked restore. Never observed, and now not possible.
+
+### 47.4 Measured
+
+    replay of the real in-game save, 6 loads   every one EXACT at 3EB6C8EF324FAF78
+                                               every one exits the stub at 0026B178
+    save at 6,000,000 then 8 back-to-back      every one EXACT at F44EA6C163B5EBB4
+    make verify                                exit 0
+
+**The loop was exercised deliberately, because it did not fire on its own.** In
+normal operation the poll read is issued once and blocked by `ss_hold`, then
+answered with 1 after release -- the park path, not the spin path. A temporary
+build that forced `ss_go` low for eight reads after release proved the other
+half: eight polls returning 0, one returning 1, the CPU proceeding, the restore
+still EXACT and still resuming at 0026B178, with the stub exit 210 cycles later.
+A mis-encoded `jz` would have been a latent bug visible only under the timing
+46's NOP gap could not survive. It is encoded right.
+
+### 47.5 What is left
+
+The NOP gap and its ~120-cycle margin are gone; so is 46.8's caveat, which was
+the reason for this section. Nothing here rests on a drain completing in time.
+
+Not yet fitted or on hardware at the time of writing.

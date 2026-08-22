@@ -283,12 +283,27 @@ module spi_cpu
 	wire        cpu_resp_valid = cpu_inta ? inta_ready    : mem_resp_valid;
 	wire        cpu_ready;
 
+	// The savestate stub window: 1 KB at 0x0004_0000, just above main RAM's
+	// 256 KB, answered by this module and decoded by nothing else.
+	localparam [31:0] SS_STUB_BASE = 32'h0004_0000;
+
 	z386 #(
 		.PROTECT_UMA_ROM      (0),
 		.DCACHE_SET_BITS      (8),
 		.ICACHE_SET_BITS      (8),
-		.DCACHE_UNCACHED_MASK (32'hFFFF_FC00),   // I/O window
-		.DCACHE_UNCACHED_BASE (32'h0000_0400)
+		// TWO windows this module answers combinationally, and a cached copy
+		// of either is by definition stale. The I/O window has been marked
+		// since the beginning; the savestate stub window was not, and that
+		// omission IS the rapid-reload lockup -- the restore's `pop esp` read
+		// hit the line the PREVIOUS restore's read had left behind, so it
+		// never reached this module, nothing stalled, and `popad`/`iret` ran
+		// off a stack the blob had not been written into yet. PLAN.md 46 found
+		// it; 47 fixes it here, where the I/O window said it belonged all
+		// along. Both windows are 1 KB, hence the shared mask.
+		.DCACHE_UNCACHED_MASK  (32'hFFFF_FC00),
+		.DCACHE_UNCACHED_BASE  (32'h0000_0400),   // memory-mapped I/O
+		.DCACHE_UNCACHED2_MASK (32'hFFFF_FC00),
+		.DCACHE_UNCACHED2_BASE (SS_STUB_BASE)     // the savestate stub
 	) cpu
 	(
 		.clk                (clk),
@@ -443,7 +458,8 @@ module spi_cpu
 	// mode after a restore reset (0x40000 is segment 0x4000, offset 0) as well
 	// as in protected mode. Main RAM ends at 0x3FFFF, PRG ROM starts at
 	// 0x200000, and nothing on the board decodes between them.
-	localparam [31:0] SS_STUB_BASE = 32'h0004_0000;
+	// Declared above the z386 instantiation, which needs it for the second
+	// uncacheable window (47).
 
 	wire sel_ss = (byte_addr[31:10] == SS_STUB_BASE[31:10]);
 
@@ -532,32 +548,69 @@ module spi_cpu
 	// hand-written copies of one number is how a stub reads the wrong dword
 	// after somebody moves the window.
 	localparam  [7:0] SS_ESP_IDX  = SS_STUB_ESP[9:2];
+	// The handshake flag, the dword after it, and its index.
+	localparam [31:0] SS_STUB_GO  = SS_STUB_BASE + 32'h208;
+	localparam  [7:0] SS_GO_IDX   = SS_STUB_GO[9:2];
 
 	function automatic [31:0] ss_stub_rom(input [7:0] idx);
 		case (idx)
-			8'h00:   ss_stub_rom = 32'h50E08960;   // pushad / mov eax,esp / push eax
-			8'h01:   ss_stub_rom = 32'h6104C483;   // add esp,4 / popad
-			8'h02:   ss_stub_rom = 32'h909090CF;   // iret
+			// SAVE, at offset 0x00:
+			//   00  60              pushad
+			//   01  89 E0           mov  eax, esp
+			//   03  50              push eax        <- the marker; the freeze
+			//   04  2E 8B 05 imm32  mov  eax, cs:[SS_STUB_GO]   the POLL
+			//   0B  85 C0           test eax, eax
+			//   0D  74 F5           jz   0x04
+			//   0F  83 C4 04        add  esp, 4
+			//   12  61              popad
+			//   13  CF              iret
+			// EAX is clobbered by the poll AFTER `pushad` has already saved it,
+			// and `popad` puts it back; EFLAGS likewise, restored by `iret`.
+			8'h00:   ss_stub_rom = 32'h50E08960;
+			8'h01:   ss_stub_rom = {SS_STUB_GO[7:0],  24'h05_8B_2E};
+			8'h02:   ss_stub_rom = {8'h85,            SS_STUB_GO[31:8]};
+			8'h03:   ss_stub_rom = 32'h83F574C0;   // test's C0 / jz / add esp,
+			8'h04:   ss_stub_rom = 32'hCF6104C4;   //   ...4 / popad / iret
+			// RESTORE, at offset 0x40:
+			//   40  89 E0           mov  eax, esp
+			//   42  50              push eax        <- the marker; the freeze
+			//   43  2E 8B 05 imm32  mov  eax, cs:[SS_STUB_GO]   the POLL
+			//   4A  85 C0           test eax, eax
+			//   4C  74 F5           jz   0x43
+			//   4E  BC imm32        mov  esp, SS_STUB_ESP
+			//   53  5C              pop  esp
+			//   54  61              popad
+			//   55  CF              iret
 			SS_RESTORE_IDX:
-			         ss_stub_rom = 32'hBC50E089;   // mov eax,esp / push eax / mov esp,
-			8'h11:   ss_stub_rom = SS_STUB_ESP;    //   ...this constant address
-			// Thirty-two bytes of NOP sit between `mov esp, imm32` and this,
-			// so the CPU's write buffer has somewhere to drain. `pop esp` is
-			// the read the restore turns on -- it must be serviced AFTER the
-			// marker `push eax` has retired, because that write is what
-			// latches the freeze. Measured without the gap: the read is
-			// serviced ten cycles BEFORE the marker retires, `popad` then runs
-			// off the un-restored stack, and the machine comes back at
-			// 00009A80. Stalling the read instead DEADLOCKS -- the z386 will
-			// not drain its write buffer while a read is outstanding, measured
-			// twice, at mem_accept and at the response. PLAN.md 46.
-			8'h18:   ss_stub_rom = 32'h90CF615C;   // pop esp / popad / iret
+			         ss_stub_rom = {8'h2E,           24'h50_E0_89};
+			8'h11:   ss_stub_rom = {SS_STUB_GO[15:0], 16'h05_8B};
+			8'h12:   ss_stub_rom = {16'hC0_85,       SS_STUB_GO[31:16]};
+			8'h13:   ss_stub_rom = {SS_STUB_ESP[7:0], 24'hBC_F5_74};
+			8'h14:   ss_stub_rom = {8'h5C,           SS_STUB_ESP[31:8]};
+			8'h15:   ss_stub_rom = 32'h9090CF61;   // popad / iret
 			// The datum the stub pops. Combinational, so it is whatever the
 			// caller has put there by the time the CPU reads it -- which is
 			// after the blob has been streamed in, and is why this works where
 			// an immediate could not.
 			SS_ESP_IDX:
 			         ss_stub_rom = ss_esp_in;
+			// THE HANDSHAKE. Zero while an operation is in flight, one once it
+			// has let go. Both stubs poll it and cannot pass until it reads
+			// one, which is what makes the ordering STRUCTURAL rather than a
+			// race that usually comes out right (46.8, and PLAN.md 47).
+			//
+			// A poll READ COMPLETES, and that is the whole point. The CPU will
+			// not drain its write buffer while a read is outstanding -- 46.5
+			// measured that twice -- so a stall deadlocks the marker write that
+			// the freeze is waiting for. A poll lets the buffer drain between
+			// iterations instead. Once the marker DOES retire, `ss_hold` blocks
+			// the next poll and the CPU parks with nothing left pending.
+			//
+			// This window is uncacheable (see the z386 instantiation), without
+			// which the second poll would hit the line the first one filled and
+			// spin on a stale zero forever.
+			SS_GO_IDX:
+			         ss_stub_rom = ss_active ? 32'd0 : 32'd1;
 			default: ss_stub_rom = 32'h90909090;
 		endcase
 	endfunction
@@ -738,28 +791,10 @@ module spi_cpu
 			// Give the invalidate time to retire before the NMI is offered.
 			SS_INVAL: begin
 				ss_arm_cnt <= ss_arm_cnt + 4'd1;
-				// ...and evict SS_STUB_ESP's line too, which is the second
-				// address in this window the CPU reads as DATA. It has to be a
-				// MISS or the whole restore falls apart, and on the second and
-				// later loads of a session it was a HIT -- the line is left
-				// behind by the previous restore's own read of it.
-				//
-				// The stub is written so that `mov esp, cs:[SS_STUB_ESP]`
-				// cannot complete until the blob has landed: the read reaches
-				// this module, is not answered (ss_esp_rd_stall), and the CPU
-				// parks on it while the marker write retires behind it and the
-				// freeze takes hold. A CACHE HIT skips all of that. The mov
-				// completes out of the stale line, the CPU runs on to `popad`
-				// and `iret` before the snapshot is even taken, and comes back
-				// on a stack the blob has not been written into.
-				//
-				// Measured, replaying a real in-game save: load 1 reads idx
-				// 0x81 and stalls; load 2 never reads it at all and is past
-				// the mov by the time the marker retires. PLAN.md 46.
-				if (ss_arm_cnt == 4'd2) begin
-					ss_snoop_addr  <= SS_STUB_ESP;
-					ss_snoop_valid <= 1'b1;
-				end
+				// 46 evicted SS_STUB_ESP's line here as well. That is gone:
+				// the whole stub window is UNCACHEABLE now (47), so there is
+				// never a line to evict. The gate's line still needs it --
+				// the gate lives in main RAM, which is cached and must be.
 				if (ss_arm_cnt == 4'd8) begin
 					ss_nmi   <= 1'b1;
 					ss_state <= SS_NMI;
