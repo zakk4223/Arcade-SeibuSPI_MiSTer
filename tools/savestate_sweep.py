@@ -233,20 +233,43 @@ def main():
         ramok  = exact and exact.group(2) == "EXACT"
         resume = RE_RESUME.search(out_b)
         resok  = resume and "resumed at the saved CS:EIP" in resume.group(1)
-        nreg, nsame, bad = compare_registers(per_register(read_u32(ia)),
-                                             per_register(read_u32(ib)))
-        good = ramok and resok and not bad and full
+        # Compare the same NUMBER OF READS from each run, not each run's whole
+        # stream. The save-only run always has about twice as much post-anchor
+        # time as the restored one -- the restore spends ~1.06 M cycles frozen
+        # inside the same total -- so it reaches registers the other has simply
+        # not got to yet. Left untruncated that shows up as "read in only one
+        # run", which looks like a finding and is an artefact of the window.
+        ra, rb = read_u32(ia), read_u32(ib)
+        n_io = min(len(ra), len(rb)) & ~1          # whole (addr, value) pairs
+        nreg, nsame, bad = compare_registers(per_register(ra[:n_io]),
+                                             per_register(rb[:n_io]))
+        # THE VERDICT RESTS ON THE REGISTER VALUES, not on the EIP lockstep.
+        # 40.1 said so and this script did not listen: the streams re-phase
+        # whenever the restored run takes one fewer turn of a poll loop, which
+        # shifts every EIP after it without a single value being wrong. Measured
+        # on rdft2 at 250 k: the streams part after 176,684 instructions because
+        # B leaves a loop at 002A1A50 one iteration early -- and all three
+        # registers, 0x600 / 0x60C / 0x6DC, return IDENTICAL value sequences
+        # over 39,634 reads. That is a phase offset, not a divergence, and
+        # calling it a failure buries the ones that are.
+        good = ramok and resok and not bad
+        note = "" if full else ("  phase-shift after %d (values all identical)"
+                                % lock if not bad else "")
         tally["ok" if good else "bad"] += 1
         print("%-11d %-7d %-17s %-8s %-7s %d/%d%s"
               % (sp, skew,
-                 ("%d/%d%s" % (lock, cmpn, "" if full else " DIVERGED")),
+                 ("%d/%d%s" % (lock, cmpn, "" if full else " phase")),
                  "EXACT" if ramok else "MISMATCH",
                  "yes" if resok else "NO",
                  nsame, nreg,
-                 "" if not bad else "  " + "; ".join("%04X %s" % x for x in bad[:2])))
+                 note if not bad
+                 else "  " + "; ".join("%04X %s" % x for x in bad[:2])))
 
     print("\n%d clean, %d with a difference, %d refused"
           % (tally["ok"], tally["bad"], tally["refused"]))
+    print("`phase` means the EIP streams re-phase on a poll loop while every "
+          "register's\nvalue sequence stays identical -- informational, not a "
+          "failure. See PLAN.md 40.1.")
     return 1 if tally["bad"] or tally["refused"] else 0
 
 
