@@ -4,16 +4,24 @@ Live state as of 2026-08-22. `PLAN.md` is the design record and stays
 chronological; this file is the short answer to "what was I doing". Delete the
 finished parts as they go.
 
-## SAVE STATES, on branch `savestate-phase0` -- this is where the work is
+## SAVE STATES -- MERGED TO `main` (PR #1, 2026-08-22)
 
-None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; the plan file is
-`~/.claude/plans/what-would-be-involved-calm-stearns.md`.
+**This work is done and shipped.** Forty-one commits merged as `6cdb606`;
+`PLAN.md` 38-50 is the design record, and the plan file is
+`~/.claude/plans/what-would-be-involved-calm-stearns.md`. Everything below is
+kept because it is the record of what was verified and what was not -- not
+because anything is outstanding.
 
-It fits and it mostly works:
+It fits, and it works on hardware:
 
     setup +0.260   hold +0.231   TNS 0.000, SEED 3, md5 75999219 (on the board)
-    -- 47's handshake stress tested on hardware; 49's OSD fix is UNTESTED
+    all of 47's handshake, 49's OSD fix and section B confirmed on hardware
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
+
+**`.ss` files are gitignored and must stay that way.** One carries the 386's
+256 KB of main RAM -- live game state -- and this is a public repo. The debug
+kit's reproducer was stripped from the branch history before the push; take a
+FRESH in-game save off the board if a future wedge needs one.
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
 boots and plays on the savestate bitstream; save and load were then visibly
