@@ -121,6 +121,10 @@ Still open, and the list is shorter than it was:
 
   On the board: `861db700`. The last CLEAN build is `c1d99fef` (233d7fc), kept as
   `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0022`.
+
+  **`output_files/SeibuSPI.rbf` is STALE** -- it is a fit that predates the
+  `ss_idle` change now committed, left behind when work stopped. Refit before
+  deploying anything from it. Same trap 41 opened this whole run with.
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
