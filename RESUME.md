@@ -12,8 +12,8 @@ Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
 
 It fits and it mostly works:
 
-    ALMs 36,456 (87 %)   RAM blocks 487 (88 %)   registers 35,395
-    setup +0.121   hold +0.243   TNS 0.000, SEED 3, md5 e4037a48
+    ALMs 36,389 (87 %)   RAM blocks 487 (88 %)   registers 35,339
+    setup +0.261   hold +0.243   TNS 0.000, SEED 3, md5 96ab5971
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -88,16 +88,21 @@ usually empty and was a FALSE VERDICT throughout 39. Believe the
 
 Still open, and the list is shorter than it was:
 
-* **The lockup is FIXED** (PLAN.md 43) and deployed, but proven only in
-  simulation and by one hardware boot -- **the rapid-reload retest on hardware
-  has not been reported back yet**, and those are not the same thing. The cause
-  was `spi_ds2404` SWALLOWING a request rather than deferring it while paused, so
-  `ds_stall` held `io_stall` and the 386 could never reach an instruction
-  boundary to take the NMI. 40.3 introduced it by making a load assert `pause`
-  while the CPU is still running. The fix is `ds_pause <= ss_pause &&
-  ss_snapshot`, REGISTERED -- combinational it fails the fit at -0.077 on
-  clk_ram, which is 31.7's endpoint and 31.7's answer. New probe
-  `ss_dbg_stalls` is what found it; keep it.
+* **The lockup: BISECTED to 40.3, fixed in 44, awaiting the hardware retest.**
+  40.3 did two things and only one was right. Removing the load's arm wait was
+  right (a frame of old state). Asserting `pause` from the request was not: the
+  386 HAS TO RUN between the request and the snapshot, because that is how it
+  reaches the stub, and anything it touches that `pause` has frozen stalls it
+  forever. The fix excludes S_SETTLE and S_ASK from `pause` **on a load only** --
+  a save must keep them, that is 39.3's argument. Hardware bisect:
+
+        233d7fc (before 40.3)  10+ reloads CLEAN
+        1323975 (40.3) .. e4037a48 (43)    wedge in ~3
+
+  **43's DS2404 fix stays** -- independently correct, one instance of the same
+  fault -- but it is NOT what fixes this, and 43 said it was. That claim came
+  from reproducing save->load when the reported bug was load->load.
+  **The retest of 96ab5971 has not come back yet.**
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
