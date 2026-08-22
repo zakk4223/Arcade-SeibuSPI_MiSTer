@@ -11,8 +11,8 @@ None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; t
 
 It fits and it mostly works:
 
-    setup +0.313   hold +0.244   TNS 0.000, SEED 3, md5 49668c89 (on the board)
-    -- 47's handshake IS in this bitstream and STRESS TESTED on hardware
+    setup +0.260   hold +0.231   TNS 0.000, SEED 3, md5 75999219 (on the board)
+    -- 47's handshake stress tested on hardware; 49's OSD fix is UNTESTED
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -145,9 +145,24 @@ Still open, and the list is shorter than it was:
   rdft2's differences were all measurement artefacts, both fixed. rfjet is
   covered by real gameplay on hardware instead of by the bench. Pick it up again
   only if a bug turns up that looks systematic.
-* **The OSD and pad path is still undriven on hardware** -- slot switching,
-  autoincrement, and the OSD's own save/restore entries. Audio continuity across
-  a load has not been listened to either. **The checklist for this is written:
+* **The savestate UI PASSED on hardware** -- every item in section A of
+  `tools/savestate-debug/HARDWARE-SESSION.md`: slot switching on the pad and in
+  the OSD, the two agreeing, per-slot save/load, autoincrement, and audio
+  continuity across a load.
+
+  **That session found a different bug, now fixed and awaiting a look**
+  (`PLAN.md` 49): every OSD entry below the savestate block did the job of the
+  one above it -- "Video Settings" did nothing, "Sample Flash" opened Video
+  Settings. Main counts the `I,` info list as a MENU LINE, and this core had it
+  in the middle of the menu between two separators, where it rendered as a
+  near-blank row that reads as spacing. Moved to the end, which is where every
+  other core puts it. **On the board as `75999219`; the menu has not been looked
+  at since.** The help text is fixed in the same field
+  (`Slot=Start+LR|Save/Load=Start+DU`).
+
+  Still open from that checklist: **the Sample Flash toggle (section B) and a
+  variant boot (C1)**, both of which need the OSD -- so they were blocked by the
+  off-by-one and are worth doing on the next visit. **The checklist is:
   `tools/savestate-debug/HARDWARE-SESSION.md`**, and it covers the Sample Flash
   toggle and a variant boot in the same sitting, because all of it is blocked on
   the same thing -- there is no way to drive the OSD from a host.

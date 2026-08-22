@@ -11004,11 +11004,19 @@ direction and **bare DPAD does nothing**. The old text sent someone looking for 
 slot-switching bug that did not exist, which is why writing the hardware
 checklist started by reading the RTL rather than the screen.
 
-### 49.4 What is NOT yet known
+### 49.4 The fit, and what is NOT yet known
 
-`make map` passes. **This has not been fitted or seen on hardware.** The change
-is to a string, so it cannot move timing, but the menu being right is a hardware
-observation and nothing here has made it yet.
+    setup +0.260  clk_ram    hold +0.231  (ascal)    TNS 0.000 everywhere
+    ALMs 36,452 (87 %)   registers 35,375   RBF md5 75999219
+    ZERO critical warnings -- the ymf271_synth MIF line is gone this time
+    YMF ch5 hold path clear: worst holds are ascal, blank_cnt, sys_umuldiv
+
+Deployed md5-verified 2026-08-22 18:12. `49668c89` (47) is kept as
+`/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-1812`.
+
+**The menu has NOT been looked at on hardware yet.** The change is to a string
+and cannot move logic, so the timing movement against 47's +0.313/+0.244 is
+placement noise and nothing more.
 
 If the off-by-one survives, the next thing to look at is the count of near-blank
 rows around the savestate block on screen: the theory above predicts exactly one
