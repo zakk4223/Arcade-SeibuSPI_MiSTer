@@ -87,6 +87,9 @@ module spi_ss
 	// waiting for vbl_next, the machine has to keep running to get there.
 	output            pause,
 
+	// {is_load, st} for the on-screen wedge overlay. Diagnostic; PLAN.md 45.
+	output      [4:0] dbg_st,
+
 	// ---- memory_stream / save_state_data --------------------------------
 	output reg        stream_write, // start a save   (one pulse)
 	output reg        stream_read,  // start a load
@@ -205,32 +208,13 @@ module spi_ss
 	reg       is_load;
 	reg [1:0] inval_ph;
 
+	assign dbg_st  = {is_load, st};
+
 	assign busy    = (st != S_IDLE);
-	// Everything except the wait is frozen -- and, on a LOAD, except the walk to
-	// the stub as well. PLAN.md 44, and it is the other half of the bug 40.3
-	// created.
-	//
-	// 40.3 did two things and only one of them was right. Removing the load's
-	// ARM WAIT was right: that was a frame of the board running with old state.
-	// Asserting `pause` from the request instead was not. Between the request
-	// and the snapshot the 386 HAS TO RUN -- that is how it reaches the stub --
-	// and anything it touches in that window that `pause` has frozen can stall
-	// it forever. It then never reaches an instruction boundary, never takes the
-	// NMI, and the sequencer waits for a CPU that is waiting for a peripheral
-	// that is waiting for the sequencer. Bisected on hardware: 233d7fc survives
-	// 10+ rapid reloads, everything from 1323975 on wedges in about three.
-	//
-	// The window this re-opens is NOT the one 40.3 closed. That was up to a
-	// frame -- 1,061,156 cycles. This is the walk to the stub on a load, which
-	// measures about 180. Three orders of magnitude, and a load has no canonical
-	// instant to protect in the first place.
-	//
-	// A SAVE keeps the old behaviour exactly, and must: `pause` high while it
-	// walks to the stub is what makes the snapshot correspond to the `vbl_next`
-	// instant S_ARM waited for, which is 39.3's whole argument for why the
-	// interrupt state does not have to be carried.
-	assign pause   = busy && (st != S_ARM)
-	                      && !(is_load && (st == S_SETTLE || st == S_ASK));
+	// Everything except the wait is frozen. A LOAD now waits with `pause` HELD
+	// -- see S_SETTLE -- which 40.3 could not do and 42 made possible.
+	assign pause   = busy && (st != S_ARM);
+
 	// The port is ours from the moment the machine is frozen until it is let go.
 	// Not in S_STREAM until the DMA has let go, or the override in spi_cpu's
 	// mux would cut a transfer off mid-flight.
@@ -294,7 +278,17 @@ module spi_ss
 			// the entire point of not reusing S_ARM. All this waits for is the
 			// 386 leaving whatever stub it is in, which is tens of cycles, not
 			// the tens of thousands a frame costs.
-			S_SETTLE: if (!cpu_in_stub && !cpu_snapshot) begin
+			// The bisect (PLAN.md 45) put the lockup exactly here. 233d7fc sent
+			// a LOAD through S_ARM, so it waited for `vbl_next` like a save;
+			// 40.3 sent it here instead and it stopped waiting for the raster
+			// at all. Restoring that wait is the fix, and `pause` stays HELD
+			// throughout it -- which is the part 40.3 could not have. It removed
+			// the wait because waiting needed `pause` LOW (a frozen raster never
+			// reaches vbl_next) and `pause` low was the frame-long state leak.
+			// 42 made the raster free-run, so the wait and the freeze are no
+			// longer in conflict: the canonical instant is back AND nothing
+			// leaks.
+			S_SETTLE: if (vbl_next && !cpu_in_stub && !cpu_snapshot) begin
 				cpu_restore_req <= 1'b1;
 				st              <= S_ASK;
 			end

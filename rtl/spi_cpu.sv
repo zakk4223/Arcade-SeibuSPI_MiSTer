@@ -573,6 +573,8 @@ module spi_cpu
 	localparam [2:0] SS_IDLE = 3'd0, SS_INVAL = 3'd1, SS_NMI = 3'd2,
 	                 SS_RUN  = 3'd3;
 	reg [2:0] ss_state;
+	// Counts the wait for the stub's marker write in SS_RUN; see there.
+	reg [23:0] ss_retry_cnt;
 
 	// Does a main-RAM dword index land on the overlaid gate, and if so which
 	// half? 2'd0 is "no", 2'd1 the low dword, 2'd2 the high one.
@@ -665,6 +667,7 @@ module spi_cpu
 
 		if (reset) begin
 			ss_state        <= SS_IDLE;
+			ss_retry_cnt    <= 24'd0;
 			ss_nmi          <= 1'b0;
 			ss_gate_armed   <= 1'b0;
 			ss_active       <= 1'b0;
@@ -680,6 +683,11 @@ module spi_cpu
 		end
 		else begin
 			ss_in_stub <= ss_eip_in_stub;
+
+			// Times the wait for the stub's marker write; SS_RUN uses it to
+			// re-offer an NMI the 386 never took.
+			if (ss_state == SS_RUN && !ss_hold)
+				ss_retry_cnt <= ss_retry_cnt + 24'd1;
 
 			case (ss_state)
 			SS_IDLE: if (ss_save_req || ss_restore_req) begin
@@ -710,6 +718,7 @@ module spi_cpu
 			// z386 edge-detects NMI, so the level only has to be held long
 			// enough to be seen.
 			SS_NMI: begin
+				ss_retry_cnt <= 24'd0;
 				ss_arm_cnt <= ss_arm_cnt + 4'd1;
 				if (ss_arm_cnt == 4'd15) begin
 					ss_nmi   <= 1'b0;
@@ -720,7 +729,38 @@ module spi_cpu
 			// Frozen on the marker write. mem_accept is already gated by
 			// ss_hold, so no further memory cycle -- and in particular no
 			// write to main RAM -- can retire until the caller lets go.
-			SS_RUN: if (ss_hold && ss_hold_rel) begin
+			//
+			// AND IF THE NMI WAS NEVER TAKEN, RE-OFFER IT. SS_NMI drops `ss_nmi`
+			// after sixteen cycles whether or not the 386 acted on it, and
+			// `ss_hold` is set ONLY by recognising the stub's marker write. So a
+			// missed or deferred NMI used to park this machine in SS_RUN
+			// forever: `ss_snapshot` never rose, spi_ss sat in S_ASK waiting for
+			// it, and every LATER operation hung too because SS_IDLE was never
+			// reached to latch the next request. That is the rapid-reload
+			// lockup, and it is why it takes two or three goes rather than
+			// failing on the first -- one poisoned operation wedges all of them.
+			//
+			// Read off the hardware with the on-screen overlay (PLAN.md 45):
+			// S_ASK, is_load=1, pause=1, snapshot=0, in_stub=0, and every stall
+			// bit CLEAR. Nothing was stalled; the CPU had simply never been
+			// asked in a way it answered.
+			//
+			// The retry goes back through SS_INVAL rather than straight to
+			// SS_NMI, because the gate's cache line has to be evicted again
+			// before the vector is offered -- the same reason SS_IDLE does it in
+			// that order.
+			//
+			// 2^23 clk_cpu cycles is ~293 ms, against a worst measured wait of
+			// 1,042,924 for the 386 to reach the stub on a save. Eight times the
+			// slowest real case, so a healthy operation can never trip it.
+			SS_RUN: if (!ss_hold && ss_retry_cnt[23]) begin
+				ss_retry_cnt   <= 24'd0;
+				ss_arm_cnt     <= 4'd0;
+				ss_snoop_addr  <= {14'd0, ss_gate_dw0, 2'b00};
+				ss_snoop_valid <= 1'b1;
+				ss_state       <= SS_INVAL;
+			end
+			else if (ss_hold && ss_hold_rel) begin
 				ss_hold     <= 1'b0;
 				ss_snapshot <= 1'b0;
 				ss_active   <= 1'b0;
