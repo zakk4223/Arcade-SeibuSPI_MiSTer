@@ -75,6 +75,11 @@ module spi_ds2404
 	input       [7:0] ss_ram_din,
 	input             ss_ram_we,
 	output      [7:0] ss_ram_dout,
+	// A read-only window on the bookkeeping SRAM, for the bench. Nothing in
+	// the design had ever checked that these 512 bytes survive a savestate --
+	// SSIDX_DS2404_RAM is a section and the bench could not see it. PLAN.md 50.
+	input       [8:0] dbg_ram_addr,
+	output      [7:0] dbg_ram_dout,
 
 	// A read-only tap on the counter and its divider, for the testbench. Both
 	// alter nothing; the top level leaves them unconnected and Quartus folds
@@ -173,6 +178,8 @@ module spi_ds2404
 	reg [7:0] game_q;
 	reg [7:0] ss_ram_q;
 	assign ss_ram_dout = ss_ram_q;
+	reg [7:0] dbg_ram_q;
+	assign dbg_ram_dout = dbg_ram_q;
 
 	wire [8:0] sram_wa = ss_ram_we ? ss_ram_addr
 	                   : nv_we     ? nv_addr : copy_addr[8:0];
@@ -330,6 +337,7 @@ module spi_ds2404
 		if (sram_we) sram[sram_wa] <= sram_wd;
 		nv_dout    <= sram[nv_addr];
 		ss_ram_q   <= sram[ss_ram_addr];
+		dbg_ram_q  <= sram[dbg_ram_addr];
 		game_q  <= sram[address[8:0]];
 
 		// ---- the RTC, 40 bits at 256 Hz ------------------------------

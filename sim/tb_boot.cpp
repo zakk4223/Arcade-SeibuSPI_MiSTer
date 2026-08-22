@@ -76,6 +76,24 @@ struct Chan {
     uint64_t count    = 0;
 };
 
+
+// The DS2404's 512 bytes of bookkeeping SRAM. It is SSIDX_DS2404_RAM in the
+// blob and nothing had ever checked that it survives a save/restore -- the
+// bench could not see it until PLAN.md 50 added the probe. The game keeps its
+// audit page and two fixed test patterns here, reads them back, and shows
+// CHECK SUM ERROR if they are wrong.
+static uint64_t ds_ram_hash(Vtb_boot_top *dut)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (uint32_t i = 0; i < 512; i++) {
+        dut->p_ds_ram_addr = (uint16_t)i;
+        dut->eval(); dut->eval();          // the read is one cycle behind
+        h ^= dut->p_ds_ram_dout & 0xFF;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
@@ -304,6 +322,7 @@ int main(int argc, char **argv)
     uint64_t ss_enter_cyc = 0;
     uint32_t ss_marker = 0;
     uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
+    uint64_t ss_ds_at_save = 0;
     // A replay run has no save of its own, so everything the verdicts are
     // keyed on -- ss_done, the marker slot, the saved EIP, the reference hash
     // -- has to come out of the BLOB instead. Without this the load takes the
@@ -570,6 +589,7 @@ int main(int argc, char **argv)
                     }
                 }
                 ss_snap_vbl = n_vbl;
+                if (!ss_done) ss_ds_at_save = ds_ram_hash(dut);
                 if (!ss_done) ss_hash_at_save = hh;
                 else          ss_hash_pre_load = hh;
                 if (!ss_done) ss_saved_esp = dut->p_ss_esp_out;
@@ -749,6 +769,18 @@ int main(int argc, char **argv)
                            (unsigned long long)ss_hash_post_load,
                            ss_hash_post_load == ss_hash_at_save
                              ? "<- EXACT" : "<- MISMATCH");
+                    }
+                    {   // The DS2404's SRAM, the same way.
+                        uint64_t dh = ds_ram_hash(dut);
+                        if (ss_ds_at_save)
+                            printf("        DS2404 SRAM        : %016llX  %s\n",
+                                   (unsigned long long)dh,
+                                   dh == ss_ds_at_save ? "<- EXACT"
+                                                       : "<- CORRUPTED");
+                        else
+                            printf("        DS2404 SRAM        : %016llX  "
+                                   "(no save in this run to compare)\n",
+                                   (unsigned long long)dh);
                     }
                     // The frame the CPU is about to pop, out of restored main
                     // RAM. On a replay this is the only place the saved EIP

@@ -130,6 +130,8 @@ module tb_boot_top
 
 	output      [2:0] p_ss_state,
 	output      [4:0] p_ss_seq,
+	input       [8:0] p_ds_ram_addr,
+	output      [7:0] p_ds_ram_dout,
 	output            p_ss_nmi,
 	output     [15:0] p_ss_gate_dw0,
 	output     [15:0] p_ss_gate_reads,
@@ -227,6 +229,8 @@ module tb_boot_top
 		.ss_last_wd   (p_ss_last_wd),
 		.ss_dbg_state      (p_ss_state),
 		.ss_dbg_seq        (p_ss_seq),
+		.dbg_ds_ram_addr   (p_ds_ram_addr),
+		.dbg_ds_ram_dout   (p_ds_ram_dout),
 		.ss_dbg_nmi        (p_ss_nmi),
 		.ss_dbg_gate_dw0   (p_ss_gate_dw0),
 		.ss_dbg_gate_reads (p_ss_gate_reads),

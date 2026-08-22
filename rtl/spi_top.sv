@@ -87,6 +87,9 @@ module spi_top
 	// the bench had no way to see. Distinct from ss_dbg_state, which is
 	// spi_cpu's -- reading one as the other cost a round in PLAN.md 44.5.
 	output      [4:0] ss_dbg_seq,
+	// The DS2404's bookkeeping SRAM, read-only, for the bench (PLAN.md 50).
+	input       [8:0] dbg_ds_ram_addr,
+	output      [7:0] dbg_ds_ram_dout,
 	output            ss_dbg_nmi,
 	output     [15:0] ss_dbg_gate_dw0,
 	output     [15:0] ss_dbg_gate_reads,
@@ -574,6 +577,8 @@ module spi_top
 		.ss_ram_din  (ds_ram_din),
 		.ss_ram_we   (ds_ram_we),
 		.ss_ram_dout (ds_ram_dout),
+		.dbg_ram_addr (dbg_ds_ram_addr),
+		.dbg_ram_dout (dbg_ds_ram_dout),
 		.clk      (clk_ram),
 		.reset    (reset),
 
