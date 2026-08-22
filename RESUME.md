@@ -138,9 +138,26 @@ Still open, and the list is shorter than it was:
   bad offset produced a false `restore: FAILED` here and cost a round.
 * The sound path's MAME correlation has still not been redone since T80 was
   swapped for tv80, and for a CPU swap that is the measurement that counts.
+  This is the largest genuine engineering task left and is independent of
+  everything else.
+* **Simulation sweep work is DEFERRED by decision (2026-08-22)**, not forgotten.
+  `tools/savestate_sweep.py` is checked in and working; rdft ran 48/48 clean and
+  rdft2's differences were all measurement artefacts, both fixed. rfjet is
+  covered by real gameplay on hardware instead of by the bench. Pick it up again
+  only if a bug turns up that looks systematic.
 * **The OSD and pad path is still undriven on hardware** -- slot switching,
   autoincrement, and the OSD's own save/restore entries. Audio continuity across
-  a load has not been listened to either.
+  a load has not been listened to either. **The checklist for this is written:
+  `tools/savestate-debug/HARDWARE-SESSION.md`**, and it covers the Sample Flash
+  toggle and a variant boot in the same sitting, because all of it is blocked on
+  the same thing -- there is no way to drive the OSD from a host.
+
+  Two things that file found while being written, both worth knowing before you
+  sit down: the **on-screen help text is wrong for this core** (it says
+  `Slot=DPAD`, but `joySS` is wired to Start, so bare DPAD does nothing), and
+  **Start is both the savestate modifier and the game's Start button**, so
+  holding it pops the help overlay mid-game and Start+Up loads a state. That
+  second one is a design judgement, not a bug.
 * Quartus keeps re-adding files to `SeibuSPI.qsf`'s stale duplicate list --
   though it did NOT across the four compiles in 41 and 42, so this may be less
   frequent than it looked.
