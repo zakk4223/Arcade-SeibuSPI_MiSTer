@@ -10354,3 +10354,91 @@ the hang without moving the trajectory.
 SeibuSPI.sv like every other `ss_dbg_*` and printed by tb_boot. Keep it. It is the
 only thing that distinguishes "the savestate froze the CPU" from "the CPU is
 stalled on an I/O hold", and those look identical from every other angle.
+
+## 44. The lockup, bisected: 40.3 froze a window the CPU has to run in (2026-08-21)
+
+43 shipped a fix for a hang and it did not fix the one on the bench. 43's hang
+was real -- save -> load one cycle apart, the DS2404 swallowing a request -- but
+it was reproduced from **save->load**, and the hardware failure is **load->load
+repeated**, which the bench could not express at all. Fixing what I could measure
+and reporting it as the reported bug is the mistake this section is really about.
+
+### 44.1 The bisect, which took four builds and answered in one line
+
+Five back-to-back loads PASS in simulation, so the bench was never going to find
+this. On hardware:
+
+    233d7fc  (before 40.3)   10+ reloads   CLEAN
+    1323975  (40.3)          ~3 reloads    wedges
+    4da63a7e (41)            ~3 reloads    wedges
+    e4037a48 (43)            ~3 reloads    wedges
+
+**40.3 introduced it.** The A/B against 4da63a7e also killed two of my theories
+at once: that build freezes the raster during a transfer, so `screen_rotate` is
+idle and there is no DDR3 contention -- and it wedges anyway. The raster change
+and rotate contention are both exonerated.
+
+### 44.2 What 40.3 got wrong
+
+It did two things and only one of them was right.
+
+**Removing the load's ARM WAIT was right.** That was up to a frame -- 1,061,156
+cycles -- of the board running with old state before the blob landed, and it is
+the whole of 40.3's measured improvement.
+
+**Asserting `pause` from the request instead was wrong.** Between the request and
+the snapshot the 386 HAS TO RUN; that is how it reaches the stub. Anything it
+touches in that window that `pause` has frozen can stall it forever. It then
+never reaches an instruction boundary, never takes the NMI, and the sequencer
+waits for a CPU that is waiting for a peripheral that is waiting for the
+sequencer.
+
+43's DS2404 fix is one instance of exactly this, found in simulation and fixed
+one consumer at a time. It is independently correct and it stays. But it treats a
+symptom: on hardware something else in the same window catches the CPU too, which
+is why e4037a48 still wedged in three.
+
+### 44.3 The fix
+
+    assign pause = busy && (st != S_ARM)
+                        && !(is_load && (st == S_SETTLE || st == S_ASK));
+
+The window this re-opens is not the one 40.3 closed. That was up to a frame; this
+is the walk to the stub on a load, about 180 cycles. Three orders of magnitude,
+and a load has no canonical instant to protect in the first place -- it does not
+INFER anything, the blob carries it.
+
+A SAVE keeps the old behaviour exactly, and must. `pause` high while it walks to
+the stub is what makes the snapshot correspond to the `vbl_next` instant S_ARM
+waited for, and that is 39.3's entire argument for why the interrupt state does
+not have to be saved.
+
+### 44.4 Measured
+
+    8 back-to-back loads       all restore, main RAM EXACT
+    determinism hash (1 load)  67181BD5C945E779  -- unchanged from every good run
+    restore verdict            the CPU resumed at the saved CS:EIP
+    make verify                exit 0
+
+    setup +0.261   hold +0.243   TNS 0.000   0 critical warnings   SEED 3
+    ALMs 36,389 (87 %)   registers 35,339   RBF 96ab5971
+
+The 8-reload run reports a DIFFERENT hash, 9CC5E850F0DBBC44, and that is the
+instrument rather than the design: the "200,000 cycles after" window overlaps the
+later loads. Re-run at SS_RELOADS=1 it is 67181BD5C945E779 again. Do not read
+that number out of a multi-reload run.
+
+### 44.5 What this cost, and the rule
+
+Three theories, all reasoned from source, none of them the bug: a DS2404 copy
+drain that changed nothing, `ss_dbg_state`=3 read as spi_ss's state when the
+probe is spi_cpu's, and DDR3 contention from a rotate that was not even running
+on the build that failed. Plus a backpressure model that wedged at one busy tick
+in sixteen and briefly looked like a finding.
+
+What worked, both times: **add a probe and read it** (43.1), and **bisect on the
+hardware that actually fails**. The bench passed 5 back-to-back loads throughout;
+no amount of staring at it would have found this.
+
+`SS_RELOADS` exists now (1d6b04e) so the bench can at least express the shape,
+even though it does not reproduce it.

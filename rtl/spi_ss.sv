@@ -206,8 +206,31 @@ module spi_ss
 	reg [1:0] inval_ph;
 
 	assign busy    = (st != S_IDLE);
-	// Everything except the wait is frozen.
-	assign pause   = busy && (st != S_ARM);
+	// Everything except the wait is frozen -- and, on a LOAD, except the walk to
+	// the stub as well. PLAN.md 44, and it is the other half of the bug 40.3
+	// created.
+	//
+	// 40.3 did two things and only one of them was right. Removing the load's
+	// ARM WAIT was right: that was a frame of the board running with old state.
+	// Asserting `pause` from the request instead was not. Between the request
+	// and the snapshot the 386 HAS TO RUN -- that is how it reaches the stub --
+	// and anything it touches in that window that `pause` has frozen can stall
+	// it forever. It then never reaches an instruction boundary, never takes the
+	// NMI, and the sequencer waits for a CPU that is waiting for a peripheral
+	// that is waiting for the sequencer. Bisected on hardware: 233d7fc survives
+	// 10+ rapid reloads, everything from 1323975 on wedges in about three.
+	//
+	// The window this re-opens is NOT the one 40.3 closed. That was up to a
+	// frame -- 1,061,156 cycles. This is the walk to the stub on a load, which
+	// measures about 180. Three orders of magnitude, and a load has no canonical
+	// instant to protect in the first place.
+	//
+	// A SAVE keeps the old behaviour exactly, and must: `pause` high while it
+	// walks to the stub is what makes the snapshot correspond to the `vbl_next`
+	// instant S_ARM waited for, which is 39.3's whole argument for why the
+	// interrupt state does not have to be carried.
+	assign pause   = busy && (st != S_ARM)
+	                      && !(is_load && (st == S_SETTLE || st == S_ASK));
 	// The port is ours from the moment the machine is frozen until it is let go.
 	// Not in S_STREAM until the DMA has let go, or the override in spi_cpu's
 	// mux would cut a transfer off mid-flight.
