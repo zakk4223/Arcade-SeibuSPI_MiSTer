@@ -9,9 +9,16 @@ For the rapid-reload lockup. `PLAN.md` 45 is the design record; read it first.
   say "not wedged". The overlay only exists in builds carrying `PLAN.md` 45's
   `ss_dbg_st` wiring; check `grep ss_wedged rtl/spi_top.sv`.
 
-* **`rdft-ingame-wedges.ss`** -- a real 312,544-byte savestate taken on hardware
-  DURING ACTIVE GAMEPLAY on rdft, which is the condition that reproduces. An
-  attract-mode save does not. Replay it:
+* **`rdft-ingame-wedges.ss` -- NOT IN THIS REPO.** A `.ss` carries the 386's
+  256 KB of main RAM, which is live game state, so it is gitignored rather than
+  committed. It was a real 312,544-byte savestate taken on hardware DURING
+  ACTIVE GAMEPLAY on rdft, the condition that reproduced the rapid-reload
+  lockup; an attract-mode save did not.
+
+  **It is spent anyway** (`PLAN.md` 50): since the fix it replays six clean
+  loads and cannot reproduce anything. If you need a reproducer for a future
+  wedge, take a FRESH in-game save off the board -- which is what `PLAN.md` 50
+  tells you to do regardless. Drop it in this directory and replay it:
 
       python3 tools/build_sdram_image.py rdft.zip /tmp/sdram_rdft.bin --upd --set rdft
       cd sim && SS_LOAD_FILE=../tools/savestate-debug/rdft-ingame-wedges.ss \
