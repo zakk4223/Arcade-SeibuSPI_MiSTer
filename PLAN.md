@@ -10771,3 +10771,30 @@ trace.
 The corollary for the two dead fixes: both were killed by the same measurement,
 and neither would have been proposed at all if the write buffer's behaviour had
 been measured before rather than after.
+
+### 46.10 Confirmed on hardware (2026-08-22)
+
+`5bcf8fbe` was fitted from `9fc9cb4` and deployed, and **the user reports the
+rapid-reload lockup is gone.** Save during active gameplay and reload rapidly --
+the case that wedged in about three before the NMI retry and about ten after it
+-- now survives.
+
+That is the measurement that counts. Everything before it was simulation, and
+this project has twice shipped a "fix" that simulation liked and the board did
+not (43, 44). The chain that got here was: validate the harness (46.1), make the
+bench able to see a second load at all (46.2), reproduce (46.3), then read the
+cycle window (46.4). The bug itself was never visible to anything coarser -- it
+showed up as a read that was ABSENT from a trace.
+
+**The caveat in 46.8 still stands and is not retired by this.** What shipped is
+a ~120-cycle margin, not a bound. A write-buffer drain held off by the video DMA
+owning the main RAM port is "a few thousand cycles at worst" by spi_ss's own
+reckoning, and nothing here has exercised that coincidence. If a wedge ever comes
+back -- especially one that appears only under heavy sprite DMA -- go straight to
+the spin loop in 46.8 rather than re-deriving the mechanism.
+
+**The reproducer is spent.** `tools/savestate-debug/rdft-ingame-wedges.ss` now
+replays six clean loads, so it can no longer reproduce anything. Take a fresh
+in-game save off the board before debugging any future wedge; the file is kept
+because it is still the only real in-game save in the tree and it is what 46 was
+found with.

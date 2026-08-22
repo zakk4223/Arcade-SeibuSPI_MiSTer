@@ -87,67 +87,44 @@ usually empty and was a FALSE VERDICT throughout 39. Believe the
 
 Still open, and the list is shorter than it was:
 
-* **THE RAPID-RELOAD LOCKUP IS FOUND AND FIXED IN SIMULATION. It has NOT been
-  on hardware, and there has been no fit.** `PLAN.md` 46 is the record.
+* **THE RAPID-RELOAD LOCKUP IS FIXED, AND CONFIRMED ON HARDWARE**
+  (2026-08-22, `PLAN.md` 46). Saving during active gameplay and reloading
+  rapidly -- the case that wedged in about three, and in about ten after the NMI
+  retry -- now survives. On the board: `5bcf8fbe`, fitted from `9fc9cb4`.
 
-  **The cause: a cache hit that skips the freeze.** The restore stub's
-  `pop esp` is the only thing that can stop the 386 -- `ss_hold` gates
-  `mem_accept`, and after that instruction there is no memory cycle left to
-  gate, because `popad` and `iret` read stack lines the interrupt's own pushes
-  just cached. On the FIRST load of a session that read misses and the design
-  works. On the second the line is still there from load 1's own read of it, the
-  read never reaches the module, and `popad`/`iret` run off the un-restored
-  stack. That is the attract-versus-gameplay split: whether the line survives to
-  the next load is a question about the game's working set.
+  **The cause was a cache hit that skipped the freeze.** The restore stub's
+  `pop esp` is the only thing that can stop the 386: `ss_hold` gates
+  `mem_accept`, and past that instruction there is no memory cycle left to gate,
+  because `popad` and `iret` read stack lines the interrupt's own pushes just
+  cached. On the FIRST load of a session that read misses and the design works
+  by accident. On the second the line is still resident from load 1's own read
+  of it, nothing stalls, and `popad`/`iret` run off the un-restored stack. That
+  is the attract-versus-gameplay split -- it was always a working-set question.
 
   **The fix is two parts and neither works alone** (46.6): evict the ESP slot's
-  line in SS_INVAL alongside the gate's, and put 32 bytes of NOP between
-  `mov esp, imm32` and `pop esp` so the write buffer has idle to drain in. The
-  marker write then retires with ~120 cycles to spare where it used to be 10
-  cycles late.
+  cache line in SS_INVAL alongside the gate's, and put 32 bytes of NOP between
+  `mov esp, imm32` and `pop esp` so the write buffer has idle to drain in.
 
-  **Measured:** the real in-game save replays six loads, every one restoring
-  main RAM EXACT; a normal save then 8 back-to-back loads, every one EXACT;
-  `make verify` exit 0. The `Z80 program MISMATCH` line is pre-existing -- an
-  A/B with `spi_cpu.sv` reverted gives the same count within one byte.
+  **It is a MARGIN, not a bound, and that is not retired by the board passing**
+  (46.8/46.10). ~120 cycles does not cover a write-buffer drain held off by the
+  video DMA owning the main RAM port. If a wedge ever returns -- especially one
+  that only shows under heavy sprite DMA -- go straight to 46.8's spin loop
+  rather than re-deriving the mechanism.
 
-  **It is a MARGIN, not a proof** (46.8). 120 cycles does not bound a write
-  buffer drain that the video DMA is holding off. If hardware still wedges, the
-  deterministic version is a spin loop on a hardware flag -- reads that COMPLETE,
-  so the buffer drains between them, with the flag's line snooped every
-  iteration or the poll becomes the same cache hit one level up.
+  **The reproducer is spent.** `tools/savestate-debug/rdft-ingame-wedges.ss`
+  replays six clean loads now. Take a FRESH in-game save off the board before
+  debugging any future wedge.
 
-  **The replay harness is VALIDATED now** (46.1), and it did not need the board:
-  `SS_SAVE_FILE=<f>` dumps the slot, and replaying that blob in a fresh run gives
-  a byte-identical, cycle-identical restore. 45.6's advice to replay an
-  attract-mode save first is superseded -- the round trip is the stronger test.
+  **New instruments, and they are the reason this was found:**
+  `SS_SAVE_FILE=<f>` dumps the slot, which is what validated the replay harness
+  without a board (46.1 -- a round trip is byte- and cycle-identical, so ignore
+  45.6's advice to replay an attract save first); `SS_WINDOW=<lo>:<hi>` prints
+  every signal change in a cycle range with spi_ss's own state beside spi_cpu's
+  (`ss_dbg_seq` is exported for it). Nothing per-operation could have found this.
 
-  **45.6's own output was unreadable and two bench bugs are why** (46.2): a
-  replay's load took the SAVE branch, so the exactness check never ran, and the
-  saved EIP stayed 0, so `restore: FAILED` printed unconditionally. Both fixed.
-
-  **New instruments:** `SS_SAVE_FILE=<f>` (dump the slot) and
-  `SS_WINDOW=<lo>:<hi>` (every signal change in a cycle range, with spi_ss's own
-  state beside spi_cpu's -- `ss_dbg_seq` is exported for it now). The cycle
-  window is what found this; nothing per-operation could have.
-
-  **On the board: `5bcf8fbe`** -- 46 fitted and deployed 2026-08-22 04:06 from
-  `9fc9cb4`. Fit is clean: setup +0.171 (clk_ram, sdram|ch5_rq), hold +0.143
-  (ascal), TNS 0.000 on all four clocks, ALMs 36,394 (87 %), registers 35,395.
-  The one critical warning is the ymf271_synth MIF depth (1799 vs 2048) and is
-  benign -- it is NOT the seed tell from 34. The YMF ch5 hold path is clear:
-  the worst ten hold paths are all `ascal` and `vga_out`.
-
-  **NEXT ACTION: play it.** Save during ACTIVE GAMEPLAY on rdft and reload
-  rapidly. Before 46 that wedged in about ten. If it still wedges, screenshot
-  the overlay with `tools/savestate-debug/read_wedge.sh` and go to 46.8's spin
-  loop -- and take a fresh in-game save off the board first, because the one in
-  `tools/savestate-debug/` now replays CLEAN in simulation and cannot reproduce
-  anything any more.
-
-  Backups: the pre-46 build `861db700` is
-  `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0406`, and the last known
-  CLEAN one, `c1d99fef` (233d7fc), is `.20260822-0022`.
+  Backups: pre-46 `861db700` is
+  `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0406`; the last pre-savestate
+  clean build `c1d99fef` (233d7fc) is `.20260822-0022`.
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
