@@ -11,9 +11,8 @@ None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; t
 
 It fits and it mostly works:
 
-    setup +0.250   hold +0.116   TNS 0.000, SEED 3, md5 861db700 (on the board)
-    -- and the tree is AHEAD of it: 45.5's ss_idle and 46's cache fix are
-       both committed and NEITHER has been fitted or run on hardware
+    setup +0.171   hold +0.143   TNS 0.000, SEED 3, md5 5bcf8fbe (on the board)
+    -- 46's cache fix IS in this bitstream; it has NOT been played yet
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -132,11 +131,23 @@ Still open, and the list is shorter than it was:
   state beside spi_cpu's -- `ss_dbg_seq` is exported for it now). The cycle
   window is what found this; nothing per-operation could have.
 
-  On the board: `861db700`, which does NOT have any of this. The last CLEAN
-  build is `c1d99fef` (233d7fc), kept as
-  `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0022`.
+  **On the board: `5bcf8fbe`** -- 46 fitted and deployed 2026-08-22 04:06 from
+  `9fc9cb4`. Fit is clean: setup +0.171 (clk_ram, sdram|ch5_rq), hold +0.143
+  (ascal), TNS 0.000 on all four clocks, ALMs 36,394 (87 %), registers 35,395.
+  The one critical warning is the ymf271_synth MIF depth (1799 vs 2048) and is
+  benign -- it is NOT the seed tell from 34. The YMF ch5 hold path is clear:
+  the worst ten hold paths are all `ascal` and `vga_out`.
 
-  **`output_files/SeibuSPI.rbf` is STALE.** Refit before deploying anything.
+  **NEXT ACTION: play it.** Save during ACTIVE GAMEPLAY on rdft and reload
+  rapidly. Before 46 that wedged in about ten. If it still wedges, screenshot
+  the overlay with `tools/savestate-debug/read_wedge.sh` and go to 46.8's spin
+  loop -- and take a fresh in-game save off the board first, because the one in
+  `tools/savestate-debug/` now replays CLEAN in simulation and cannot reproduce
+  anything any more.
+
+  Backups: the pre-46 build `861db700` is
+  `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0406`, and the last known
+  CLEAN one, `c1d99fef` (233d7fc), is `.20260822-0022`.
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
