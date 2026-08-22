@@ -110,6 +110,10 @@ module spi_ss
 	// there. S_ARM used to hide this by delaying every operation by up to a
 	// frame; with the load's arm wait gone it has to be checked for.
 	input             cpu_in_stub,
+	// spi_cpu's stub machine is idle and will latch a request. NOT implied by
+	// !cpu_snapshot && !cpu_in_stub -- both are low while it sits in SS_RUN
+	// waiting for a marker write, and asking then is the lockup. PLAN.md 45.
+	input             cpu_ss_idle,
 	output reg        cpu_hold_rel,
 	// The marker slot's address, valid at snapshot: on a save this is the ESP
 	// the blob has to carry.
@@ -269,7 +273,7 @@ module spi_ss
 
 			// The machine runs on until the raster reaches the one place a
 			// snapshot is cheap to take. Saves only; see the note above.
-			S_ARM: if (vbl_next) begin
+			S_ARM: if (vbl_next && cpu_ss_idle) begin
 				cpu_save_req <= 1'b1;
 				st           <= S_ASK;
 			end
@@ -288,7 +292,8 @@ module spi_ss
 			// 42 made the raster free-run, so the wait and the freeze are no
 			// longer in conflict: the canonical instant is back AND nothing
 			// leaks.
-			S_SETTLE: if (vbl_next && !cpu_in_stub && !cpu_snapshot) begin
+			S_SETTLE: if (vbl_next && !cpu_in_stub && !cpu_snapshot
+			              && cpu_ss_idle) begin
 				cpu_restore_req <= 1'b1;
 				st              <= S_ASK;
 			end

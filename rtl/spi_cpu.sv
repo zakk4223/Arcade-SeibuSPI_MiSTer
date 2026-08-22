@@ -186,6 +186,11 @@ module spi_cpu
 	output reg [15:0] ss_writes,     // dword writes the stub has made
 	output reg [31:0] ss_last_wa,    // physical address of the last of them
 	output reg [31:0] ss_last_wd,    // and the value
+	// The stub machine is idle and WILL latch a request. spi_ss must wait for
+	// this: `ss_snapshot` and `ss_in_stub` are both LOW while SS_RUN waits for a
+	// marker write that a missed NMI means is never coming, so they do not say
+	// "ready" -- and spi_ss used to ask anyway. PLAN.md 45.
+	output            ss_idle,
 	output      [2:0] ss_dbg_state,
 	output            ss_dbg_nmi,
 	output     [15:0] ss_dbg_gate_dw0,
@@ -589,6 +594,20 @@ module spi_cpu
 	// simply "is the CPU executing our code".
 	wire ss_eip_in_stub = (dbg_eip[31:10] == SS_STUB_BASE[31:10]);
 
+	// Idle means "will latch a request AND the 386 is nowhere near the stub".
+	// Both halves are needed and both are evaluated HERE, in clk_cpu, because
+	// spi_ss reads this in clk_sys and a guard built from a registered
+	// `ss_in_stub` sampled across that crossing RACES -- which is the lockup.
+	// Replaying a real in-game savestate (PLAN.md 45) caught a load being
+	// accepted at EIP=00040049, inside the stub of the load before it: the stub
+	// then irets on a frame that is no longer its own and the 386 lands at
+	// CS=0000 EIP=00009A80, executing rubbish with the sound board still
+	// playing. That is the mode that leaves the music running.
+	//
+	// `ss_state == SS_IDLE` alone is not enough: the hold is released, and the
+	// state returns to idle, BEFORE the stub's iret has retired.
+	assign ss_idle          = (ss_state == SS_IDLE) && !ss_eip_in_stub
+	                                                && !ss_in_stub_d;
 	assign ss_dbg_state     = ss_state;
 	assign ss_dbg_hold      = ss_hold;
 

@@ -250,7 +250,22 @@ int main(int argc, char **argv)
     // with the one-cycle latency the real controller has at its best; there is
     // no point modelling worse, because the engine holds its request until
     // rdata_ready and the transfer is not on any critical path.
+    // SS_LOAD_FILE preloads the savestate slot from a REAL .ss taken off the
+    // hardware, so a restore can be replayed exactly as the board did it. Every
+    // savestate test before this used a blob the bench had just written itself,
+    // from a synthetic save at an arbitrary boot-time cycle -- which is why the
+    // bench passed for hours while the board wedged. PLAN.md 45.
+    //
+    // Main writes the slot verbatim, so the file IS the DDR3 image: byte n of
+    // the file is byte n at the slot base.
     std::vector<uint64_t> ddr(65536, 0);
+    if (const char *lf = getenv("SS_LOAD_FILE")) {
+        FILE *f = fopen(lf, "rb");
+        if (!f) { fprintf(stderr, "SS_LOAD_FILE: cannot open %s\n", lf); return 2; }
+        size_t n = fread(ddr.data(), 1, ddr.size() * 8, f);
+        fclose(f);
+        printf("  SS: preloaded %zu bytes of slot from %s\n", n, lf);
+    }
     dut->ddr_rdata       = 0;
     dut->ddr_busy        = 0;
     dut->ddr_rdata_ready = 0;
@@ -493,7 +508,9 @@ int main(int argc, char **argv)
                 printf("  SS: save asked for at cycle %llu, CS=%04X EIP=%08X\n",
                        (unsigned long long)cyc, dut->p_cs, dut->p_eip);
             }
-            if (ss_restore_at && ss_done && rs_count < ss_reloads
+            // With SS_LOAD_FILE the slot is already populated, so a restore no
+            // longer has to be preceded by a save in the same run.
+            if (ss_restore_at && (ss_done || getenv("SS_LOAD_FILE")) && rs_count < ss_reloads
                 && cyc >= (rs_count ? rs_next : ss_restore_at)
                 && !dut->p_ss_busy) {
                 rs_count++;

@@ -10442,3 +10442,150 @@ no amount of staring at it would have found this.
 
 `SS_RELOADS` exists now (1d6b04e) so the bench can at least express the shape,
 even though it does not reproduce it.
+
+## 45. The rapid-reload lockup: what is known, what is not (2026-08-22)
+
+Unfinished. This section is the handoff, written at the point work stopped.
+
+44 was wrong, and so were 43 and everything before it. What follows separates
+what has been MEASURED from what is merely plausible, because tonight produced a
+lot of the second kind and shipped four fixes off the back of it.
+
+### 45.1 The symptom
+
+Rapid repeated LOADS wedge the board. Save during ATTRACT and 10+ reloads are
+clean; save during ACTIVE GAMEPLAY and it wedges within about three. That split
+is the user's observation and it is the single most useful fact in this section:
+whatever it is, it needs state the game only has when it is being played.
+
+There are TWO distinct modes, also the user's observation:
+
+    mode A   music KEEPS PLAYING, picture frozen, NO overlay
+             -> spi_ss is IDLE, the restore COMPLETED, the 386 is executing
+                rubbish. A corruption, not a deadlock.
+    mode B   sound STOPS, overlay appears
+             -> spi_ss stuck in S_ASK with pause held. A deadlock.
+
+Mode A appears first, then a further reload produces mode B.
+
+### 45.2 The instrument that finally said something: an on-screen overlay
+
+No probe survives on hardware since 35 deleted the JTAG modules, so `spi_top`
+paints the savestate's state across the top of the picture when an operation
+stays busy past 2^23 clk_sys cycles (~146 ms, four times the longest real one).
+`tools/savestate-debug/read_wedge.sh` screenshots the board and decodes it; the
+decoder was validated against a HEALTHY core first, and correctly said "not
+wedged".
+
+Read off the board, wedged, in mode B:
+
+    spi_ss = S_ASK   is_load=1  pause=1
+    io_stall=0  z80dl_stall=0  ds_stall=0      <- NOTHING stalled
+    snapshot=0  in_stub=0
+
+**That one reading invalidated every theory before it.** It is not a stall. The
+DS2404 swallowing a request (43), DDR3 contention from screen_rotate, the load's
+pause window (44) -- all aimed at a hang that is not happening.
+
+Build the overlay FIRST next time. 43.1 already said this about simulation and it
+still took four more builds to apply it to hardware.
+
+### 45.3 The bisect
+
+    233d7fc (before 40.3)   10+ reloads   CLEAN
+    1323975 (40.3)          ~3 reloads    wedges
+    4da63a7e (41)           ~3            wedges
+    e4037a48 (43)           ~3            wedges
+    861db700 (44 + retry)   ~10           wedges, but LATER
+
+40.3 introduced it. The A/B against 4da63a7e also exonerated the raster change
+and rotate contention at a stroke: that build freezes the raster, so rotate is
+idle during a transfer, and it wedges anyway.
+
+### 45.4 What is fixed, and it is real but partial
+
+`SS_NMI` drops `ss_nmi` after sixteen cycles whether or not the 386 took it, and
+`ss_hold` is set ONLY by recognising the stub's marker write. A missed or
+deferred NMI therefore parks spi_cpu in SS_RUN forever: `ss_snapshot` never
+rises, spi_ss waits in S_ASK for it, and every LATER operation hangs because
+SS_IDLE is never reached to latch the next request. One poisoned operation wedges
+all of them, which is why it is never the first reload.
+
+SS_RUN now re-offers the NMI after 2^23 clk_cpu cycles, via SS_INVAL so the
+gate's cache line is evicted again first. **Measured effect: 3 -> ~10 reloads.**
+Real, and not sufficient.
+
+### 45.5 What is in the tree UNVALIDATED, and must not be trusted
+
+Uncommitted at the time of writing, in `rtl/spi_cpu.sv`, `rtl/spi_ss.sv`,
+`rtl/spi_top.sv`:
+
+* `spi_cpu` exports `ss_idle`, and spi_ss's S_ARM and S_SETTLE wait for it. The
+  reasoning: `!cpu_snapshot && !cpu_in_stub` reads READY while spi_cpu sits in
+  SS_RUN, so spi_ss asked a CPU that could not answer. The reasoning is sound and
+  the fix is UNTESTED ON HARDWARE.
+* `ss_idle` also requires `!ss_eip_in_stub && !ss_in_stub_d`, evaluated in
+  clk_cpu, because a guard built from a registered `ss_in_stub` sampled in
+  clk_sys races. Also UNTESTED.
+
+Neither changed the replay's outcome (45.6), which is either because they are
+wrong or because the replay is.
+
+### 45.6 The replay harness -- NEW, and NOT VALIDATED
+
+`SS_LOAD_FILE=<file.ss>` preloads the DDR3 slot from a real savestate taken off
+the hardware, and a restore no longer needs a save earlier in the same run. This
+closes the biggest hole in the test setup: **every savestate test before it used
+a blob the bench had just written itself, from a synthetic save at an arbitrary
+boot-time cycle on rdft2.** Nothing ever exercised a real in-game save. That is
+why the bench passed for hours while the board wedged.
+
+Replaying the user's in-game rdft save (`ingame.ss`, 312,544 bytes) reports:
+
+    load 1  EIP=0026BA5D          ok
+    load 2  EIP=00040049
+    load 3  CS=0000 EIP=00009A80  <- the 386 is lost
+    first EIPs after load: 00040042 43 48 49 4A 4B 00009A80
+    restore: FAILED
+
+which LOOKS exactly like mode A: the stub runs and then irets to a garbage
+segment. **But the harness has not been validated.** Replaying a hardware blob
+into an independently-booted simulation may not be sound at all, and the "load
+asked at EIP=00040049" line prints where the CPU was when the BENCH asserted
+ss_load, not where spi_ss accepted it -- it is not by itself evidence of a guard
+failing, and it was over-read once already.
+
+**Do this before anything else: replay an ATTRACT-mode save, which the hardware
+restores fine. If that fails too, the harness is broken and 45.6 says nothing.**
+
+### 45.7 State at handoff
+
+    branch savestate-phase0, HEAD f240b93, four files uncommitted (45.5)
+    on the board: 861db700 = 44 + the NMI retry + the overlay. Wedges at ~10.
+    a fit was in flight for the interlock and is STALE -- it predates 45.5's
+    ss_idle change. Do not deploy it.
+
+    tools/savestate-debug/  rdft-ingame-wedges.ss  the failing in-game save
+                            read_wedge.sh          screenshot + decode the overlay
+                            README.md              how to use both, and the caveat
+
+    The SDRAM images are not kept -- rebuild with
+    `python3 tools/build_sdram_image.py <set>.zip out.bin --upd --set <set>`
+    from the zips on the MiSTer at /media/fat/games/mame/.
+
+Backups of every build tonight are on the MiSTer as
+`/media/fat/_Arcade/cores/SeibuSPI.rbf.20260821-*` and `-20260822-*`;
+`c1d99fef` (233d7fc, the last CLEAN one) is `.20260822-0022`.
+
+### 45.8 The lesson, again
+
+Three mechanisms reasoned from source, all confident, all wrong: a DS2404 copy
+drain, `ss_dbg_state`=3 read as spi_ss's state when the probe is spi_cpu's, and
+DDR3 contention from a rotate that was not even running on the build that failed.
+Plus a backpressure model that wedged at one busy tick in sixteen and briefly
+looked like a finding.
+
+Every real step came from measurement: the `ss_dbg_stalls` probe (43), the
+hardware bisect (44), the overlay (45.2), and the user's attract-vs-gameplay
+split. The bench passed five back-to-back loads throughout and would never have
+found any of it.

@@ -387,6 +387,7 @@ module spi_top
 		.ss_writes   (ss_writes),
 		.ss_last_wa  (ss_last_wa),
 		.ss_last_wd  (ss_last_wd),
+		.ss_idle           (ss_cpu_idle),
 		.ss_dbg_state      (ss_dbg_state),
 		.ss_dbg_nmi        (ss_dbg_nmi),
 		.ss_dbg_gate_dw0   (ss_dbg_gate_dw0),
@@ -735,6 +736,7 @@ module spi_top
 		.vbl_next        (vbl_next),
 		.pause           (ss_pause),
 		.dbg_st          (ss_dbg_st),
+		.cpu_ss_idle     (ss_cpu_idle),
 		.cpu_in_stub     (ss_in_stub),
 
 		.stream_write    (ss_stream_write),
@@ -1144,6 +1146,7 @@ module spi_top
 	// 8.4 M, about 146 ms -- four times the longest real operation.
 	// ------------------------------------------------------------------
 	wire  [4:0] ss_dbg_st;
+	wire        ss_cpu_idle;
 	reg  [23:0] ss_stuck_cnt;
 	always @(posedge clk_sys) begin
 		if (sys_reset || !ss_busy) ss_stuck_cnt <= 24'd0;

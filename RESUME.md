@@ -12,8 +12,8 @@ Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
 
 It fits and it mostly works:
 
-    ALMs 36,389 (87 %)   RAM blocks 487 (88 %)   registers 35,339
-    setup +0.261   hold +0.243   TNS 0.000, SEED 3, md5 96ab5971
+    setup +0.250   hold +0.116   TNS 0.000, SEED 3, md5 861db700 (on the board)
+    -- and the tree has UNCOMMITTED changes on top of that; see 45.5/45.7
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -88,21 +88,39 @@ usually empty and was a FALSE VERDICT throughout 39. Believe the
 
 Still open, and the list is shorter than it was:
 
-* **The lockup: BISECTED to 40.3, fixed in 44, awaiting the hardware retest.**
-  40.3 did two things and only one was right. Removing the load's arm wait was
-  right (a frame of old state). Asserting `pause` from the request was not: the
-  386 HAS TO RUN between the request and the snapshot, because that is how it
-  reaches the stub, and anything it touches that `pause` has frozen stalls it
-  forever. The fix excludes S_SETTLE and S_ASK from `pause` **on a load only** --
-  a save must keep them, that is 39.3's argument. Hardware bisect:
+* **THE RAPID-RELOAD LOCKUP IS NOT FIXED. This is the top of the list, and
+  `PLAN.md` 45 is the handoff -- read it before touching anything.**
 
-        233d7fc (before 40.3)  10+ reloads CLEAN
-        1323975 (40.3) .. e4037a48 (43)    wedge in ~3
+  Rapid repeated LOADS wedge the board. Save in ATTRACT and 10+ reloads are
+  clean; save in ACTIVE GAMEPLAY and it goes in about three. TWO modes: music
+  still playing with no overlay (spi_ss IDLE, restore completed, the 386 is
+  executing rubbish -- a corruption) and sound stopped with the overlay up
+  (spi_ss stuck in S_ASK -- a deadlock).
 
-  **43's DS2404 fix stays** -- independently correct, one instance of the same
-  fault -- but it is NOT what fixes this, and 43 said it was. That claim came
-  from reproducing save->load when the reported bug was load->load.
-  **The retest of 96ab5971 has not come back yet.**
+  **What the on-screen overlay read, wedged:** `S_ASK, is_load=1, pause=1,
+  snapshot=0, in_stub=0, io_stall=0, z80dl_stall=0, ds_stall=0`. NOTHING is
+  stalled, which invalidated every theory before it. Screenshot and decode it
+  with `tools/savestate-debug/read_wedge.sh` (or rebuild it -- 45.2).
+
+  **Fixed and real but partial:** SS_NMI drops the NMI whether or not the 386
+  took it, and SS_RUN then waits forever for a marker write that never comes,
+  parking spi_cpu so every later operation hangs. SS_RUN re-offers the NMI now.
+  Measured 3 -> ~10 reloads. Not sufficient.
+
+  **In the tree UNCOMMITTED and UNVALIDATED** (45.5): `ss_idle` from spi_cpu, and
+  spi_ss waiting for it in S_ARM/S_SETTLE, with the in-stub test moved into
+  clk_cpu so it cannot race the crossing. Sound reasoning, untested on hardware,
+  and it did NOT change the replay's outcome.
+
+  **NEXT ACTION, before anything else:** `SS_LOAD_FILE=<x.ss>` replays a real
+  savestate off the board (new, 45.6, and the biggest hole it closes is that
+  NOTHING in simulation ever exercised a real in-game save). It reproduces what
+  looks like mode A -- but **the harness itself is unvalidated. Replay an
+  ATTRACT-mode save first, which the hardware restores fine. If that fails too,
+  the harness is broken and its result means nothing.**
+
+  On the board: `861db700`. The last CLEAN build is `c1d99fef` (233d7fc), kept as
+  `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0022`.
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
