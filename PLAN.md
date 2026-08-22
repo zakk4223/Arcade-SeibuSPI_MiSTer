@@ -10909,3 +10909,20 @@ The NOP gap and its ~120-cycle margin are gone; so is 46.8's caveat, which was
 the reason for this section. Nothing here rests on a drain completing in time.
 
 Not yet fitted or on hardware at the time of writing.
+
+### 47.6 The fit
+
+    setup +0.313  clk_ram (spi_ds2404|sptr -> arm)     hold +0.244  (blank_cnt)
+    clk_cpu +0.753   clk_sys +2.252   pll_hdmi +0.455
+    TNS 0.000 on every clock   SEED 3
+    ALMs 36,534 (87 %)   registers 35,488   RBF md5 49668c89
+
+**Better than 46's fit on both edges** (+0.171 / +0.143), which is not the
+direction a change like this usually moves a design -- the NOP gap's 32 bytes of
+window ROM came out and the poll cost about 93 registers net. The one critical
+warning is the ymf271_synth MIF depth (1799 vs 2048) and is benign; it is not
+34's seed tell. The YMF ch5 hold path is clear -- the worst ten hold paths are
+self-loops and framework logic, none of them a clk_ram->clk_sys crossing.
+
+Deployed md5-verified 2026-08-22 04:49. `5bcf8fbe` (46, the margin version, which
+the board did pass) is kept as `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0449`.

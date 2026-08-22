@@ -11,8 +11,8 @@ None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; t
 
 It fits and it mostly works:
 
-    setup +0.171   hold +0.143   TNS 0.000, SEED 3, md5 5bcf8fbe (on the board)
-    -- 46's cache fix IS in this bitstream; it has NOT been played yet
+    setup +0.313   hold +0.244   TNS 0.000, SEED 3, md5 49668c89 (on the board)
+    -- 47's handshake IS in this bitstream; it has NOT been played yet
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -105,11 +105,17 @@ Still open, and the list is shorter than it was:
   cache line in SS_INVAL alongside the gate's, and put 32 bytes of NOP between
   `mov esp, imm32` and `pop esp` so the write buffer has idle to drain in.
 
-  **It is a MARGIN, not a bound, and that is not retired by the board passing**
-  (46.8/46.10). ~120 cycles does not cover a write-buffer drain held off by the
-  video DMA owning the main RAM port. If a wedge ever returns -- especially one
-  that only shows under heavy sprite DMA -- go straight to 46.8's spin loop
-  rather than re-deriving the mechanism.
+  **The margin is GONE -- 47 replaced it with a handshake.** The root defect was
+  that the stub window was never marked uncacheable, while the I/O window beside
+  it always has been; it is declared now, via a second mask/base pair in
+  `l1_cache`/`z386`. And both stubs now POLL a flag (`ss_go = !ss_active`)
+  instead of the freeze relying on a marker write having retired in time. There
+  is no halt to use instead: z386 has no clock enable, and `single_step` sets a
+  `halted` latch that is never cleared -- so `ss_hold` can only ever stop the
+  NEXT memory access, never an instruction already fed by cache or prefetch.
+  A poll read COMPLETES, which is what lets the write buffer drain; a stall
+  deadlocks it (measured twice, 46.5). The SAVE got the poll too, and needed it.
+  `PLAN.md` 47.
 
   **The reproducer is spent.** `tools/savestate-debug/rdft-ingame-wedges.ss`
   replays six clean loads now. Take a FRESH in-game save off the board before
