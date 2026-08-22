@@ -12,7 +12,7 @@ None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; t
 It fits and it mostly works:
 
     setup +0.313   hold +0.244   TNS 0.000, SEED 3, md5 49668c89 (on the board)
-    -- 47's handshake IS in this bitstream; it has NOT been played yet
+    -- 47's handshake IS in this bitstream and STRESS TESTED on hardware
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -87,10 +87,11 @@ usually empty and was a FALSE VERDICT throughout 39. Believe the
 
 Still open, and the list is shorter than it was:
 
-* **THE RAPID-RELOAD LOCKUP IS FIXED, AND CONFIRMED ON HARDWARE**
-  (2026-08-22, `PLAN.md` 46). Saving during active gameplay and reloading
-  rapidly -- the case that wedged in about three, and in about ten after the NMI
-  retry -- now survives. On the board: `5bcf8fbe`, fitted from `9fc9cb4`.
+* **THE RAPID-RELOAD LOCKUP IS FIXED, DETERMINISTICALLY, AND STRESS TESTED ON
+  HARDWARE** (2026-08-22, `PLAN.md` 46 found it and 47 made it structural).
+  Saving during active gameplay and reloading rapidly -- the case that wedged in
+  about three, and about ten after the NMI retry -- now survives with no wedges
+  at all, in both directions. On the board: `49668c89`.
 
   **The cause was a cache hit that skipped the freeze.** The restore stub's
   `pop esp` is the only thing that can stop the 386: `ss_hold` gates

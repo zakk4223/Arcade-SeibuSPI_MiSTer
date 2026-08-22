@@ -10926,3 +10926,28 @@ self-loops and framework logic, none of them a clk_ram->clk_sys crossing.
 
 Deployed md5-verified 2026-08-22 04:49. `5bcf8fbe` (46, the margin version, which
 the board did pass) is kept as `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0449`.
+
+### 47.7 Confirmed on hardware (2026-08-22)
+
+`49668c89` stress tested on the board: **no wedges at all**, across both
+directions. That covers the piece simulation could least vouch for -- the SAVE
+stub changed here for the first time in the whole effort, and a torn save is
+exactly the failure that would not announce itself.
+
+Both fixes are now hardware-confirmed, and it is worth being precise about which
+one was load-bearing, because the two builds say different things:
+
+    5bcf8fbe (46)   margin: uncacheable-by-snoop + a 32-byte NOP gap    passed
+    49668c89 (47)   structural: uncacheable-by-declaration + a poll     passed
+
+46 passing means the mechanism in 46.4 was correctly identified. 47 passing means
+the structural version costs nothing -- it is a better fit on both edges, it
+removes the timing assumption, and it closes the save-side analogue that 46 left
+open. There is no reason to keep 46's approach around except as the fallback
+bitstream, which is what `.20260822-0449` is for.
+
+**Nothing in the savestate path now depends on an event happening in time.** The
+freeze still latches on the marker write, but the CPU can no longer outrun it:
+it cannot pass the poll until the operation has let go, and the poll cannot be
+served stale because the window is declared uncacheable. That was the whole of
+43 through 46.
