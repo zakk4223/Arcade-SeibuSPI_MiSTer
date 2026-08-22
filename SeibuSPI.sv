@@ -207,23 +207,6 @@ localparam CONF_STR = {
 	"R[43],Save state (Alt-F1);",
 	"R[44],Restore state (F1);",
 	"-;",
-	// The `I,` list is what savestate_ui's ss_info indexes into, so the OSD can
-	// say what just happened. Order is fixed by that module.
-	"I,",
-	"Slot=DPAD|Save/Load=Start+DPAD,",
-	"Active Slot 1,",
-	"Active Slot 2,",
-	"Active Slot 3,",
-	"Active Slot 4,",
-	"Save to slot 1,",
-	"Restore slot 1,",
-	"Save to slot 2,",
-	"Restore slot 2,",
-	"Save to slot 3,",
-	"Restore slot 3,",
-	"Save to slot 4,",
-	"Restore slot 4;",
-	"-;",
 	"P1,Video Settings;",
 	"P1O[2:1],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1O[5:3],Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
@@ -255,6 +238,36 @@ localparam CONF_STR = {
 	// clone of rdft in MAME so it sits under _alternatives. This only matters
 	// when the RBF is started directly rather than through an MRA.
 	"DEFMRA,/_Arcade/Raiden Fighters (Germany).mra;",
+	// The `I,` list is what savestate_ui's ss_info indexes into, so the OSD can
+	// say what just happened. Order is fixed by that module.
+	//
+	// IT HAS TO SIT AT THE END, and it used to sit in the middle, between the
+	// savestate items and the Video Settings page. Main counts it as a menu
+	// line: it rendered as a near-blank row between two separators -- easy to
+	// miss among the spacing -- and everything below it was then ONE LINE OUT
+	// OF STEP with its action. Selecting "Video Settings" did nothing and
+	// selecting "Sample Flash" opened Video Settings. PLAN.md 49.
+	//
+	// The first entry is the help text the pad shows, and it is written for
+	// THIS core's wiring: `joySS` is Start and `joyStart` is tied to 0, so
+	// every combination is Start plus a direction. The stock string says
+	// "Slot=DPAD", which is right for a core with a dedicated SS button and
+	// wrong here -- it sent someone looking for a slot-switching bug that did
+	// not exist.
+	"I,",
+	"Slot=Start+LR|Save/Load=Start+DU,",
+	"Active Slot 1,",
+	"Active Slot 2,",
+	"Active Slot 3,",
+	"Active Slot 4,",
+	"Save to slot 1,",
+	"Restore slot 1,",
+	"Save to slot 2,",
+	"Restore slot 2,",
+	"Save to slot 3,",
+	"Restore slot 3,",
+	"Save to slot 4,",
+	"Restore slot 4;",
 	"V,v",`BUILD_DATE
 };
 

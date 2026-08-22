@@ -10951,3 +10951,65 @@ freeze still latches on the marker write, but the CPU can no longer outrun it:
 it cannot pass the poll until the operation has let go, and the poll cannot be
 served stale because the window is declared uncacheable. That was the whole of
 43 through 46.
+
+## 49. The OSD menu was one line out of step, and the info list was why (2026-08-22)
+
+Every savestate checklist item in `tools/savestate-debug/HARDWARE-SESSION.md`
+section A passed on the board. The session found something else: **every menu
+entry below the savestate block did the job of the one above it.** Selecting
+"Video Settings" did nothing; selecting "Sample Flash" opened Video Settings.
+
+### 49.1 The cause
+
+`CONF_STR` split into fields the way Main splits it:
+
+    7   -
+    8   I,Slot=DPAD|Save/Load=Start+DPAD,Active Slot 1,...
+    9   -
+    10  P1,Video Settings
+
+**Main counts the `I,` list as a menu line.** It sat in the MIDDLE of the menu,
+between the savestate items and the Video Settings page, with a separator on
+each side -- so it rendered as a near-blank row between two other near-blank
+rows, which reads as slightly wider spacing rather than as an extra entry.
+Everything below it was then one line out of step with its action.
+
+Nothing about the field itself was malformed. It is `I,` + thirteen
+comma-separated entries + `;`, which is the correct form. **The defect was
+purely its POSITION**, and it is the reason this core misbehaved where every
+other one does not: the convention is to put the list at the end, and this core
+put it where it was thematically relevant instead -- next to the savestate items
+it describes.
+
+### 49.2 The fix
+
+Moved to the end of `CONF_STR`, immediately before `V,v`. The doubled separator
+that was left behind collapses to one.
+
+**The entry order and count are untouched** -- thirteen, with the help text still
+at index 1 -- because `savestate_ui` indexes this list BY POSITION and
+`ss_info <= 7'd1` is the help. Reordering it would have swapped every message
+the OSD shows for a savestate action.
+
+### 49.3 And the help text, which was wrong for this core
+
+Fixed in the same field, where it cannot affect the parse:
+
+    was   Slot=DPAD|Save/Load=Start+DPAD
+    now   Slot=Start+LR|Save/Load=Start+DU
+
+The stock string is right for a core with a dedicated SS button. Here `joySS` is
+wired to Start and `joyStart` is tied to 0, so every combination is Start plus a
+direction and **bare DPAD does nothing**. The old text sent someone looking for a
+slot-switching bug that did not exist, which is why writing the hardware
+checklist started by reading the RTL rather than the screen.
+
+### 49.4 What is NOT yet known
+
+`make map` passes. **This has not been fitted or seen on hardware.** The change
+is to a string, so it cannot move timing, but the menu being right is a hardware
+observation and nothing here has made it yet.
+
+If the off-by-one survives, the next thing to look at is the count of near-blank
+rows around the savestate block on screen: the theory above predicts exactly one
+fewer of them after this change.
