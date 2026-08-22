@@ -57,7 +57,8 @@ def run(bench, sdram, steps, setname, env_extra, cwd):
     env.update({k: str(v) for k, v in env_extra.items()})
     p = subprocess.run([bench, sdram, str(steps), setname],
                        capture_output=True, text=True, env=env, cwd=cwd)
-    return p.stdout
+    # rc 1 is the bench's own download check, not a failure of the run.
+    return p.stdout, p.returncode
 
 
 def read_u32(path):
@@ -183,11 +184,21 @@ def main():
         # SS_TRAIL's anchor is only assigned inside the hash block, so
         # SS_HASH_AFTER has to be set as well or the trail comes back empty.
         common = {"SS_AT": sp, "SS_HASH_AFTER": 200000}
-        out_a = run(bench, sdram, steps, args.setname,
-                    {**common, "SS_TRAIL": ta, "SS_IORD": ia}, cwd)
-        out_b = run(bench, sdram, steps, args.setname,
-                    {**common, "SS_TRAIL": tb, "SS_IORD": ib,
-                     "SS_RESTORE_AT": rp, "SS_RELOADS": 1}, cwd)
+        out_a, rc_a = run(bench, sdram, steps, args.setname,
+                          {**common, "SS_TRAIL": ta, "SS_IORD": ia}, cwd)
+        out_b, rc_b = run(bench, sdram, steps, args.setname,
+                          {**common, "SS_TRAIL": tb, "SS_IORD": ib,
+                           "SS_RESTORE_AT": rp, "SS_RELOADS": 1}, cwd)
+
+        # A CRASH IS NOT A DATA CONDITION. A SIGSEGV kills the run before it
+        # writes SS_TRAIL, which looks exactly like an empty trail -- and 18 of
+        # the first sweep's 96 points were written off that way before the
+        # cause was found. Say which it is. (PLAN.md 48)
+        if rc_a not in (0, 1) or rc_b not in (0, 1):
+            print("%-11d  the bench CRASHED (rc %d / %d) -- point refused"
+                  % (sp, rc_a, rc_b))
+            tally["refused"] += 1
+            continue
 
         # THE OFFSET TRAP. Refuse rather than report a number about a different
         # experiment than the one asked for.

@@ -1123,20 +1123,39 @@ int main(int argc, char **argv)
         // Walk the section records the way util/dump_pgmstate.py does, so the
         // stream can be checked against what the sections claim to hold.
         printf("sections:\n");
-        uint32_t w = 1;
+        // `w` MUST be bounds-checked, and the arithmetic done in 64 bits.
+        // A section header that is not one -- which is what the "?" line below
+        // prints -- carries a garbage count, and `w += 1 + payload` then walks
+        // far off the end of a 65,536-entry vector. Whether that faults depends
+        // on what happens to be mapped after it, so it is INTERMITTENT: the
+        // same save point crashes in one run and not the next. It voided 18 of
+        // 96 points of the first sweep as "empty trail" before it was found,
+        // because a SIGSEGV here kills the run before it writes SS_TRAIL.
+        // PLAN.md 48.
+        uint64_t w = 1;
         for (int guard = 0; guard < 32; guard++) {
+            if (w >= ddr.size()) {
+                printf("    walked past the end of the slot at dword %llu -- "
+                       "the section list is not intact\n",
+                       (unsigned long long)w);
+                break;
+            }
             uint64_t hdr = ddr[w];
-            if ((hdr >> 56) == 0xFF) { printf("    terminator at dword %u\n", w); break; }
+            if ((hdr >> 56) == 0xFF) {
+                printf("    terminator at dword %llu\n",
+                       (unsigned long long)w);
+                break;
+            }
             uint32_t cnt   = (uint32_t)(hdr & 0xFFFFFFFFu);
             uint32_t wcode = (uint32_t)((hdr >> 32) & 3);
             uint32_t idx   = (uint32_t)((hdr >> 56) & 0x1F);
             static const char *nm[] = {"GLOBAL","MAIN_RAM","TILEMAP","PALETTE",
                                        "SPRITE"};
             static const int bytes[] = {1,2,4,8};
-            uint32_t payload = (cnt * bytes[wcode] + 7) / 8;
-            printf("    %-9s idx=%u count=%-6u width=%d-bit  %u payload "
+            uint64_t payload = ((uint64_t)cnt * bytes[wcode] + 7) / 8;
+            printf("    %-9s idx=%u count=%-6u width=%d-bit  %llu payload "
                    "dwords\n", idx < 5 ? nm[idx] : "?", idx, cnt,
-                   bytes[wcode] * 8, payload);
+                   bytes[wcode] * 8, (unsigned long long)payload);
             w += 1 + payload;
         }
     }
