@@ -34,3 +34,8 @@ tools/__pycache__/
 
 # Generated from MAME by tools/gen_ref_c.py; the Makefile rebuilds it.
 sim/spi_ref.h
+
+# Savestates. A .ss carries the 386's 256 KB of main RAM -- live game state --
+# so it does not belong in a public repo. Keep them locally; PLAN.md 45 and 50
+# describe the one this project debugged with.
+*.ss

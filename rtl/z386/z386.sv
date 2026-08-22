@@ -22,7 +22,10 @@ module z386
     // Uncacheable data window, (addr & MASK) == BASE. Defaults to the PC VGA
     // aperture at A0000-BFFFF. -- SeibuSPI
     parameter [31:0] DCACHE_UNCACHED_MASK = 32'hFFFE_0000,
-    parameter [31:0] DCACHE_UNCACHED_BASE = 32'h000A_0000
+    parameter [31:0] DCACHE_UNCACHED_BASE = 32'h000A_0000,
+    // A second uncacheable window; defaults to matching nothing. -- SeibuSPI
+    parameter [31:0] DCACHE_UNCACHED2_MASK = 32'hFFFF_FFFF,
+    parameter [31:0] DCACHE_UNCACHED2_BASE = 32'hFFFF_FFFE
 )
 (
     input              clk,
@@ -57,6 +60,18 @@ module z386
     output     [15:0]  dbg_CS,
     output     [31:0]  dbg_EIP,
     output     [31:0]  dbg_CS_base,
+    // -- SeibuSPI: the IDT's base and limit, so the board can overlay one
+    //    interrupt gate while a savestate is being taken. Read-only taps on
+    //    the descriptor cache; nothing else about the core changes.
+    output     [31:0]  dbg_IDT_base,
+    output     [19:0]  dbg_IDT_limit,
+    output     [31:0]  dbg_CR0,
+    // SS's descriptor cache, so the board can tell whether an address it wants
+    // the savestate stub to read is inside the stack segment at all.
+    output     [31:0]  dbg_SS_base,
+    output     [19:0]  dbg_SS_limit,
+    output      [3:0]  dbg_SS_type,
+    output             dbg_SS_G,
     output             dbg_pe,
     output             dbg_vm,
 
@@ -153,6 +168,13 @@ wire       vm = EFLAGS[17];         // Virtual 8086 mode
 assign dbg_CS  = CS;
 assign dbg_EIP = EIP;
 assign dbg_CS_base = CS_base;
+assign dbg_IDT_base  = seg_cache[SEG_IDT].base;
+assign dbg_IDT_limit = seg_cache[SEG_IDT].limit;
+assign dbg_CR0       = CR0;
+assign dbg_SS_base   = seg_cache[SEG_SS].base;
+assign dbg_SS_limit  = seg_cache[SEG_SS].limit;
+assign dbg_SS_type   = seg_cache[SEG_SS].seg_type;
+assign dbg_SS_G      = seg_cache[SEG_SS].G;
 assign dbg_pe  = pe;
 assign dbg_vm  = vm;
 wire [1:0] cpl = vm ? 2'd3 : !pe ? 2'd0 : CS[1:0];
@@ -817,7 +839,9 @@ l1_cache #(
     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
     .SET_BITS(DCACHE_SET_BITS),
     .UNCACHED_MASK(DCACHE_UNCACHED_MASK),
-    .UNCACHED_BASE(DCACHE_UNCACHED_BASE)
+    .UNCACHED_BASE(DCACHE_UNCACHED_BASE),
+    .UNCACHED2_MASK(DCACHE_UNCACHED2_MASK),
+    .UNCACHED2_BASE(DCACHE_UNCACHED2_BASE)
 ) dcache_inst (
     .clk(clk),
     .reset(!reset_n),

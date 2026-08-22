@@ -60,6 +60,7 @@ obj_dir/Vtb_ymf_top: $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/ymf271_table
                  $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv $(RTL)/spi_defs.vh tb_ymf_top.sv \
                  tb_ymf271.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module tb_ymf_top tb_ymf_top.sv \
+	    $(RTL)/system_consts.sv $(RTL)/savestates.sv \
 	    $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv \
 	    tb_ymf271.cpp
 
@@ -258,13 +259,30 @@ Z386_SRCS := $(RTL)/z386/z386_pkg.sv $(RTL)/z386/z386.sv $(RTL)/z386/l1_cache.sv
              $(RTL)/z386/protection.sv $(RTL)/z386/segmentation_unit.sv \
              $(RTL)/z386/ucode_rom.sv
 
-# T80s.sv here is the Verilator stand-in; Quartus builds the VHDL core instead.
-SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv T80s.sv
+# tv80 replaced T80 for savestates (PLAN.md 40), and it is Verilog -- so the
+# simulator now runs the REAL Z80 instead of the stand-in T80s.sv that stood in
+# for a VHDL core it could not read. sim/T80s.sv is kept for reference; nothing
+# builds it any more.
+SOUND_SRCS := $(RTL)/spi_sound.sv $(RTL)/ymf271.sv $(RTL)/ymf271_synth.sv \
+              $(RTL)/tv80_auto_ss.sv
 
-CORE_SRCS := $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RTL)/spi_snd_window.sv \
+# The savestate framework. system_consts.sv first (it is the package) and
+# savestates.sv next (it declares the interface the slaves take as a port).
+SS_SRCS := $(RTL)/system_consts.sv $(RTL)/savestates.sv $(RTL)/memory_stream.sv \
+           $(RTL)/ddram.sv $(RTL)/spi_ss.sv $(RTL)/spi_ss_bridge.sv \
+           $(RTL)/spi_ss_vram.sv
+
+# spi_ds2404.sv belongs here even though Verilator finds it under -I$(RTL)
+# anyway: without it in the list make never rebuilds a bench when the chip
+# changes. That cost a whole diagnostic round -- a fix to the RTC was applied,
+# the bench was re-run, and it reported the OLD behaviour with make saying
+# "up to date". Same silent-staleness family as the three benches that had
+# stopped building (PLAN.md 21.6, 22.3, 28).
+CORE_SRCS := $(SS_SRCS) $(RTL)/spi_top.sv $(RTL)/spi_video_timing.sv $(RTL)/spi_cpu.sv $(RTL)/spi_snd_window.sv \
              $(RTL)/spi_io.sv $(RTL)/spi_mainram.sv $(RTL)/spi_reset_sync.sv \
              $(RTL)/spi_dpram.sv $(RTL)/spi_dma.sv $(RTL)/spi_layers.sv \
              $(RTL)/spi_mixer.sv $(RTL)/spi_tile_decrypt.sv \
+             $(RTL)/spi_ds2404.sv \
              $(RTL)/seibu_partial_add.sv $(SOUND_SRCS)
 
 lint: lint-derive

@@ -4,3 +4,17 @@ lint_off -rule TIMESCALEMOD
 lint_off -file "*sdram.sv"
 lint_off -file "*z386/*"
 lint_off -file "*sys/*"
+
+// The savestate framework, vendored from Arcade-IGSPGM_MiSTer. Same treatment
+// as z386 and sdram.sv above: kept close to upstream so it can be diffed
+// against it, which means its lint is upstream's problem and not ours. The
+// noise is real but benign -- DECLFILENAME on every interface, UNUSEDSIGNAL on
+// the half of ssbus_if a given instance does not drive, UNUSEDPARAM on the
+// section indices at levels that do not reference them.
+lint_off -file "*savestates.sv"
+lint_off -file "*memory_stream.sv"
+lint_off -file "*savestate_ui.sv"
+lint_off -file "*ddram.sv"
+lint_off -file "*system_consts.sv"
+lint_off -file "*ss_ram.sv"
+lint_off -file "*tv80*"

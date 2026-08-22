@@ -1,0 +1,45 @@
+# The savestate's read-only taps on z386, on top of the vendored core as it
+# already stands in this tree (see z386-uncached-window.patch for the other
+# local change). Six outputs, no logic altered:
+#
+#   dbg_IDT_base/limit  the board overlays one interrupt gate there
+#   dbg_CR0             so a save can refuse a machine not yet in protected mode
+#   dbg_SS_*            so it can tell whether an address the restore stub is
+#                       about to read is inside the stack segment at all
+#
+# diff -u rtl/z386/z386.sv.orig rtl/z386/z386.sv
+--- rtl/z386/z386.sv.orig	2026-08-20 00:49:47.692692011 -0400
++++ rtl/z386/z386.sv	2026-08-20 02:53:11.607304030 -0400
+@@ -57,6 +57,18 @@
+     output     [15:0]  dbg_CS,
+     output     [31:0]  dbg_EIP,
+     output     [31:0]  dbg_CS_base,
++    // -- SeibuSPI: the IDT's base and limit, so the board can overlay one
++    //    interrupt gate while a savestate is being taken. Read-only taps on
++    //    the descriptor cache; nothing else about the core changes.
++    output     [31:0]  dbg_IDT_base,
++    output     [19:0]  dbg_IDT_limit,
++    output     [31:0]  dbg_CR0,
++    // SS's descriptor cache, so the board can tell whether an address it wants
++    // the savestate stub to read is inside the stack segment at all.
++    output     [31:0]  dbg_SS_base,
++    output     [19:0]  dbg_SS_limit,
++    output      [3:0]  dbg_SS_type,
++    output             dbg_SS_G,
+     output             dbg_pe,
+     output             dbg_vm,
+ 
+@@ -153,6 +165,13 @@
+ assign dbg_CS  = CS;
+ assign dbg_EIP = EIP;
+ assign dbg_CS_base = CS_base;
++assign dbg_IDT_base  = seg_cache[SEG_IDT].base;
++assign dbg_IDT_limit = seg_cache[SEG_IDT].limit;
++assign dbg_CR0       = CR0;
++assign dbg_SS_base   = seg_cache[SEG_SS].base;
++assign dbg_SS_limit  = seg_cache[SEG_SS].limit;
++assign dbg_SS_type   = seg_cache[SEG_SS].seg_type;
++assign dbg_SS_G      = seg_cache[SEG_SS].G;
+ assign dbg_pe  = pe;
+ assign dbg_vm  = vm;
+ wire [1:0] cpl = vm ? 2'd3 : !pe ? 2'd0 : CS[1:0];

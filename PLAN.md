@@ -9312,3 +9312,1833 @@ entirely, the worst hold now being Cart copy's own `blank_cnt` at +0.244.
 
 **Cold is the only measurement that counts from here.** A warm rebuild answers
 "does this placement still hold", which is not the question a release asks.
+
+## 38. Save states, phase 0: the 386 spills its own state (2026-08-20)
+
+`README.md` has listed savestates as "maybe (core is kinda full, but mayyyyyybe)"
+since the beginning. This is the spike that answered whether the "core is kinda
+full" half is the real obstacle. It is not. The 386 is.
+
+Three facts set the shape of the whole problem, and two of them are good news:
+
+* **The HPS side already works for arcade cores.** `Main_MiSTer/user_io.cpp:1554`
+  is `if (xml && isXmlName(xml) == 1) { arcade_send_rom(xml); if (ss_base)
+  process_ss(xml); }` -- an MRA-loaded core gets savestate handling exactly like a
+  ROM-loaded one. The declaration is an `SS<base>:<size>` token in the CONF_STR's
+  second field, the core writes the blob into DDR3 itself, and Main polls a
+  generation counter in its first dword. **Nothing in Main needs changing.**
+* **Almost none of this core's state is in SDRAM.** SDRAM holds ROMs. The one
+  mutable region is the 2 MB sample flash, and sections 23 and 24 already
+  established that it is derivable from the SDRAM image alone and is rebuilt in
+  0.3 s at every boot -- which is exactly why 32 decided the save file keeps four
+  bytes of stamp rather than two megabytes. The same argument keeps it out of the
+  blob. So the blob is ~305 KB of BRAM and a few hundred bytes of registers.
+* **The 386 is 10,707 flops of vendored, pipelined SystemVerilog.** Instrumenting
+  it would cost more fabric than 81%-full leaves and would fork nand2mario's
+  source. That is the whole difficulty.
+
+The reference cores worth copying are `Arcade-IGSPGM_MiSTer` and
+`Arcade-TaitoF2_MiSTer` -- both carry `SS3E000000:...` and both use wickerwaka's
+`ssbus` framework, not Robert Peip's `SS_BUS`. Irem M72 and M92, which were the
+other cores looked at, have no savestates at all: M72's `rtl/v30/*_savestates.vhd`
+is Peip-style code inherited unused from WonderSwan, its bus tied off in `m72.v`.
+
+### 38.1 The CPU is never instrumented -- it is asked to write itself out
+
+PGM and TaitoF2 both refuse to instrument their 68000s. They inject an interrupt,
+overlay a hand-assembled handler, and let the CPU push its own registers into work
+RAM, which the blob carries anyway. `fx68k_auto_ss.sv` has a rule in PGM's
+Makefile and the file is not checked in -- the attempt was abandoned in favour of
+exactly this.
+
+The same trick applies here, with one difference that looked like it would dominate
+the work: a 68000 takes its vector from a fixed low address, and **this 386 runs in
+protected mode with a GDT the game builds** -- 13 recorded it reaching CS=0018 on
+hardware. So the entry gate is wherever the boot code put the IDT, which the
+hardware does not know.
+
+**Entry is NMI.** `spi_cpu.sv` had `.nmi(1'b0)` tied off since the core was
+written. NMI is vector 2; the games do not use it; it cannot be masked by a game
+sitting in a `cli`/`sti` critical section; and z386 takes it at an instruction
+boundary (`nmi_accept_boundary`), which is the quiesce a snapshot needs and comes
+free.
+
+**The gate is overlaid, not written.** `z386.sv` gains three read-only outputs --
+`dbg_IDT_base`, `dbg_IDT_limit`, `dbg_CR0`, taps on `seg_cache[SEG_IDT]` and `CR0`
+that alter no logic -- and `spi_cpu` substitutes a synthetic 32-bit interrupt gate
+on the main-RAM read path at `IDT_base + 16`. The gate's selector is the CS the
+game is already running under, so the game's own GDT describes it and no GDT
+overlay is needed. The game's IDT is never written to.
+
+### 38.2 What the hardware measured, and why the stub is three instructions
+
+The plan going in budgeted about a hundred bytes of hand-assembled x86 each way:
+`sgdt`/`sidt`/`sldt`/`str`, the control registers, a scratch window to put them
+in, and on the restore side a real-mode stub that reloads GDTR and IDTR, sets
+CR0.PE and far-jumps back into 32-bit protected mode. None of that exists. Three
+measurements removed it, and all three agree across rdfts, rdft2 and rfjet:
+
+    CS base = 00000000        flat
+    CR0     = 00000011        PE=1, ET=1, and PG=0 -- PAGING IS OFF
+    IDT     = base 00000900, limit 00110, written ONCE at cycle 6486, never moved
+
+* **Paging off means linear equals physical.** The overlaid gate can carry a raw
+  physical address as its offset and the stub needs no page tables.
+* **The IDT is in main RAM**, below 0x40000, so it is inside the blob.
+* **A restore therefore never leaves protected mode.** GDTR, IDTR and CR0 are set
+  once at boot and never move; main RAM carries the GDT and the IDT and is
+  restored wholesale. Between any two points in one game's run those registers are
+  already identical, so there is nothing to reload -- no reset, no `lgdt`/`lidt`,
+  no CR0 juggling, no real-mode stub. The one state this cannot express is one
+  saved BEFORE protected-mode entry, and `dbg_CR0` is exposed so the save side can
+  refuse it.
+
+What is left, in a ROM the hardware serves at 0x0004_0000 -- 1 KB immediately
+above main RAM, below PRG ROM at 0x200000, in a hole nothing on the board decodes:
+
+    save, at 0x00:                      restore, at 0x40:
+      60        pushad                    89 E0     mov  eax, esp
+      89 E0     mov  eax, esp             50        push eax
+      50        push eax                  BC imm32  mov  esp, <saved ESP + 4>
+      83 C4 04  add  esp, 4               61        popad
+      61        popad                     CF        iret
+      CF        iret
+
+**The frame goes on the game's own stack**, which is main RAM and is in the blob
+regardless. That is what removes the scratch window, and with it the problem that
+made the scratch window unworkable: a `mov [scratch], esp` needs a data segment,
+and at NMI time DS is whatever the game left it as. Pushes need only SS, which is
+valid by definition.
+
+**`mov eax,esp` / `push eax` is a self-identifying marker.** It is the only write
+whose stored VALUE is its own destination ADDRESS plus four. The hardware
+recognises it by that shape rather than by counting writes, so the stub can grow
+without the hardware being told, and the single write pins down both ESP and the
+SS base. Recognising it is also the freeze: `ss_hold` gates `mem_accept`, the same
+way the DMA hold and `io_stall` already do, so no further memory cycle retires and
+the blob is streamed out of a RAM that is provably still.
+
+The measured frame, rdfts, save at cycle 800,000 (ESP 0x0003FFA4 upward):
+
+    0003FFA4  0003FFA8   the marker
+    0003FFA8  0003FFFC   EDI          pushad pushes EAX first, so this reads
+    0003FFAC  002001A2   ESI          upwards as EDI..EAX
+    0003FFB0  00000000   EBP
+    0003FFB4  0003FFC8   ESP          <-- and this is the check that matters
+    0003FFB8  00000018   EBX
+    0003FFBC  00000002   EDX
+    0003FFC0  00000000   ECX
+    0003FFC4  00000000   EAX
+    0003FFC8  0026D781   EIP          pushed by the interrupt itself
+    0003FFCC  00000018   CS
+    0003FFD0  00000293   EFLAGS       IF set, which is what a running game has
+
+`pushad` stores ESP as it was BEFORE `pushad`, which is after the interrupt's own
+three pushes. The interrupt frame occupies 0x3FFC8..0x3FFD3, so that slot must
+read 0x0003FFC8, and it does. Twelve writes: three from the interrupt, eight from
+`pushad`, one marker.
+
+### 38.3 The order of the restore, which cost a debugging round
+
+The first restore wrote the blob back and THEN offered the NMI. It failed, and the
+reason is worth keeping: the NMI pushes EFLAGS, CS and EIP at the game's LIVE ESP,
+which at restore time is within a few words of where the saved frame sits -- in the
+run that found it, the game was at 0x26D789 with its stack at 0x3FFD4 and the
+frame at 0x3FFA4..0x3FFD3. The interrupt's three pushes land on top of the frame
+that was just restored and quietly wreck it.
+
+So the restore stub carries the same marker as the save stub and freezes on it, and
+**memory is written back after the interrupt has pushed, not before.** Both
+directions are then one path through the same state machine
+(`SS_IDLE / SS_INVAL / SS_NMI / SS_RUN`), differing only in which stub the gate
+points at.
+
+A second bug in the same area, and this one was in the testbench rather than the
+RTL, which is the more dangerous place for it: `ss_ram_own` was re-asserted after
+the release and never dropped, so the CPU stayed frozen for the rest of the run.
+That looks EXACTLY like a savestate that fails to resume -- the machine stops, the
+frame goes black, the DMA counters stop -- and it was diagnosed as an RTL failure
+for a while. The tell was that `in_stub` never fell. It is a state machine now.
+
+Two more things the hardware has to do, neither obvious:
+
+**Evict the gate's cache line before offering the NMI.** The gate is a data read
+from main RAM, the game built the IDT, so that line is very likely in the L1 data
+cache -- and a cached read bypasses the overlay entirely, sending the CPU into
+whatever the game's real vector 2 points at. z386's `snoop_addr`/`snoop_valid`
+port, tied to zero since the core was written, is exactly the mechanism: one pulse
+invalidates a set. The state machine pulses it and waits eight cycles before
+raising NMI.
+
+**Invalidate everything after a restore rewrites memory underneath the CPU.** Both
+L1s see the same snoop and there are 256 sets, so 256 pulses retire the lot. That
+is sufficient rather than lucky: the data cache is WRITE-THROUGH with an in-order
+store queue (`l1_cache.sv:116`), so neither cache ever holds anything that is not
+also in RAM, and the TLB is a cache of page tables with paging off. None of it is
+state; all of it is invalidatable. The prefetch queue is flushed by the `iret`.
+
+### 38.4 Memory moves through the CPU's own port
+
+No memory gains a port. `spi_mainram.sv`'s header already records what happens if
+one tries: made truly dual-ported, Quartus duplicated all four byte lanes, took
+the array from 2 Mbit to 4 and blew the M10K budget outright. The savestate is
+muxed onto the port the CPU normally drives -- `ss_ram_own ? ss_ram_addr : dma_own
+? dma_addr : ram_addr` -- which is safe precisely because the CPU is frozen, and
+is `ram_ss_adaptor`'s pattern from PGM. `spi_dpram` needs nothing new either: it
+already has a write port for the DMA side and a read port for the video side, so
+both directions exist.
+
+### 38.5 What was measured, and what it does not prove
+
+Driven from `sim/tb_boot.cpp` by four environment variables, all default off so
+every existing use of the boot bench is byte-identical to before: `SS_AT`,
+`SS_RESTORE_AT`, `SS_HASH_AFTER`, `SS_VERIFY_AFTER`. Main RAM is readable from the
+bench through a `peek` window on `spi_mainram`'s byte lanes.
+
+**Latency.** 160 cycles from request to stub entry on all three sets. The bench
+counts clk_sys, so that is 2.8 us. But NMI is taken at an instruction boundary,
+and offered during a long boot-time operation -- with EIP parked at 0x00200060,
+so a string instruction or an init loop -- it waited **2.4 million cycles, 42 ms**.
+The OSD must not promise instant.
+
+**A save is transparent.** rdfts, 40 M steps, save at cycle 800,000 against a run
+that never saved:
+
+                              baseline        save at 800,000
+    main RAM hash         B9FDBFA12821F47F   B9FDBFA12821F47F
+    I/O writes                   1399              1399
+    DMA triggers TM/PAL/SPR     3 / 3 / 4        3 / 3 / 4
+    busiest frame, non-black     4096              4096
+    EIP at end                 00203F6D          00203F6D
+
+The FNV-1a hash is over all 65,536 dwords of main RAM, so it moves if anything in
+the 386's world differs. It does not. The only figures in the whole run that move
+are the two that must: EIP transitions, 1,817,751 against 1,784,915, and cycles
+spent with EIP inside the stub, 0 against 131,302 -- and the first difference is
+accounted for by the second, which is the 65,537 dword reads of the blob at one
+per clk_cpu edge. 2.3 ms in the bench; the real transfer is a 64-bit DDR3 burst
+and will be far shorter.
+
+**A restore is exact in memory.** After the write-back and the invalidate sweep,
+main RAM is compared dword by dword against the blob: **0 of 65,536 differ.** The
+CPU then resumes at the saved CS:EIP.
+
+**What this does NOT prove, and the plan should not be read as if it did:
+determinism.** The CPU and main RAM come back exactly. `spi_io`'s 843 registers,
+the video timing counters and the vblank interrupt phase do not -- so the game's
+TIMING diverges after a restore. Running the same cycle count from the save point
+and from the restore point gives different hashes for exactly that reason:
+
+    50,000 cycles after resuming from the save     17264F391D83FCD8
+    50,000 cycles after resuming from the restore  61861B076F0AB61D  == the blob
+
+The second value being the blob itself is the informative part: the restored
+machine wrote nothing to main RAM in that window, because it came back at a point
+in the frame where the game is spinning on vblank, while the saved-and-resumed
+machine got its vblank shortly after and did work. `SS_HASH_AFTER` is the
+instrument that will say when the later phases have fixed this, and until they
+have, "the CPU resumes correctly" is the strongest claim available.
+
+An attempt to check the registers directly -- restore, then immediately take a
+second save and diff the two frames -- does not work and is recorded so it is not
+tried again. The CPU executes between the `iret` and the second NMI, so the frames
+legitimately differ; in the run tried, ESP had risen 32 bytes in 200 cycles. The
+determinism hash is the only sound register check.
+
+### 38.6 The fit, and why its ALM number is worthless
+
+    Analysis & Synthesis   0 errors                       compiles clean
+
+                              unmodified tree     with the spike
+    ALMs                    33,980 (81 %)       33,998 (81 %)
+    registers               32,681              32,637        <-- FEWER
+    RAM blocks              484 (88 %)          484
+    block memory bits       3,547,869           3,547,869
+    setup worst             +0.341  TNS 0.000   +0.240  TNS 0.000
+    hold  worst             +0.244  TNS 0.000   -0.234  TNS -0.234
+
+**+18 ALMs is not the cost of this spike and must not be quoted as if it were.**
+The register count going DOWN is the tell. `SeibuSPI.sv` does not drive the new
+`spi_top` inputs, so Quartus tied `ss_save_req`, `ss_ram_own`, `ss_hold_rel` and
+the rest to ground and constant-folded the state machine, the gate-substitution
+mux and the port-steal mux away. What was measured is the residue -- essentially
+the stub window's address decode. **The resource question, which is the one a
+go/no-go rests on, is still open**, and the next thing to do about savestates is
+drive those ports from real logic so that it can be answered.
+
+The BRAM figures are the exception and are trustworthy: port stealing adds no
+memory by construction, and 3,547,869 bits unchanged is what that looks like.
+
+Worth recording separately: the unmodified re-fit reproduced 37.3's cold numbers
+to the digit, +0.341 setup and +0.244 hold. That is reassuring about the fit being
+stable, and per 37 it is emphatically not licence to call a warm measurement cold.
+`db/` was not deleted for either fit here, so both are warm-db numbers even though
+Analysis & Synthesis ran.
+
+### 38.7 One hold failure, on a path with no savestate logic on it
+
+    hold -0.234   spi_sdr_arb2:ch5_arb|a_dout[59]  ->  ymf271_synth|ext_data[3]
+
+The YMF271's PCM sample fetch, crossing clk_ram to clk_sys. **Nothing in this
+spike is on that path** -- all of it is in clk_cpu and `spi_cpu`. The path reads
++0.253 in the unmodified re-fit on the same machine, so this is the
+endpoint-moves-between-fits effect 28.x and 34 both document at 88 % RAM blocks,
+caught in the act: a change that took no logic out of and put none into a clk_ram
+path made it fail anyway, by moving a flop.
+
+It is genuinely marginal rather than genuinely broken. `spi_sdr_arb2`'s own header
+says client A may be in another clock domain and relies on the two clocks being one
+PLL's exact 2:1 phase-aligned pair in one clock group -- which is why TimeQuest
+times it at all. The capture is handshake-guarded: `ymf271_synth.sv:818` takes
+`sdr_dout` only when `sdr_ack == sdr_req`, so the data has been stable for a
+clk_ram cycle before clk_sys samples it, and `set_multicycle_path -hold` is
+defensible on that basis.
+
+**It has deliberately not been constrained.** 37.2 and the reasoning written into
+`SeibuSPI.sdc` draw a line: cut synchroniser FIRST STAGES, because there is nothing
+useful the analyser can say about the first capture of an asynchronous signal, and
+leave PAYLOAD registers timed, because a strobe arriving later gives them real
+setup and hold requirements. `ext_data` is a payload register. Adding a constraint
+for it argues against that line, so it is a decision about the sound path and not
+a timing fix to wave through -- and STATUS.md's rule applies either way: judge a
+fix by whether it took real logic out of a clk_ram path, not by whether the next
+fit happened to close.
+
+### 38.8 Where this leaves the rest of it
+
+`make lint`, `make -C sim check-tb`, `make test` and `make check-mra` all pass.
+The vendored change is three read-only outputs, recorded in
+`patches/z386-savestate-taps.patch` beside the uncached-window one.
+
+What phase 0 says about the remaining work: the framework is ~880 lines to copy
+from `Arcade-IGSPGM_MiSTer` (`savestates.sv`, `memory_stream.sv`,
+`savestate_ui.sv`, `system_consts.sv`, `ram.sv`'s adaptor), the blob wants
+`"SeibuSPI;SS3E000000:80000;"` -- 4 slots of 512 KB at 0x3E00_0000, clear of
+`ddr_rom_reader`'s 0x3000_0000 and `screen_rotate`'s 0x2400_0000 -- and the
+sections after the 386's are `spi_io`, the three video dpram's, the Z80 and its
+8 KB, the sound FIFOs, the YMF271's slot RAM and register file, `spi_soundflash`'s
+command state and the DS2404. The renderers need no instrumentation at all if the
+pause point is in vblank, because their per-line state is regenerated within a
+line and only their configuration, which lives in `spi_io`, survives a frame.
+
+The Z80 is the one piece with no clean answer: `state_module.py`, which is what
+makes PGM's CPUs free, parses Verilog through verible -- and on the one
+SystemVerilog core it was pointed at, fx68k, the output was never checked in.
+`rtl/t80` is VHDL, which it cannot read at all.
+Swapping T80 for tv80 would let PGM's already-generated `tv80_auto_ss.sv` be
+reused wholesale, at the price of replacing a Z80 inside a sound subsystem matched
+against MAME over two minutes of rdft2 attract (section 14). That measurement, not
+a compile, is the acceptance test for that swap.
+
+And the honest summary of phase 0: **the 386 was the risk and it is answered; the
+fabric was the assumed obstacle and it is still unmeasured.**
+
+## 39. Save states, the rest of it: nineteen sections, and what measurement cost (2026-08-20)
+
+38 answered the question the whole thing turned on -- whether a vendored,
+pipelined 386 could be snapshotted without instrumenting it -- and left
+everything else. This is everything else. It fits, it works at one save point in
+three, and the way it got there is worth more than the result.
+
+    ALMs 36,512 (87 %)   RAM blocks 487 (88 %)   worst slack +0.060, TNS 0.000
+    blob 311,640 bytes in a 512 KB slot, nineteen sections
+
+### 39.1 The framework, and why PGM's rather than ours
+
+`savestates.sv`, `memory_stream.sv`, `ddram.sv`, `ss_ram.sv` and
+`savestate_ui.sv` are vendored from `Arcade-IGSPGM_MiSTer`, near enough
+unmodified so they can be diffed against it. The blob's format, the DDR3 engine
+and the section-tagged stream are all upstream's and all already proven against
+the HPS protocol this core has to speak. One bug fixed in `ss_ram.sv`: the width
+CODE was computed as a byte count, right at 8 and 16 bits and wrong at 32, where
+it yields the code for 64 -- so every section would have been written at twice
+its size with every other word blank. Upstream carries a FIXME saying so and
+only ever instantiates it at 8 and 16.
+
+Ours are `system_consts.sv` (the section map, and what is deliberately absent
+from it), `spi_ss.sv` (the sequencer), and two adaptors.
+
+### 39.2 The clocks, which is why there are two adaptors
+
+`memory_stream` has to run on clk_sys because that is the DDR3 domain, and the
+ssbus protocol is a STREAMING one: the master holds `read` asserted and expects
+one `ack` per cycle. spi_mainram, spi_io and spi_cpu are clk_cpu, half the rate,
+so a slave acking there would present `ack` for two clk_sys cycles and be
+counted twice.
+
+`spi_ss_bridge` crosses that without deriving a phase relationship no constraint
+states: it holds every transaction's controls for three cycles, which is long
+enough that which clk_sys edges coincide with a clk_cpu edge cannot matter. A
+write may then be captured twice, which is harmless because writing the same
+datum to the same address twice is idempotent -- that is the property being
+relied on and it is worth saying out loud. Seven cycles an item, 8 ms for the
+386's 256 KB, once, while the machine is frozen and nothing waits on it.
+
+`spi_ss_vram` is the same idea for the video RAMs, whose two ports are on two
+clocks: the savestate reads through the port it is already on (clk_sys, the
+renderers') and writes through the other one (clk_cpu, the DMA's).
+
+The DS2404 is clk_ram, FASTER than clk_sys, which is the easy direction -- the
+same bridge, with its hold now generous rather than tight.
+
+### 39.3 Choosing the moment beats carrying the consequences
+
+Three times a piece of state stopped needing to be saved because the snapshot
+was taken somewhere better. This is the technique the section is really about.
+
+**The raster.** A savestate arms and waits for `vbl_next` -- the exact condition
+spi_video_timing uses to set `vbl_rise`, evaluated one cycle earlier -- and
+parks the board there. At that instant this frame's interrupt has not been
+raised and the previous frame's has long since been acknowledged, so
+`irq_pending` is clear and the acknowledge machine is idle. Releasing lets
+`vbl_rise` happen on the very next tick, so the interrupt is deferred with
+everything else rather than lost.
+
+**The YMF271's pipeline.** `pause` stops new 44.1 kHz ticks rather than freezing
+mid-pass, so the engine always drains to S_IDLE before the stream reaches it.
+Group, step, the operator accumulators and the working copies of a slot are all
+transient within one pass and none of them is in the blob.
+
+**The 386's registers.** 38's trick, restated: they are not a section at all,
+because the CPU pushes them onto its own stack and that is inside SSIDX_MAIN_RAM.
+
+### 39.4 The board-wide pause, and why `freeze` is not it
+
+Freezing only the 386 is not enough: a transfer takes ~14 ms and in that time the
+raster, the sound board and the vblank interrupt run on, so the CPU comes back
+into a machine that has moved without it. Measured -- a save taken while rdfts
+drove its display loop left the run with 1,567 I/O writes against a baseline
+1,569 and a different main RAM hash, while the same save at a quiet point in boot
+was bit-identical.
+
+It is deliberately NOT wired to `freeze`. That signal reaches exactly one place,
+`spi_cpu.cpu_en`, and STATUS.md documents the behaviour on purpose: only the 386
+stops, so a frozen frame stays on screen to be studied. That is the opposite of
+what a savestate wants and a useful thing to keep.
+
+The pause has one root: gating `spi_video_timing`'s counters stops the raster and
+with it the tile and sprite engines, the mixer and the vblank interrupt, without
+any of those modules knowing. The Z80 already had a clock enable; the YMF271
+needed one line; the DS2404 needed two, for its RTC tick and its copy loop.
+`spi_io` needed none -- it has no counter, no timer and no raster input, so a
+pause there would have been dead logic.
+
+### 39.5 tv80, and a simulator that was lying
+
+The Z80 is tv80 now, and only because of savestates: `state_module.py` -- what
+makes a CPU's state free in Arcade-IGSPGM -- reads Verilog, and `rtl/t80` is
+VHDL. PGM's already-generated `tv80_auto_ss.sv` drops in and the Z80's state
+comes along without anything hand-instrumented. It is SMALLER than what it
+replaced: 358 registers against T80's 401.
+
+The side effect is the important part. `sim/T80s.sv` was a Verilator stand-in
+that never executed a cycle, because Verilator cannot read the VHDL core -- every
+boot run in this repo's history printed "Z80 fetches (ch3): 0 (expected: the
+Verilator T80 is a stub)". It now prints 95,135. **Every measurement of the sound
+path ever taken in simulation was taken with an inert sound board**, and every
+determinism number before the swap was too.
+
+### 39.6 What the divergence actually was, after four sections of guessing
+
+The restored machine ran a few instructions and then took a branch the saved one
+did not. Four sections were added on the strength of stories about what the
+differing bytes looked like -- the DS2404's serial pattern, a loop that resembled
+a FIFO poll -- and not one of them moved the number.
+
+What worked was two instruments, and they should have been built first:
+
+    SS_TRAIL   every EIP after the operation completes. Align two runs and the
+               first difference names the INSTRUCTION.
+    SS_IORD    every I/O read with its value. The first difference names the
+               REGISTER.
+
+They found both real causes in about an hour.
+
+**`irq_pending`.** Probed at the moment the machine is handed back: 1 on a
+save-only run, 0 on a save-then-restore. The restored 386 sat in its vblank-wait
+loop an extra frame. It is spi_cpu's state, not the 386's, and it is now
+SSIDX_CPU_IRQ. It has to be saved explicitly: the toggle compare only ever SETS
+it and an acknowledge is what clears it.
+
+**The DS2404's clock.** With that fixed, the first differing I/O read was 0x6DC
+-- the chip's data port -- returning 0x0D against 0x12. Five ticks at 256 Hz is
+the 20 ms between the save and the load. The RTC keeps real time and a savestate
+does not rewind it. The game stores what it reads at 0x000369B8, which is the
+one main-RAM word that had been differing since the raster was fixed and which
+three separate write-ups called a mystery.
+
+Instruction agreement at that save point went 4 -> 41,742 -> 167,678, and every
+one of the 24,283 I/O reads a restored run makes is now identical to the saved
+one's.
+
+### 39.7 Two write statements to one array
+
+This cost two fits and one wrong conclusion, and it happened twice.
+
+Quartus will not infer a memory from two write statements to the same array.
+`else if` does not help. It builds the whole thing out of flip-flops instead, and
+Verilator's -Wall says nothing.
+
+* The two sound FIFOs: 8,192 flops, and the fitter refused the design at 4,453
+  LABs against 4,191. That was written up as "the Cyclone V has no room left"
+  before it was diagnosed. It was not a device limit; it was 1 KB of FIFO built
+  out of registers.
+* The YMF271's slot parameter RAM, one commit later, in a block carrying a
+  comment warning about exactly this: 16,384 flops, same failure.
+
+The form that works is the mux OUTSIDE the always block and one write statement.
+And when a fit fails or the register count jumps, the per-entity table in
+`output_files/SeibuSPI.map.rpt` names the module in one `awk`. It was consulted
+last, twice.
+
+A third of the same family: indexing a section by three words per slot means
+`idx / 3` and `idx % 3` on a 32-bit index, which is a full divider in the
+combinational path -- 36.278 ns of negative slack on a 17.5 ns clock. Pad to a
+power-of-two stride and it is a shift and a mask.
+
+### 39.8 Where it stands, honestly
+
+A save is transparent -- compared at the same LOGICAL point, main RAM differs in
+6 dwords of 65,536, five of them the stub's footprint on dead stack, and does not
+grow over a 75 % longer run. A restore is exact in memory and the 386 resumes at
+the saved CS:EIP. All three sets.
+
+Determinism is save-point dependent and the good number should not be quoted
+alone. Instruction agreement on rdfts: 16 at a save 900,000 cycles in, 167,678 at
+2,600,000, 10 at 4,100,000. The early ones are boot-time saves, where the
+sample-flash derivation and the SXX2C Z80 download are running with state that is
+not in the blob and was never meant to be. Whether that is the whole explanation
+is the next thing to establish, and it wants a sweep of save points across a long
+run to see whether agreement is bimodal.
+
+**The determinism hash sweep is a bad instrument and should not be quoted
+without the trail number beside it.** It hashes main RAM at a fixed offset after
+the operation, which cannot distinguish "in lockstep for 167,678 instructions and
+then drifting" from "wrong immediately", and a small timing shift moves where the
+hash lands. It read 4 of 12 at the point the underlying agreement had improved
+four orders of magnitude.
+
+Nothing has run on hardware. And the tv80 swap replaced a Z80 inside a subsystem
+matched against MAME over two minutes of rdft2 attract (14); the unit tests pass
+but that correlation has not been redone, and for a CPU swap it is the
+measurement that counts.
+
+## 40. The save-point sweep, and the leak it found (2026-08-21)
+
+39.8 asked for one thing before anything else was added: a sweep of save points
+across a long run, to see whether the agreement figures were bimodal and whether
+"do not save during boot" was the whole explanation. The sweep says no on both
+counts, and it says so because the metric 39 was quoting is the wrong one.
+
+Three sets, 86 save points, 250,000 to 100,000,000 cycles -- 4 ms to 1.75 s of
+board time. One defect, in one line of `spi_ss.sv`, accounts for nearly all of
+it.
+
+### 40.1 The metric was measuring the skew, not the divergence
+
+`SS_TRAIL` records every EIP after the operation; two runs are aligned and the
+first difference names the instruction. The alignment is the part 39 left
+implicit, and it is where the numbers came from.
+
+A save-only run's anchor is set with the CPU already back in game code. A
+restored run's is set with the CPU still in the restore stub, so its trail opens
+with the stub's last instructions and the `iret`'s landing -- three entries at
+the 2.6 M point, fourteen at 900 k. Compared at offset zero, a run that is in
+perfect lockstep at a 40-instruction offset reads about 10.
+
+That is the whole of "16 / 167,678 / 10". The three numbers differ because the
+skew was about 500, then -1, then -40. 167,678 was not a good save point; it was
+the one save point whose skew happened to be -1. Reproducing all three exactly
+and then aligning properly was the first thing done here, and it inverted the
+ranking: the "catastrophic" 4.1 M point turned out to be tracking for 204,000
+instructions and the "good" 2.6 M point to be genuinely diverging after 167,678.
+
+The metric this section uses instead is three numbers, and the third is the one
+that matters:
+
+    skew       the constant instruction offset, found by a BOUNDED search.
+               An unbounded one finds false matches -- a 256-instruction
+               window recurs 62,000 times in a game loop, so the longest
+               match comes from whichever iteration lines up.
+    lockstep   how far the two streams then run identically at that skew
+    per-register value sequences
+               for each I/O register, the sequence of values it returned.
+               Immune to the interleaving shift a poll-phase offset causes,
+               which is what a whole-stream diff mistakes for a wrong value.
+
+### 40.2 What the sweep found, before the fix
+
+rdfts, 48 points at 250 k intervals, then 18 more out to 100 M. Not bimodal --
+four bands, and the good one is a narrow window early on:
+
+    250 k -- 750 k     57,241 of 57,245 I/O reads identical. The only real
+                       difference: two reads of 0x6DC returning 0D/0E against
+                       08/09 -- five ticks of DS2404 clock.
+    1.0 M -- 1.75 M    genuinely divergent, 572 edits. The restored machine
+                       ends up in a LATER boot loop (0x203F4x) than the
+                       save-only one (0x26D78x).
+    2.0 M -- 2.75 M    clean. skew -1, all 24,125 reads identical.
+    3.0 M -- 100 M     34 points, uniform: skew -40, lockstep ~204,000, and
+                       the only I/O difference one extra poll of 0x600.
+
+So the bad points are the early ones, but not because "boot is messy" -- and the
+later ones are not clean either, they carry a persistent 40-instruction skew.
+Two apparently separate problems. They were one.
+
+### 40.3 It was never the clock
+
+The 5-tick difference looked exactly like 39.6's RTC finding coming back, and the
+temptation was to read it that way again. What settled it was timestamping the
+read rather than comparing its value:
+
+                        read at            RTC
+    save-only        anchor+2,134,199       13
+    restored         anchor+1,073,355        8
+
+**The clock was right for the cycle it was read at.** The restored machine simply
+arrived 1,060,844 cycles early. The arm window it skipped was 1,061,156 cycles.
+
+`pause = busy && (st != S_ARM)`. S_ARM is the state that waits for `vbl_next`,
+and it deliberately leaves the board running, because the raster has to keep
+running or the instant it is waiting for never comes. On a save that costs
+nothing: the machine is live, and its being live is what is about to be
+recorded. **On a load it was a leak.** The board ran for up to a whole frame
+with the OLD state, the blob was then written over the top, and anything not in
+the blob kept the progress it had made in the meantime.
+
+A load needs no canonical instant, because it does not have to INFER anything:
+the raster counters, `irq_pending` and the acknowledge machine all arrive in the
+blob and are written wholesale. So a load goes straight to S_ASK, where `pause`
+is already asserted, and the 386 walks to the stub on a frozen board.
+
+    save at        prefix agreement, before -> after
+    1.0 M                16 -> 165,688
+    2.5 M           167,678 -> 167,594
+    3.0 M                10 -> 211,773
+    20 M -- 100 M        10 -> 201,431 .. 208,721   (9 points)
+
+Both bands, fixed by one line. The 40-instruction skew was the same leak seen
+from the other end.
+
+A load also became less than half as slow -- 1.83 M cycles to 0.77 M -- because
+the frame-long wait is gone. And it now jumps the raster mid-frame instead of at
+vblank, which is a visible behaviour change and has not been seen on hardware.
+
+### 40.4 S_ARM was also hiding a hazard
+
+Removing the load's arm wait broke the load outright, and the reason is worth
+keeping. The bench's load request fires as soon as the save completes, and with
+the frame-long delay gone the restore NMI was offered while the 386 was still in
+the SAVE stub, one instruction from its `iret`. The interrupt frame it pushed
+pointed into the stub. S_ARM had been covering that for free by delaying every
+operation by up to a frame.
+
+So there is a new state, S_SETTLE, which a load passes through with `pause`
+asserted, waiting on `spi_cpu`'s `ss_in_stub` and `cpu_snapshot`. It costs tens
+of cycles rather than the tens of thousands a frame costs. **A latent hazard
+masked by an unrelated delay is worse than an open one**, and this one would
+have fired the first time a user loaded twice in quick succession.
+
+### 40.5 One field of the DS2404 never came back
+
+Found on the way, and real, though it was not the 5 ticks:
+
+    if (pause) begin
+        tick_cnt <= tick_cnt;      // "held, not reset"
+    end
+
+`tick_cnt` is written by the `ss_we` case earlier in the same always block. This
+is later, so the last assignment wins -- and `pause` is asserted throughout a
+restore, so the clobber was unconditional. The RTC's counter was restored and
+its divider was not; the chip came back with the load-time sub-tick phase, a
+permanent 115,492-clk_ram error. Holding by NOT ASSIGNING fixes it and keeps the
+intent. Measured: tick 262,501 against 377,993 at the release, and identical
+after.
+
+Every other field the savestate writes is inside one of the `if (pause)` chains,
+whose bodies are empty when paused, so nothing else was competing. Same family
+as 39.7's two-writes-to-one-array: **in this file, what a clocked block does
+LATER silently outranks what the savestate did earlier.**
+
+### 40.6 The bench was rebuilding without the chip in it
+
+`spi_ds2404.sv` was not in `sim/Makefile`'s `CORE_SRCS`. Verilator finds it under
+`-I$(RTL)` so every build worked; make simply never rebuilt a bench when the chip
+changed.
+
+This cost a whole diagnostic round. The `tick_cnt` fix was applied, the bench
+re-run, and it reported the OLD behaviour to the digit -- with make saying "up to
+date". The fix was very nearly reverted as ineffective. Same silent-staleness
+family as the three benches that had stopped building (21.6, 22.3, 28), and the
+same lesson: **a build that succeeds is not evidence that it built what you
+edited.**
+
+### 40.7 Where all three sets stand
+
+rdfts 66 points, rdft2 and rfjet 10 each, 250 k to 100 M cycles. Main RAM
+restores EXACT and the 386 resumes at the saved CS:EIP at every one.
+
+    set      DS2404 read sequence      per-register values      lockstep
+    rdfts    identical, 737/737        identical, all points    167 k .. 399 k
+    rdft2    identical, 1006/1006      identical, all points    284 k .. 399 k
+    rfjet    identical,  936/936       identical, 9 of 10       165 k .. 399 k
+
+**The cartridge sets' boot engines are not a problem, and that retires 39.8's
+hypothesis by measurement.** rdft2 and rfjet are the sets that run the SXX2C Z80
+download -- 131,072 and 245,760 writes -- and their boot-time save points at
+250 k and 1 M now reach lockstep of 399,472 and 264,590 with identical DS2404 and
+per-register sequences. The download was never state the blob was missing.
+
+The one exception, rfjet at 20 M, survives inspection: 0x684 -- the sound FIFO
+status, d1 = Z80->386 FIFO not empty -- reads 1 against 3 at poll 26,734, so the
+restored machine sees "data ready" one poll early. The FIFO DATA is
+byte-identical, `91 53 88 F5 8F 57 8D 87 81 49 81 49`, the restored run's being a
+strict prefix. Worth recording that the first pass called this eight value
+mismatches on 0x680 and 0x684: aligning two read streams on their ADDRESS
+sequence mispairs the data reads across a one-poll shift. Per-register sequences
+do not, which is why 40.1 defines the metric that way.
+
+### 40.8 What is left, and what is still unproven
+
+The residual is a poll-loop phase offset: a few tens of instructions on rdfts
+(-2 to +43), a few hundred on the cartridge sets (-498 to +164). It lands on
+0x600 and 0x60C, both hardwired constants in `spi_io.sv`, and on the sound FIFO
+status. No read returns a wrong value at any of the 86 points. Tightening it
+means finding why the CPU is released a few hundred cycles off the raster phase
+it was saved at; nothing measured here says that is worth doing before hardware.
+
+Still unproven, and none of it moved this session: nothing has run on hardware;
+the tv80 swap's MAME correlation over two minutes of rdft2 attract has not been
+redone, and for a CPU swap that is the measurement that counts; the OSD and pad
+path has never been driven; and the trail caps at 400,000 entries, so "lockstep
+399,472" means "as far as the instrument reaches", not "forever".
+
+Two instrument notes for whoever reads this next. `SS_TRAIL` does nothing unless
+`SS_HASH_AFTER` is also set -- the anchor that arms the trail is only assigned
+inside the hash block, which is awkward given the trail is the trusted instrument
+and the hash is the distrusted one. And the bench's `resumed at the saved EIP:
+NO` line was a false verdict for the whole of 39: it is keyed on a short trail
+that is usually empty, and printed NO on all 66 points while the authoritative
+line beside it said the CPU resumed correctly. It reads YES now, because the fix
+made that trail populate -- which is luck, not a repair.
+
+Also pre-existing and not ours, in case it looks alarming: `BR TARGET MISMATCH`
+from `z386.sv:2094` fires 73 times on rfjet and 81 on rdft2 in runs with NO
+savestate at all. It trips when an interrupt lands on a branch.
+
+## 41. The fit, re-run at last: it holds, and seed 1 does not (2026-08-21)
+
+40 changed three RTL files after the fit that produced "87 % / +0.060", and 39's
+four before that, so the number everything was being judged against described a
+tree that no longer existed. Worse than stale: `output_files/SeibuSPI.rbf` was
+dated two days BEFORE `51147eb`, the first savestate commit. No bitstream
+containing save states had ever been assembled at all.
+
+It fits, and the savestate work is not what this design is limited by.
+
+    ALMs            36,418 / 41,910  ( 87 % )       was 36,512 ( 87 % )
+    RAM blocks         487 / 553     ( 88 % )       unchanged
+    registers       35,343                          was 35,314
+    block mem bits  3,563,997 / 5,662,720 ( 63 % )  identical to the bit
+    DSP 61   PLLs 3   0 errors   SEED 3
+
+    clk_ram  +0.175   clk_sys  +0.953   clk_cpu  +1.790   pll_hdmi +0.016
+    hold     +0.134   TNS 0.000 on every clock
+
+    output_files/SeibuSPI.rbf   4,402,272 bytes   md5 4da63a7e
+
+**255 insertions came in 94 ALMs CHEAPER than what they replaced.** S_SETTLE, the
+DS2404 tick-hold rework and the arm-window fix all landed net-downward. And the
+block memory bit count is identical to the previous fit's TO THE BIT, which is
+the cheap proof that 39.7's trap did not re-trip -- two write statements to one
+array would have moved that number down and the register count up.
+
+**No savestate logic appears in the worst 25 setup paths.** The convergence point
+is `ascal` and `rom_loader`; the core's own worst path is
+`rom_loader|in_off[3] -> part_size_r[21]` at +0.175 on clk_ram. The
+`sdram|ch2_rq -> command[1]` endpoint that 19.16, 26.4 and 28.3 all chased is not
+in the list either.
+
+### 41.1 Seed 1 fails now, and on our clock rather than the framework's
+
+34 measured seed 1 at +0.101 and seed 3 at +0.187, both passing. On this tree:
+
+    seed 3   setup +0.016 on pll_hdmi (ascal)                 PASSES
+    seed 1   setup -0.110 on clk_ram, TNS -0.110              fails
+
+So the seed ranking does not survive the design changing, and a seed that passed
+once is not a seed to fall back on. Do not re-roll hoping for margin on
+`ascal`: the historical pass rate is about two in five and the failures land on
+clk_ram, which is ours, where `ascal` is not.
+
+**+0.016 is sixteen picoseconds, and it is worth knowing whose it is.** The path
+is `ascal:ascal|o_vcpt_pre3[1]`, `sys/ascal.vhd`, the framework's scaler on the
+HDMI clock -- nothing of this core runs on it. 18.x recorded it at -0.215 and
+closed it with a seed change; 34 saw it swing from -0.261 to +0.433. It passes,
+and the consequence of it not passing is HDMI scaling, not the board. The reason
+to record it is so that video trouble during hardware bring-up is not spent
+suspecting the 386.
+
+### 41.2 A fit is reproducible across an intervening fit, not just back-to-back
+
+31.8 established that recompiling one seed reproduces it to the byte. This is a
+stronger version of that test, obtained by accident: the seed-1 compile left its
+own placement in `db/`, and seed 3 recompiled on top of it to an
+**md5-identical RBF**, `4da63a7e`. So `db/` carries no memory that changes the
+answer, and the seed really is a property of the design.
+
+Which is why the seed-1 RBF was not simply overwritten with the backup copy.
+Copying a good bitstream over a bad one leaves `db/` and every report in
+`output_files/` describing the FAILING placement, so `make timing` would have
+answered for seed 1 about a seed-3 file. Same family as 36.1 and as the bench
+that reported the old behaviour while make said "up to date": the failure mode
+this project keeps meeting is an instrument that reads plausibly about the wrong
+thing. Recompiling costs thirteen minutes and leaves the tree self-consistent.
+
+### 41.3 The critical-warning tell needs its code checked, not its count
+
+34's cheapest tell -- every failing seed threw exactly one critical warning,
+every passing one threw none -- still holds, but only if the code is read:
+
+    332148   Timing requirements not met            the real one; seed 1 threw it
+    127005   MIF depth 1799 in a 2048-deep array    ymf271_synth, design intent
+
+`127005` appears only when the `.mif` is regenerated, so a COLD build of a
+perfectly good tree throws one critical warning and a warm rebuild of the same
+tree throws none. The first seed-3 compile here read 1 and the second read 0 with
+an identical RBF. `tools/check_timing.py` reads the STA report rather than the
+log and is right either way; a human skimming the log should filter on 332148.
+
+The QSF did not re-add its stale duplicate file list this time -- 56 file
+assignments, no duplicates, hash unchanged across three compiles. Only
+`build_id.v` is dirty, which is generated.
+
+## 42. The raster never stops: PGM's approach, and the scaler that found it (2026-08-21)
+
+41 put the first savestate bitstream on hardware. rdft booted, ran its attract,
+and then a save and a load were both **visibly disruptive to the low-latency
+scaler**. 40.3 predicted the load half of this in one sentence and nobody had
+looked; the save half was not predicted at all.
+
+The cause is one line, and PGM -- which this framework was vendored from -- makes
+the same class of mistake impossible by construction.
+
+### 42.1 What the pause actually stopped
+
+`ss_pause` reached four places (`spi_top.sv` 175, 527, 568, 702). Three of them
+are right. The fourth was the video timing generator:
+
+    rtl/spi_video_timing.sv:85     else if (pause) begin
+                                       ce_pix <= 1'b0; ...
+
+`div`, `hcnt` and `vcnt` advanced only in the final `else`, so they froze with
+it -- and HSync, VSync, HBlank and VBlank are **combinational decodes of those
+counters**. So for the length of a transfer, `CE_PIXEL` sat at 0 and there was
+not one sync edge. `spi_top.sv:673` puts a transfer at about 14 ms; the frame is
+18.5 ms at 53.99 Hz. MiSTer's scaler is a line-locked consumer and saw a single
+scanline stretch to hundreds of times its length, three-quarters of every frame
+in which an operation happened.
+
+The module header said what it was doing -- "gating them here freezes the whole
+video side without any of those modules needing to know" -- so this was a design
+decision that happened to be a bug, not an oversight. Which is the more useful
+kind to write down.
+
+### 42.2 PGM cannot do this, and that is the interesting part
+
+    PGM.sv:130     wire ce_50m = 1;                              // a literal
+    igs023.sv:75   assign ce_pixel = ce_50m & ce_pixel_shift[4]; // mod-5 rotator
+    igs023.sv:153  if (ce_pixel) begin hcnt <= hcnt + 1; ...     // no pause term
+    PGM.sv:422     wire clocks_enabled = ss_cpu_execute | ~paused;
+
+`clocks_enabled` reaches the 68000, the ARM7 and the ICS2115. It does not reach
+the video. The only thing PGM's pause does to the display is halve R/G/B after
+ten seconds (`pause.sv:100`), which is cosmetic. Its transfer is LONGER than ours
+in wall-clock and is invisible.
+
+And PGM gets its canonical instant the other way round from us: `pause_ack` is
+registered only when the scanline counter reaches 221 (`igs023.sv:401`). It
+**observes** the raster to choose the moment. It never stops it, and
+`system_consts.sv` there has no video index at all -- its raster is not state.
+
+### 42.3 What pause gates now, and why the interrupt is still safe
+
+One bit: the vblank interrupt. And it is DEFERRED, not dropped. `vbl_pend`
+remembers a crossing that falls during a freeze and raises `vbl_rise` the moment
+the board is let go -- which is exactly the semantics `spi_ss.sv`'s header was
+already claiming ("deferred by the length of the transfer along with everything
+else"), now obtained without stopping the display.
+
+A single bit is the right width. A pause spanning two crossings collapses to one
+interrupt, and that is correct rather than lossy: the game's time was frozen, so
+it should see one vblank on resume, not a burst.
+
+`line_start` deliberately keeps running. The tile and sprite engines then keep
+refilling their line buffers from a frozen VRAM and the display shows a correct
+still picture instead of a smear. Neither engine touches the main RAM port the
+transfer owns, and the DMA that does is started by the 386, which is frozen.
+
+### 42.4 The phase is re-acquired, not carried
+
+`SSIDX_VIDEO_TIMING` is gone. Indices renumbered contiguous 0..17, `SSIDX_COUNT`
+19 -> 18, and an existing `.ss` is incompatible.
+
+What replaces it is `S_WAITVBL`: after the transfer, hold the board until the
+raster comes back round to `vbl_next`, then release. The 386 resumes at the
+raster phase it was frozen at, which is the entire thing the old section bought
+by jamming the counters -- and it costs no state.
+
+Tracing the cycles, the change is narrower than it looks. `pause` is
+combinational on `st`, and `st` leaves `S_ARM` on the edge ENDING the `vbl_next`
+cycle, so `vbl_rise` fires one cycle into the pause in the old code and the new
+one alike. `S_WAITVBL` exits on `vbl_next` and the counters advance one more
+tick, leaving the raster at VBSTART -- exactly where the old code's
+parked-then-released counters left it, and exactly what a load used to jam them
+to. Both ends are behaviour-preserving; only the middle differs.
+
+### 42.5 Measured against the old code, rdft2, save 3 M / restore 8 M
+
+    main RAM restored     E73FBF128614EDC5   EXACT, identical to old
+    resumed at EIP        002A1359           identical to old
+    RAM hash +200 k       67181BD5C945E779   BYTE-IDENTICAL to old
+
+The restore produces the same trajectory, not merely a passing one. The bench's
+own line confirms the deferral never fires on a save -- **"0 vblanks passed"** --
+because the transfer starts at vblank entry and fits inside the frame.
+
+The board is frozen longer: 2,103,622 cycles against 1,912,112 on a save
+(+3.3 ms), and 1,347,078 against 767,412 on a load (+10 ms), the difference being
+the wait for the raster. Both are invisible, because the display is live for all
+of it. The audio gap is the real cost.
+
+### 42.6 The fit got better
+
+    setup  +0.016 -> +0.039  (pll_hdmi, ascal)     hold  +0.134 -> +0.239
+    ALMs   36,418 -> 36,359 (87 %)                 registers 35,343 -> 35,261
+    RAM blocks 487 (88 %) and 3,563,997 memory bits unchanged.   SEED 3
+    RBF 2a58c390, deployed md5-verified.
+
+Removing the section gave back 82 registers and 59 ALMs and more than doubled the
+margin on the thin `ascal` path 41 flagged. Worth noting that the fix for a
+correctness bug was also the cheaper design; that is not usually how it goes.
+
+### 42.7 Two traps, one of them pre-existing and serious
+
+**A restore offset tuned to the old timing is now a back-to-back test.** The save
+ends about 191 k cycles later, so `SS_RESTORE_AT=5000000` -- clear of the save
+before -- now lands one cycle after it releases. That produced a
+`restore: FAILED` here that was entirely my own test, and it cost a round of
+investigation. Whoever re-runs the 86-point sweep has to move the restore offsets
+out first.
+
+**save -> load about one cycle apart WEDGES THE BOARD.** Armed, then no stub
+entry and no completion; the CPU sits on one address and the bench times out. It
+reproduces IDENTICALLY on the unmodified tree, so it is pre-existing and this
+work neither caused nor cured it. `S_SETTLE` does not cover it -- that guard is
+about the CPU still being inside a stub, and here the stub was left long before.
+It is user-reachable (press load as a save completes) and it wants its own fix.
+Only save->load has been demonstrated; load->load is adjacent and untested.
+
+### 42.8 A dead end worth recording
+
+`SeibuSPI.sv:1389` wires `screen_rotate`'s `DDRAM_BUSY` to `1'b0`, and the
+savestate preempts rotate, so its framebuffer writes are dropped rather than
+stalled. That looks like a second bug and is not one: **`screen_rotate` takes
+`DDRAM_BUSY` as an input and never reads it** (`sys/arcade_video.v` -- the only
+assignment is `DDRAM_WE = ram_wr`). Giving it real back-pressure would change
+nothing. The tear on rotated output during a transfer is inherent to that module
+and is not what was breaking the scaler.
+
+## 43. The lockup: a chip that stops listening while the CPU is still talking (2026-08-21)
+
+42 went to hardware and the video was stable through save and load. Then: "rapid
+reload leads to eventual lockup". 42.7 had already found the same hang in
+simulation as save -> load one cycle apart and recorded it as pre-existing; the
+hardware report is load -> load, and it is the same bug.
+
+It is not pre-existing in the sense of ancient. **40.3 introduced it**, by
+removing the load's arm wait so that `pause` asserts immediately. Four commits.
+
+### 43.1 Three wrong answers, and what finally worked
+
+Worth writing down because the wrong turns were all the same mistake.
+
+1. "A DS2404 copy in flight freezes and never acks." Plausible, built from real
+   code, and wrong: draining `copying` changed nothing.
+2. "`ss_dbg_state`=3 is spi_ss's S_STREAMING, so memory_stream is stuck." Wrong
+   about the probe -- `ss_dbg_state` is **spi_cpu's** machine, and 3 is `SS_RUN`.
+3. Both of those were reasoning forward from source. What settled it in one run
+   was adding `ss_dbg_stalls = {io_stall, z80dl_stall, ds_stall}` and reading it.
+
+The instrument is three lines and it named the bug immediately. 39.8 and 40.1
+both say a version of this about the determinism hash; the same lesson applies to
+reading code as an instrument.
+
+### 43.2 What it actually is
+
+`spi_ds2404.sv`'s `if (pause)` is the FIRST branch of an if/else chain that also
+covers `req_edge`. So a paused DS2404 does not defer a request. **It never sees
+it**, and `ack` never comes:
+
+    if (pause)              begin ... end   // swallows everything below
+    else if (copying)       begin ... ack <= req_s2; end
+    else if (arm != S_IDLE) begin ... ack <= req_s2; end
+    else if (req_edge)      begin ... end   // a request arriving here is DROPPED
+
+On a LOAD, `pause` asserts while the 386 is **still running** -- it has to run, to
+walk to the stub. So it can issue a DS2404 access into a chip that has stopped
+listening. Then:
+
+    ack never comes -> spi_io holds ds_stall -> spi_top ORs it into io_stall
+    -> spi_cpu's mem_accept is gated on !io_stall (spi_cpu.sv:893)
+    -> the 386 never reaches an instruction boundary
+    -> it never takes the NMI -> the sequencer waits for it forever
+
+Measured at the wedge, which is what turned this from a story into a diagnosis:
+
+    cpu: 00000600 vld=1 rdy=0      (forever)
+    ss:  hold=0 snapshot=0 in_stub=0 state=3(SS_RUN)
+    stalls: io=1 z80dl=0 ds=1
+
+`hold=0` is the line that kills every "the savestate froze the CPU" theory, and
+`ds=1` names the chip.
+
+**Why "eventual".** The window needs the 386 to touch the DS2404 during the
+pause. Rapid repeated operations keep rolling that dice; a sweep that never
+issues two operations close together never rolls it at all, which is exactly why
+86 points missed it.
+
+### 43.3 The fix, and why waiting for the snapshot is safe
+
+    ds_pause <= ss_pause && ss_snapshot;    // registered, clk_sys
+
+The chip only has to be still while the blob is read or written, which is from
+the snapshot onward. Before that the 386 is running and must be able to finish
+what it starts.
+
+Safe by construction rather than by timing luck: `io_stall` is precisely what
+holds the 386 off an instruction boundary while a byte is in flight, so nothing
+can be mid-transaction at the moment it freezes. 40.5's `tick_cnt` hold still
+sees `pause` for the whole restore, because the blob's writes land in S_STREAMING
+with the CPU already frozen.
+
+### 43.4 It has to be registered, and 31.7 said so first
+
+Written as a combinational AND at the instantiation it **failed the fit at -0.077
+on clk_ram**, TNS -0.077, one critical warning:
+
+    combinational   setup -0.077  FAIL   1 critical warning
+    registered      setup +0.121  PASS   0 critical warnings
+
+`spi_ds2404` runs on clk_ram; `ss_snapshot` comes from spi_cpu on clk_cpu. The
+gate put two domains' logic in front of a crossing into the FASTER clock. 31.7
+failed on this same endpoint for this same reason and answered it the same way --
+one flop -- and the answer did not survive as a rule, only as a story about one
+signal. It is a rule: **nothing combinational goes in front of that crossing.**
+
+    ALMs 36,456 (87 %)   RAM blocks 487 (88 %)   registers 35,395
+    setup +0.121   hold +0.243   TNS 0.000   SEED 3   RBF e4037a48
+
+### 43.5 Measured
+
+    back-to-back load (the wedge)   WEDGE -> passes, hash 67181BD5C945E779
+    normal load (8 M)               passes, hash unchanged
+    make verify                     exit 0, all ds2404 and nvram checks pass
+
+The determinism hash is the same value a healthy load produces, so the fix clears
+the hang without moving the trajectory.
+
+### 43.6 New instrument
+
+`ss_dbg_stalls` on spi_top, `{io_stall, z80dl_stall, ds_stall}`, stubbed `()` in
+SeibuSPI.sv like every other `ss_dbg_*` and printed by tb_boot. Keep it. It is the
+only thing that distinguishes "the savestate froze the CPU" from "the CPU is
+stalled on an I/O hold", and those look identical from every other angle.
+
+## 44. The lockup, bisected: 40.3 froze a window the CPU has to run in (2026-08-21)
+
+43 shipped a fix for a hang and it did not fix the one on the bench. 43's hang
+was real -- save -> load one cycle apart, the DS2404 swallowing a request -- but
+it was reproduced from **save->load**, and the hardware failure is **load->load
+repeated**, which the bench could not express at all. Fixing what I could measure
+and reporting it as the reported bug is the mistake this section is really about.
+
+### 44.1 The bisect, which took four builds and answered in one line
+
+Five back-to-back loads PASS in simulation, so the bench was never going to find
+this. On hardware:
+
+    233d7fc  (before 40.3)   10+ reloads   CLEAN
+    1323975  (40.3)          ~3 reloads    wedges
+    4da63a7e (41)            ~3 reloads    wedges
+    e4037a48 (43)            ~3 reloads    wedges
+
+**40.3 introduced it.** The A/B against 4da63a7e also killed two of my theories
+at once: that build freezes the raster during a transfer, so `screen_rotate` is
+idle and there is no DDR3 contention -- and it wedges anyway. The raster change
+and rotate contention are both exonerated.
+
+### 44.2 What 40.3 got wrong
+
+It did two things and only one of them was right.
+
+**Removing the load's ARM WAIT was right.** That was up to a frame -- 1,061,156
+cycles -- of the board running with old state before the blob landed, and it is
+the whole of 40.3's measured improvement.
+
+**Asserting `pause` from the request instead was wrong.** Between the request and
+the snapshot the 386 HAS TO RUN; that is how it reaches the stub. Anything it
+touches in that window that `pause` has frozen can stall it forever. It then
+never reaches an instruction boundary, never takes the NMI, and the sequencer
+waits for a CPU that is waiting for a peripheral that is waiting for the
+sequencer.
+
+43's DS2404 fix is one instance of exactly this, found in simulation and fixed
+one consumer at a time. It is independently correct and it stays. But it treats a
+symptom: on hardware something else in the same window catches the CPU too, which
+is why e4037a48 still wedged in three.
+
+### 44.3 The fix
+
+    assign pause = busy && (st != S_ARM)
+                        && !(is_load && (st == S_SETTLE || st == S_ASK));
+
+The window this re-opens is not the one 40.3 closed. That was up to a frame; this
+is the walk to the stub on a load, about 180 cycles. Three orders of magnitude,
+and a load has no canonical instant to protect in the first place -- it does not
+INFER anything, the blob carries it.
+
+A SAVE keeps the old behaviour exactly, and must. `pause` high while it walks to
+the stub is what makes the snapshot correspond to the `vbl_next` instant S_ARM
+waited for, and that is 39.3's entire argument for why the interrupt state does
+not have to be saved.
+
+### 44.4 Measured
+
+    8 back-to-back loads       all restore, main RAM EXACT
+    determinism hash (1 load)  67181BD5C945E779  -- unchanged from every good run
+    restore verdict            the CPU resumed at the saved CS:EIP
+    make verify                exit 0
+
+    setup +0.261   hold +0.243   TNS 0.000   0 critical warnings   SEED 3
+    ALMs 36,389 (87 %)   registers 35,339   RBF 96ab5971
+
+The 8-reload run reports a DIFFERENT hash, 9CC5E850F0DBBC44, and that is the
+instrument rather than the design: the "200,000 cycles after" window overlaps the
+later loads. Re-run at SS_RELOADS=1 it is 67181BD5C945E779 again. Do not read
+that number out of a multi-reload run.
+
+### 44.5 What this cost, and the rule
+
+Three theories, all reasoned from source, none of them the bug: a DS2404 copy
+drain that changed nothing, `ss_dbg_state`=3 read as spi_ss's state when the
+probe is spi_cpu's, and DDR3 contention from a rotate that was not even running
+on the build that failed. Plus a backpressure model that wedged at one busy tick
+in sixteen and briefly looked like a finding.
+
+What worked, both times: **add a probe and read it** (43.1), and **bisect on the
+hardware that actually fails**. The bench passed 5 back-to-back loads throughout;
+no amount of staring at it would have found this.
+
+`SS_RELOADS` exists now (1d6b04e) so the bench can at least express the shape,
+even though it does not reproduce it.
+
+## 45. The rapid-reload lockup: what is known, what is not (2026-08-22)
+
+Unfinished. This section is the handoff, written at the point work stopped.
+
+44 was wrong, and so were 43 and everything before it. What follows separates
+what has been MEASURED from what is merely plausible, because tonight produced a
+lot of the second kind and shipped four fixes off the back of it.
+
+### 45.1 The symptom
+
+Rapid repeated LOADS wedge the board. Save during ATTRACT and 10+ reloads are
+clean; save during ACTIVE GAMEPLAY and it wedges within about three. That split
+is the user's observation and it is the single most useful fact in this section:
+whatever it is, it needs state the game only has when it is being played.
+
+There are TWO distinct modes, also the user's observation:
+
+    mode A   music KEEPS PLAYING, picture frozen, NO overlay
+             -> spi_ss is IDLE, the restore COMPLETED, the 386 is executing
+                rubbish. A corruption, not a deadlock.
+    mode B   sound STOPS, overlay appears
+             -> spi_ss stuck in S_ASK with pause held. A deadlock.
+
+Mode A appears first, then a further reload produces mode B.
+
+### 45.2 The instrument that finally said something: an on-screen overlay
+
+No probe survives on hardware since 35 deleted the JTAG modules, so `spi_top`
+paints the savestate's state across the top of the picture when an operation
+stays busy past 2^23 clk_sys cycles (~146 ms, four times the longest real one).
+`tools/savestate-debug/read_wedge.sh` screenshots the board and decodes it; the
+decoder was validated against a HEALTHY core first, and correctly said "not
+wedged".
+
+Read off the board, wedged, in mode B:
+
+    spi_ss = S_ASK   is_load=1  pause=1
+    io_stall=0  z80dl_stall=0  ds_stall=0      <- NOTHING stalled
+    snapshot=0  in_stub=0
+
+**That one reading invalidated every theory before it.** It is not a stall. The
+DS2404 swallowing a request (43), DDR3 contention from screen_rotate, the load's
+pause window (44) -- all aimed at a hang that is not happening.
+
+Build the overlay FIRST next time. 43.1 already said this about simulation and it
+still took four more builds to apply it to hardware.
+
+### 45.3 The bisect
+
+    233d7fc (before 40.3)   10+ reloads   CLEAN
+    1323975 (40.3)          ~3 reloads    wedges
+    4da63a7e (41)           ~3            wedges
+    e4037a48 (43)           ~3            wedges
+    861db700 (44 + retry)   ~10           wedges, but LATER
+
+40.3 introduced it. The A/B against 4da63a7e also exonerated the raster change
+and rotate contention at a stroke: that build freezes the raster, so rotate is
+idle during a transfer, and it wedges anyway.
+
+### 45.4 What is fixed, and it is real but partial
+
+`SS_NMI` drops `ss_nmi` after sixteen cycles whether or not the 386 took it, and
+`ss_hold` is set ONLY by recognising the stub's marker write. A missed or
+deferred NMI therefore parks spi_cpu in SS_RUN forever: `ss_snapshot` never
+rises, spi_ss waits in S_ASK for it, and every LATER operation hangs because
+SS_IDLE is never reached to latch the next request. One poisoned operation wedges
+all of them, which is why it is never the first reload.
+
+SS_RUN now re-offers the NMI after 2^23 clk_cpu cycles, via SS_INVAL so the
+gate's cache line is evicted again first. **Measured effect: 3 -> ~10 reloads.**
+Real, and not sufficient.
+
+### 45.5 What is in the tree UNVALIDATED, and must not be trusted
+
+Uncommitted at the time of writing, in `rtl/spi_cpu.sv`, `rtl/spi_ss.sv`,
+`rtl/spi_top.sv`:
+
+* `spi_cpu` exports `ss_idle`, and spi_ss's S_ARM and S_SETTLE wait for it. The
+  reasoning: `!cpu_snapshot && !cpu_in_stub` reads READY while spi_cpu sits in
+  SS_RUN, so spi_ss asked a CPU that could not answer. The reasoning is sound and
+  the fix is UNTESTED ON HARDWARE.
+* `ss_idle` also requires `!ss_eip_in_stub && !ss_in_stub_d`, evaluated in
+  clk_cpu, because a guard built from a registered `ss_in_stub` sampled in
+  clk_sys races. Also UNTESTED.
+
+Neither changed the replay's outcome (45.6), which is either because they are
+wrong or because the replay is.
+
+### 45.6 The replay harness -- NEW, and NOT VALIDATED
+
+`SS_LOAD_FILE=<file.ss>` preloads the DDR3 slot from a real savestate taken off
+the hardware, and a restore no longer needs a save earlier in the same run. This
+closes the biggest hole in the test setup: **every savestate test before it used
+a blob the bench had just written itself, from a synthetic save at an arbitrary
+boot-time cycle on rdft2.** Nothing ever exercised a real in-game save. That is
+why the bench passed for hours while the board wedged.
+
+Replaying the user's in-game rdft save (`ingame.ss`, 312,544 bytes) reports:
+
+    load 1  EIP=0026BA5D          ok
+    load 2  EIP=00040049
+    load 3  CS=0000 EIP=00009A80  <- the 386 is lost
+    first EIPs after load: 00040042 43 48 49 4A 4B 00009A80
+    restore: FAILED
+
+which LOOKS exactly like mode A: the stub runs and then irets to a garbage
+segment. **But the harness has not been validated.** Replaying a hardware blob
+into an independently-booted simulation may not be sound at all, and the "load
+asked at EIP=00040049" line prints where the CPU was when the BENCH asserted
+ss_load, not where spi_ss accepted it -- it is not by itself evidence of a guard
+failing, and it was over-read once already.
+
+**Do this before anything else: replay an ATTRACT-mode save, which the hardware
+restores fine. If that fails too, the harness is broken and 45.6 says nothing.**
+
+### 45.7 State at handoff
+
+    branch savestate-phase0, HEAD f240b93, four files uncommitted (45.5)
+    on the board: 861db700 = 44 + the NMI retry + the overlay. Wedges at ~10.
+    a fit was in flight for the interlock and is STALE -- it predates 45.5's
+    ss_idle change. Do not deploy it.
+
+    tools/savestate-debug/  rdft-ingame-wedges.ss  the failing in-game save
+                            read_wedge.sh          screenshot + decode the overlay
+                            README.md              how to use both, and the caveat
+
+    The SDRAM images are not kept -- rebuild with
+    `python3 tools/build_sdram_image.py <set>.zip out.bin --upd --set <set>`
+    from the zips on the MiSTer at /media/fat/games/mame/.
+
+Backups of every build tonight are on the MiSTer as
+`/media/fat/_Arcade/cores/SeibuSPI.rbf.20260821-*` and `-20260822-*`;
+`c1d99fef` (233d7fc, the last CLEAN one) is `.20260822-0022`.
+
+### 45.8 The lesson, again
+
+Three mechanisms reasoned from source, all confident, all wrong: a DS2404 copy
+drain, `ss_dbg_state`=3 read as spi_ss's state when the probe is spi_cpu's, and
+DDR3 contention from a rotate that was not even running on the build that failed.
+Plus a backpressure model that wedged at one busy tick in sixteen and briefly
+looked like a finding.
+
+Every real step came from measurement: the `ss_dbg_stalls` probe (43), the
+hardware bisect (44), the overlay (45.2), and the user's attract-vs-gameplay
+split. The bench passed five back-to-back loads throughout and would never have
+found any of it.
+
+## 46. The rapid-reload lockup, found: a cache hit that skips the freeze (2026-08-22)
+
+45 handed over one instruction: validate the replay harness before believing
+anything it says. Doing that took two bench bugs out of the way, and the harness
+then reproduced the hardware failure exactly and named its cause.
+
+### 46.1 The harness is sound, and here is the proof it was missing
+
+45.6 could not say whether replaying a hardware blob into an independently
+booted simulation means anything. It does, and no board is needed to show it:
+`SS_SAVE_FILE=<f>` writes the slot out at the end of a save exactly as Main
+would, so a blob this bench PRODUCED can be replayed by `SS_LOAD_FILE` in a
+LATER run and the two outcomes compared.
+
+    run A   save at 6,000,000, restore at 8,000,000 in the same run
+    run B   fresh boot, no save, SS_LOAD_FILE=<run A's slot>, restore at same
+
+    main RAM after the restore   F44EA6C163B5EBB4   both
+    the frame it came back on    EIP 0026BA4C, CS 0018, marker 0003FF98   both
+    stub exit                    cycle 9347296   both
+
+Byte-identical, cycle-identical. A blob does carry everything, and replay is a
+real test. **Replaying an attract-mode save, which 45.6 asked for, is no longer
+the gate on believing any of this** -- the round trip is stronger, because it
+compares against a known-good restore of the SAME blob rather than against a
+guess about what the hardware would have done.
+
+### 46.2 Two bench bugs, and why 45.6 could not be read
+
+Both in the replay path, both invisible until the round trip above put a
+known-good case through it:
+
+* **The load took the SAVE branch.** `ss_done` is false in a replay -- there is
+  no save in the run -- so load 1 fell into the `!ss_done` arm. It printed
+  "SAVE COMPLETE ... 0 DDR3 writes, 39068 reads", which is visibly a load, and
+  **the main-RAM-vs-blob exactness check never ran at all.** 45.6 never checked
+  that anything restored.
+* **The saved EIP stayed 0**, read out of a frame at `esp=0`, so
+  `restore: FAILED` was printed no matter what the CPU did. 45.6's FAILED line
+  says nothing; its raw EIPs are still real.
+
+Both fixed. A replay now seeds `ss_done`, the marker slot (`ddr[2]`, which IS
+reliable) and its reference hash from the blob and from load 1, and reads the
+frame out of RESTORED main RAM through the peek window. **The saved EIP is NOT
+parsed out of the blob** -- this bench's model of memory_stream's packing drifts
+in its tail, 223 of 65536 dwords on a GOOD run as well as a bad one, and the
+frame sits exactly where that drift lands. The peek window is authoritative.
+
+And the per-load check runs on EVERY load now, not just the first. A
+rapid-reload failure is by definition never the first one, so a check that ran
+once could not have seen it.
+
+### 46.3 The reproduction
+
+    SS_LOAD_FILE=tools/savestate-debug/rdft-ingame-wedges.ss \
+    SS_RESTORE_AT=6000000 SS_RELOADS=6 ./obj_dir/Vtb_boot_top <sdram> 70000000 rdft
+
+    load 1   restores, resumes at 0026B178          clean
+    load 2   leaves the stub at EIP=00009A80        the 386 is lost
+
+That is mode A off the hardware -- the restore completes, spi_ss goes idle, and
+the 386 is executing rubbish.
+
+### 46.4 What the cycle trace says, which is the whole answer
+
+`SS_WINDOW=<lo>:<hi>` prints every change of spi_cpu's state, spi_ss's state,
+hold, snapshot, in_stub, the stub-window read index and the write counter. The
+restore stub, decoded from the window ROM rather than from the comment above it:
+
+    40  89 E0            mov  eax, esp
+    42  50               push eax          <- the marker. the freeze latches on
+                                              THIS WRITE RETIRING
+    43  BC imm32         mov  esp, 00040204
+    48  5C               pop  esp          <- the read this module answers, and
+                                              the only thing that can stop the CPU
+    49  61               popad
+    4A  CF               iret
+
+Two loads, same blob, same board:
+
+    load 1 (clean)   pop esp MISSES -> read reaches this module -> blocked by
+                     ss_hold -> CPU parks. marker retires with EIP at 40049.
+    load 2 (broken)  pop esp HITS THE L1 DATA CACHE -- the line was filled by
+                     LOAD 1's own read of it and nothing evicts it. The read
+                     never reaches this module, nothing stalls, popad and iret
+                     run off the un-restored stack, and the marker retires ten
+                     cycles later with EIP already at 4004A.
+
+**The freeze was never what held the CPU. The cache miss was.** `ss_hold` gates
+`mem_accept`, so it stops a memory cycle -- and after `pop esp` there is no
+memory cycle left to stop: `popad` reads stack lines that the interrupt's own
+pushes have just put in the cache, and `iret` likewise. On the first load of a
+session the ESP slot is cold and the design works by accident. On the second it
+is warm and there is nothing between the stub and the game's old registers.
+
+This is exactly the attract-versus-gameplay split (45.1): whether that line is
+still resident at the next load is a question about the game's working set, and
+"state the game only has when it is being played" is what a working set IS.
+
+### 46.5 Two fixes that did not work, and what they measured
+
+Recorded because each one killed a plausible mechanism.
+
+* **Refuse the read at `mem_accept`.** Deadlocks. The CPU presents `pop esp`
+  AHEAD of the marker `push eax` still sitting in its write buffer, so refusing
+  the read refuses the write that would release it. Writes stop at 2 and nothing
+  moves again.
+* **Accept the read and withhold the response.** Deadlocks identically. So it is
+  not an ordering quirk of the accept path: **the z386 will not drain its write
+  buffer while a read is outstanding**, measured twice, and that closes off
+  every "just stall the CPU there" fix.
+
+### 46.6 The fix
+
+Two parts, and neither works without the other.
+
+**Evict the ESP slot's cache line with the gate's**, in SS_INVAL. The line has to
+MISS or the read never reaches this module at all. Necessary, and on its own
+insufficient -- with the line evicted the read is serviced ten cycles BEFORE the
+marker retires, and load 2 still comes back at 00009A80.
+
+**Put thirty-two bytes of NOP between `mov esp, imm32` and `pop esp`**, moving
+the tail of the stub from window index 0x12 to 0x18. The CPU walks them out of
+the instruction cache issuing no memory cycle, which is the idle the write
+buffer needs. The marker then retires during the NOPs, `ss_hold` is set well
+before `pop esp` is reached, and the read stalls the way it always did on the
+first load.
+
+    before   the read is serviced 10 cycles BEFORE the marker retires
+    after    ss_hold is set with 20 NOPs still to walk, about 120 cycles of slack
+
+### 46.7 Measured
+
+    replay of the real in-game save, 6 loads
+      every load restores main RAM to 3EB6C8EF324FAF78   EXACT, all six
+      load 1 resumes at 0026B178; no load leaves the stub anywhere else
+
+    save at 6,000,000 then 8 back-to-back loads
+      every load EXACT at F44EA6C163B5EBB4
+      restore: the CPU resumed at the saved CS:EIP
+
+    make verify   exit 0
+
+The `Z80 program MISMATCH` line at the end of a boot run is PRE-EXISTING -- an
+A/B with only `rtl/spi_cpu.sv` reverted gives 48316 of 57907 against 48315 of
+57906. It is not a regression and it is not related.
+
+### 46.8 What this is NOT
+
+**It is not a proof, and it must not be written up as one.** The NOP gap turns a
+10-cycle deficit into about 120 cycles of slack; it does not BOUND the wait. A
+write buffer drain that is held off by the video DMA owning the main RAM port is
+"a few thousand cycles at worst" by spi_ss's own reckoning, and 120 does not
+cover that. What the gap buys is a margin that can be measured, where before
+there was a race that usually came out right.
+
+**The deterministic version is a spin loop**, and it is the next thing to build
+if this proves insufficient: replace the NOPs with a poll of a hardware flag
+this module answers -- each read COMPLETES, so the write buffer drains between
+iterations and there is no deadlock, and the CPU cannot pass until the hardware
+says the blob has landed. It needs the flag's line snooped on every iteration,
+which this module can drive, because otherwise the first fill makes every later
+poll a cache hit -- the same bug as 46.4, one level up.
+
+**Nothing here has been on hardware, and there has been no fit.** The 86-point
+sweep has not been re-run either; 45's note that it cannot be re-run naively
+still stands.
+
+### 46.9 The lesson
+
+44 and 45 both wrote down "measure, do not reason", and both then shipped a fix
+reasoned from source. What found this was three instruments in a row, each one
+answering the question the last one raised: the round trip said the harness was
+sound, the per-load check said load 2 was where it broke, and the cycle window
+said the read never happened. The mechanism was not guessable -- it is a cache
+hit in a core nobody here wrote, visible only as a read that is ABSENT from a
+trace.
+
+The corollary for the two dead fixes: both were killed by the same measurement,
+and neither would have been proposed at all if the write buffer's behaviour had
+been measured before rather than after.
+
+### 46.10 Confirmed on hardware (2026-08-22)
+
+`5bcf8fbe` was fitted from `9fc9cb4` and deployed, and **the user reports the
+rapid-reload lockup is gone.** Save during active gameplay and reload rapidly --
+the case that wedged in about three before the NMI retry and about ten after it
+-- now survives.
+
+That is the measurement that counts. Everything before it was simulation, and
+this project has twice shipped a "fix" that simulation liked and the board did
+not (43, 44). The chain that got here was: validate the harness (46.1), make the
+bench able to see a second load at all (46.2), reproduce (46.3), then read the
+cycle window (46.4). The bug itself was never visible to anything coarser -- it
+showed up as a read that was ABSENT from a trace.
+
+**The caveat in 46.8 still stands and is not retired by this.** What shipped is
+a ~120-cycle margin, not a bound. A write-buffer drain held off by the video DMA
+owning the main RAM port is "a few thousand cycles at worst" by spi_ss's own
+reckoning, and nothing here has exercised that coincidence. If a wedge ever comes
+back -- especially one that appears only under heavy sprite DMA -- go straight to
+the spin loop in 46.8 rather than re-deriving the mechanism.
+
+**The reproducer is spent.** `tools/savestate-debug/rdft-ingame-wedges.ss` now
+replays six clean loads, so it can no longer reproduce anything. Take a fresh
+in-game save off the board before debugging any future wedge; the file is kept
+because it is still the only real in-game save in the tree and it is what 46 was
+found with.
+
+## 47. The deterministic version: an uncacheable window and a handshake (2026-08-22)
+
+46 shipped a margin and said so. This replaces it with something that cannot
+race, and in doing so found that the root defect was smaller and dumber than 46
+made it look.
+
+### 47.1 The real defect: a hardware window that was never marked uncacheable
+
+This design has always known that a window the fabric answers combinationally
+must not be cached. `spi_cpu.sv` has said so since the beginning:
+
+    .DCACHE_UNCACHED_MASK (32'hFFFF_FC00),   // I/O window
+    .DCACHE_UNCACHED_BASE (32'h0000_0400)
+
+**The savestate stub window at 0x40000 is answered by the same module, in the
+same way, and was never added to that list.** Every symptom in 46 follows from
+that one omission -- the stale line, the stall that vanished on the second load,
+the line fill that walked past a dword-granular gate, the need to snoop.
+
+It is fixed where it belonged all along. `l1_cache` and `z386` take a SECOND
+mask/base pair (defaulting to a base outside its own mask, so it matches nothing
+and no other instantiation changes), because 0x400 and 0x40000 are too far apart
+for one mask and the stub cannot move: main RAM is below it and the game's IDT
+sits at 0x900.
+
+The snoop 46 added for the ESP slot is deleted. There is no line to evict now.
+The GATE's snoop stays -- the gate lives in main RAM, which is cached and must be.
+
+### 47.2 There is no halt, and that is why the answer is a poll
+
+Checked before designing anything, because "add a spin loop" is only right if
+nothing better exists:
+
+* z386 has **no clock enable and no stall input**. The only backpressure is
+  `ready` on a single outstanding access.
+* `single_step` looked like a halt -- "Halt after each instruction" -- and is
+  not. It sets `halted <= 1'b1` at `z386.sv:2509` and **that latch is never
+  cleared anywhere in the file**. It is a one-way kill switch for tests.
+
+So `ss_hold` can only ever stop the NEXT memory access. It cannot stop an
+instruction whose operands are already in cache or prefetch, which is exactly
+what `popad` and `iret` are. **The design was treating memory backpressure as a
+halt for nine sections. It is not one.**
+
+Given a CPU that cannot be stopped, the correct primitive is to make it ASK.
+That is not a workaround for the missing halt; it is what software does when
+hardware cannot be trusted to have finished.
+
+### 47.3 The second defect: synchronising on an implicit side-effect
+
+The freeze triggered on "the marker write retired" -- a write issued several
+instructions earlier, retiring whenever write-buffer pressure allowed. That is an
+observation with a hopeful assumption attached, not a handshake. It was
+well-ordered on the first load of a session and not after.
+
+Both stubs now poll a flag this module answers:
+
+    SAVE, at 0x00                        RESTORE, at 0x40
+      60              pushad               89 E0           mov  eax, esp
+      89 E0           mov  eax, esp        50              push eax     <- marker
+      50              push eax  <- marker  2E 8B 05 imm32  mov eax,cs:[GO]
+      2E 8B 05 imm32  mov eax,cs:[GO]      85 C0           test eax, eax
+      85 C0           test eax, eax        74 F5           jz   0x43
+      74 F5           jz   0x04            BC imm32        mov  esp, SS_STUB_ESP
+      83 C4 04        add  esp, 4          5C              pop  esp
+      61              popad                61              popad
+      CF              iret                 CF              iret
+
+    ss_go = !ss_active     one dword at SS_STUB_BASE + 0x208
+
+`ss_active` is set when the request is latched and cleared only in the
+`hold_rel` branch, so the flag reads zero for exactly the interval during which
+the CPU must not proceed. EAX is clobbered by the poll after `pushad` has
+already saved it and `popad` puts it back; EFLAGS likewise, restored by `iret`.
+
+**Why a poll and not a stall.** 46.5 measured that the z386 will not drain its
+write buffer while a read is outstanding, at `mem_accept` and at the response
+both -- so refusing the read refuses the marker write the freeze is waiting for,
+and it deadlocks. A poll read COMPLETES, so the buffer drains between
+iterations. Once the marker does retire, `ss_hold` blocks the next poll and the
+CPU parks with nothing left pending. Both orderings are correct and neither is
+timed.
+
+**The save gets it too**, and needed it: the save stub's `add esp,4 / popad /
+iret` read the stack out of cache exactly as the restore's did, so the same race
+could have let the 386 resume while the blob was still being streamed -- a torn
+save rather than a wrecked restore. Never observed, and now not possible.
+
+### 47.4 Measured
+
+    replay of the real in-game save, 6 loads   every one EXACT at 3EB6C8EF324FAF78
+                                               every one exits the stub at 0026B178
+    save at 6,000,000 then 8 back-to-back      every one EXACT at F44EA6C163B5EBB4
+    make verify                                exit 0
+
+**The loop was exercised deliberately, because it did not fire on its own.** In
+normal operation the poll read is issued once and blocked by `ss_hold`, then
+answered with 1 after release -- the park path, not the spin path. A temporary
+build that forced `ss_go` low for eight reads after release proved the other
+half: eight polls returning 0, one returning 1, the CPU proceeding, the restore
+still EXACT and still resuming at 0026B178, with the stub exit 210 cycles later.
+A mis-encoded `jz` would have been a latent bug visible only under the timing
+46's NOP gap could not survive. It is encoded right.
+
+### 47.5 What is left
+
+The NOP gap and its ~120-cycle margin are gone; so is 46.8's caveat, which was
+the reason for this section. Nothing here rests on a drain completing in time.
+
+Not yet fitted or on hardware at the time of writing.
+
+### 47.6 The fit
+
+    setup +0.313  clk_ram (spi_ds2404|sptr -> arm)     hold +0.244  (blank_cnt)
+    clk_cpu +0.753   clk_sys +2.252   pll_hdmi +0.455
+    TNS 0.000 on every clock   SEED 3
+    ALMs 36,534 (87 %)   registers 35,488   RBF md5 49668c89
+
+**Better than 46's fit on both edges** (+0.171 / +0.143), which is not the
+direction a change like this usually moves a design -- the NOP gap's 32 bytes of
+window ROM came out and the poll cost about 93 registers net. The one critical
+warning is the ymf271_synth MIF depth (1799 vs 2048) and is benign; it is not
+34's seed tell. The YMF ch5 hold path is clear -- the worst ten hold paths are
+self-loops and framework logic, none of them a clk_ram->clk_sys crossing.
+
+Deployed md5-verified 2026-08-22 04:49. `5bcf8fbe` (46, the margin version, which
+the board did pass) is kept as `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0449`.
+
+### 47.7 Confirmed on hardware (2026-08-22)
+
+`49668c89` stress tested on the board: **no wedges at all**, across both
+directions. That covers the piece simulation could least vouch for -- the SAVE
+stub changed here for the first time in the whole effort, and a torn save is
+exactly the failure that would not announce itself.
+
+Both fixes are now hardware-confirmed, and it is worth being precise about which
+one was load-bearing, because the two builds say different things:
+
+    5bcf8fbe (46)   margin: uncacheable-by-snoop + a 32-byte NOP gap    passed
+    49668c89 (47)   structural: uncacheable-by-declaration + a poll     passed
+
+46 passing means the mechanism in 46.4 was correctly identified. 47 passing means
+the structural version costs nothing -- it is a better fit on both edges, it
+removes the timing assumption, and it closes the save-side analogue that 46 left
+open. There is no reason to keep 46's approach around except as the fallback
+bitstream, which is what `.20260822-0449` is for.
+
+**Nothing in the savestate path now depends on an event happening in time.** The
+freeze still latches on the marker write, but the CPU can no longer outrun it:
+it cannot pass the poll until the operation has let go, and the poll cannot be
+served stale because the window is declared uncacheable. That was the whole of
+43 through 46.
+
+## 49. The OSD menu was one line out of step, and the info list was why (2026-08-22)
+
+Every savestate checklist item in `tools/savestate-debug/HARDWARE-SESSION.md`
+section A passed on the board. The session found something else: **every menu
+entry below the savestate block did the job of the one above it.** Selecting
+"Video Settings" did nothing; selecting "Sample Flash" opened Video Settings.
+
+### 49.1 The cause
+
+`CONF_STR` split into fields the way Main splits it:
+
+    7   -
+    8   I,Slot=DPAD|Save/Load=Start+DPAD,Active Slot 1,...
+    9   -
+    10  P1,Video Settings
+
+**Main counts the `I,` list as a menu line.** It sat in the MIDDLE of the menu,
+between the savestate items and the Video Settings page, with a separator on
+each side -- so it rendered as a near-blank row between two other near-blank
+rows, which reads as slightly wider spacing rather than as an extra entry.
+Everything below it was then one line out of step with its action.
+
+Nothing about the field itself was malformed. It is `I,` + thirteen
+comma-separated entries + `;`, which is the correct form. **The defect was
+purely its POSITION**, and it is the reason this core misbehaved where every
+other one does not: the convention is to put the list at the end, and this core
+put it where it was thematically relevant instead -- next to the savestate items
+it describes.
+
+### 49.2 The fix
+
+Moved to the end of `CONF_STR`, immediately before `V,v`. The doubled separator
+that was left behind collapses to one.
+
+**The entry order and count are untouched** -- thirteen, with the help text still
+at index 1 -- because `savestate_ui` indexes this list BY POSITION and
+`ss_info <= 7'd1` is the help. Reordering it would have swapped every message
+the OSD shows for a savestate action.
+
+### 49.3 And the help text, which was wrong for this core
+
+Fixed in the same field, where it cannot affect the parse:
+
+    was   Slot=DPAD|Save/Load=Start+DPAD
+    now   Slot=Start+LR|Save/Load=Start+DU
+
+The stock string is right for a core with a dedicated SS button. Here `joySS` is
+wired to Start and `joyStart` is tied to 0, so every combination is Start plus a
+direction and **bare DPAD does nothing**. The old text sent someone looking for a
+slot-switching bug that did not exist, which is why writing the hardware
+checklist started by reading the RTL rather than the screen.
+
+### 49.4 The fit, and what is NOT yet known
+
+    setup +0.260  clk_ram    hold +0.231  (ascal)    TNS 0.000 everywhere
+    ALMs 36,452 (87 %)   registers 35,375   RBF md5 75999219
+    ZERO critical warnings -- the ymf271_synth MIF line is gone this time
+    YMF ch5 hold path clear: worst holds are ascal, blank_cnt, sys_umuldiv
+
+Deployed md5-verified 2026-08-22 18:12. `49668c89` (47) is kept as
+`/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-1812`.
+
+**The menu has NOT been looked at on hardware yet.** The change is to a string
+and cannot move logic, so the timing movement against 47's +0.313/+0.244 is
+placement noise and nothing more.
+
+If the off-by-one survives, the next thing to look at is the count of near-blank
+rows around the savestate block on screen: the theory above predicts exactly one
+fewer of them after this change.
+
+### 50.6 Cart copy is NOT broken, and the toggle WORKS (2026-08-22)
+
+Deleted the nvram, loaded rdft fresh, selected Cart copy: **the game rebooted
+into the update countdown with no checksum error.**
+
+That is two results. The Cart copy path is clean, and **B2 passed** -- the live
+0 -> 1 edge, blanking the stamp and self-resetting, which was the last path in
+the whole flash effort that had only ever run in simulation (32.3, and RESUME
+had it listed as unverifiable from a host). It works.
+
+So the corruption was written into the FILE by something earlier in the session,
+and 50.4's step 1 and 2 are done.
+
+### 50.7 The mechanism: the save side reads the SRAM LIVE, and cannot be held off
+
+`spi_nvram` streams the 516-byte file a byte at a time, and the tail comes
+**straight out of the DS2404's live array**:
+
+    assign ioctl_din = !up_run ? 8'd0
+                     : in_tail ? sram_dout
+                     :           cur[{up_cnt[2:0], 3'b000} +: 8];
+
+with the reason stated a few lines above it:
+
+    hps_io samples ioctl_din on the same edge it advances its address, and
+    NOTHING CAN HOLD IT OFF
+
+There is no snapshot. And **there is no interlock of any kind between the
+savestate path and this stream** -- grep finds no cross-reference in either
+direction.
+
+A savestate RESTORE writes all 512 bytes of that array through `ss_ram_we`. If
+Main is streaming the file out while that happens, the file gets a contiguous run
+of bytes from one version and the rest from the other. **A torn eight-byte run is
+exactly the shape observed** (50.1), and the stamp's byte 0 has the same
+explanation one level down: it comes from a prefetched SDRAM line, and the
+savestate is hammering SDRAM.
+
+**This is a regression that savestates introduced.** Before 38, the only writer
+of that SRAM was the game itself, one byte at a time through the DS2404's command
+sequence -- a torn read there costs at most one stale byte, which is why this
+never showed up in the DS2404 work. A restore rewrites all 512 at once.
+
+It also explains why 50.3's bench check came back EXACT and was still worth
+having: the mechanism is not that the restore writes the WRONG bytes. It writes
+the right ones, at a moment nothing coordinates with.
+
+### 50.8 The prediction that tests this, and the fix if it holds
+
+**Falsifiable, and step 3 of the bisect:** with a good nvram file, load a
+savestate a few times while the game runs, then pull the file and compare it
+against the reference. **If this mechanism is right it will corrupt again**, and
+the corruption will be a contiguous run rather than scattered bytes.
+
+If it holds, the invariant to restore is: *while Main is streaming the file out,
+the bytes it reads must not change.* Two ways, and the second is the correct one:
+
+* **Gate the savestate's SRAM writes on `!up_run`.** One line, no extra RAM. The
+  restore can be stalled -- the bridge holds its request until acked -- and a
+  516-byte stream is short. But it only closes one direction: a stream STARTING
+  while the restore is mid-write still tears, and that window is small rather
+  than absent.
+* **Stream from a shadow copy.** 512 bytes, snapshotted when a save is requested,
+  with the save side reading the shadow and never the live array. Correct in both
+  directions, and a slightly stale but CONSISTENT file is strictly better than a
+  torn one. One write port on the shadow, so nothing about memory inference
+  changes (39.7).
+
+Do not build either until the prediction has been run.
+
+### 50.9 The prediction FAILED, and a better explanation was in front of me
+
+Ran exactly as 50.8 asked: a good file, savestates loaded several times, then an
+OSD-triggered nvram save. The file is **clean**.
+
+    stamp        80 4a 4a 36              correct, programmed
+    tail[20..27] 67 45 23 01 ef cd ab 89  the test patterns, correct
+    vs the 32.7 reference: 2 bytes differ -- tail[18] and tail[30], both on the
+    six-byte RTC stride 32.7 already documented as expected
+
+**So 50.7 is NOT the cause.** It is the fifth confident mechanism in this file's
+history to fail its first test, and the only difference this time is that the
+prediction was written down before the fix was built, so the fix was not built.
+
+**What 50.7 still is:** a real latent hazard. The save side does read the live
+array, it genuinely cannot be held off, and there genuinely is no interlock.
+Nothing about that changed -- only the claim that it explains this corruption.
+Downgraded from cause to hazard, and left alone rather than fixed blind. 40.4 is
+the argument for writing it down: a latent hazard masked by something unrelated
+is worse than an open one.
+
+**What fits the evidence far better, and was in front of me the whole time:** the
+corrupt file was written in the session where **the OSD was off by one** (49).
+Every menu selection in that session did the job of the item above it. Toggling
+what looked like one option moved a different status bit -- and `status[22]` is
+Sample Flash, whose 0 -> 1 edge fires `copy_reset`: blank the stamp and restart
+the board.
+
+That explains both halves of the damage, which 50.7 only ever explained loosely:
+
+* **stamp `3A FF FF FF`** -- caught mid-blank. Bytes 1-3 blanked, byte 0 not yet.
+  A far better fit than "the savestate is hammering SDRAM".
+* **the test patterns garbage** -- the self-reset reboots the game, which rewrites
+  its DS2404 test patterns on the way up. A save landing in that window tears them.
+
+It also predicts what was observed afterwards: **since the menu fix, savestates
+plus an OSD save produce a clean file**, and Cart copy works from a clean start.
+
+This is not confirmed either, and it is not worth chasing retroactively -- the
+menu bug that would have caused it is fixed, and the symptom is gone. It is
+recorded so that nobody re-derives 50.7 from the same evidence.
+
+### 50.10 Where section B stands
+
+    B1  Cart copy at boot, the updater runs to completion   PASS
+    B2  the live 0 -> 1 toggle, blank and self-reset        PASS
+    B3  switching back does nothing until the next boot     not separately run
+
+Which finishes the flash work: every mode and every transition has now run on
+hardware.

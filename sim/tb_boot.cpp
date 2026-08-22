@@ -76,6 +76,24 @@ struct Chan {
     uint64_t count    = 0;
 };
 
+
+// The DS2404's 512 bytes of bookkeeping SRAM. It is SSIDX_DS2404_RAM in the
+// blob and nothing had ever checked that it survives a save/restore -- the
+// bench could not see it until PLAN.md 50 added the probe. The game keeps its
+// audit page and two fixed test patterns here, reads them back, and shows
+// CHECK SUM ERROR if they are wrong.
+static uint64_t ds_ram_hash(Vtb_boot_top *dut)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (uint32_t i = 0; i < 512; i++) {
+        dut->p_ds_ram_addr = (uint16_t)i;
+        dut->eval(); dut->eval();          // the read is one cycle behind
+        h ^= dut->p_ds_ram_dout & 0xFF;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
@@ -216,11 +234,164 @@ int main(int argc, char **argv)
 
     // clk_ram = 4x clk_cpu, clk_sys = 2x clk_cpu in this model (ratios match the PLL).
     uint64_t cyc = 0;
+    uint32_t idt_base_last = 0;
+    uint64_t idt_changes = 0;
+    uint32_t eip_last = 0;
+    uint64_t eip_changes = 0, in_stub_cycles = 0;
+    int      in_stub_d = 0, in_stub_runs = 0;
+
+    // ---- savestates ------------------------------------------------------
+    // SS_AT is a cycle count at which a save is asked for, the way the OSD
+    // asks; SS_RESTORE_AT likewise for a load. 0 disables each, so every
+    // existing use of this testbench behaves exactly as before.
+    const char *ss_env = getenv("SS_AT");
+    const uint64_t ss_at = ss_env ? strtoull(ss_env, nullptr, 0) : 0;
+    const char *rst_env = getenv("SS_RESTORE_AT");
+    const uint64_t ss_restore_at = rst_env ? strtoull(rst_env, nullptr, 0) : 0;
+    // SS_RELOADS is how many loads to fire in total, back to back, each one
+    // SS_RELOAD_GAP cycles after the previous finished. 1 (the default) is the
+    // old single-restore behaviour exactly. This exists because the hardware
+    // lockup is a REPEATED load -- "2-3 reloads of the same state one after
+    // another" -- and a single restore never reproduced it. PLAN.md 44.
+    const char *rn_env = getenv("SS_RELOADS");
+    const unsigned ss_reloads = rn_env ? (unsigned)strtoul(rn_env, nullptr, 0) : 1;
+    const char *rg_env = getenv("SS_RELOAD_GAP");
+    const uint64_t ss_reload_gap = rg_env ? strtoull(rg_env, nullptr, 0) : 1000;
+    unsigned rs_count = 0;          // loads fired so far
+    uint64_t rs_next  = 0;          // cycle the next one may fire at
+
+    const char *ha_env = getenv("SS_HASH_AFTER");
+    const uint64_t ss_hash_after = ha_env ? strtoull(ha_env, nullptr, 0) : 0;
+
+    // A flat DDR3, 512 KB of it -- one savestate slot. memory_stream drives a
+    // byte address and a 64-bit port, so this is indexed by addr >> 3. Answers
+    // with the one-cycle latency the real controller has at its best; there is
+    // no point modelling worse, because the engine holds its request until
+    // rdata_ready and the transfer is not on any critical path.
+    // SS_LOAD_FILE preloads the savestate slot from a REAL .ss taken off the
+    // hardware, so a restore can be replayed exactly as the board did it. Every
+    // savestate test before this used a blob the bench had just written itself,
+    // from a synthetic save at an arbitrary boot-time cycle -- which is why the
+    // bench passed for hours while the board wedged. PLAN.md 45.
+    //
+    // Main writes the slot verbatim, so the file IS the DDR3 image: byte n of
+    // the file is byte n at the slot base.
+    std::vector<uint64_t> ddr(65536, 0);
+    const bool ss_replay = getenv("SS_LOAD_FILE") != nullptr;
+    // Main RAM inside the blob: MAIN_RAM's payload starts at word 3, two
+    // dwords to the word, which is the packing the load's compare below
+    // already assumes.
+    auto blob_dw = [&ddr](uint32_t i) -> uint32_t {
+        uint64_t d = ddr[3 + (i >> 1)];
+        return (i & 1) ? (uint32_t)(d >> 32) : (uint32_t)(d & 0xFFFFFFFFu);
+    };
+    if (ss_replay) {
+        const char *lf = getenv("SS_LOAD_FILE");
+        FILE *f = fopen(lf, "rb");
+        if (!f) { fprintf(stderr, "SS_LOAD_FILE: cannot open %s\n", lf); return 2; }
+        size_t n = fread(ddr.data(), 1, ddr.size() * 8, f);
+        fclose(f);
+        printf("  SS: preloaded %zu bytes of slot from %s\n", n, lf);
+    }
+    dut->ddr_rdata       = 0;
+    dut->ddr_busy        = 0;
+    dut->ddr_rdata_ready = 0;
+    dut->ss_save = 0;
+    dut->ss_load = 0;
+    int      ddr_lat = -1;
+    uint32_t ddr_lat_addr = 0;
+    uint64_t ddr_writes = 0, ddr_reads = 0;
+
+    bool     ss_fired = false, ss_done = false;
+    bool     rs_fired = false, rs_done = false;
+    uint64_t ss_snap_cyc = 0;
+    uint32_t ss_saved_esp = 0;
+    bool     ss_busy_d = false;
+    uint64_t ds_rtc_d = 0;
+    // SS_DSTRACE: every RTC tick during an operation, and every non-zero read
+    // of the DS2404's data port with the cycle and the counter behind it. The
+    // cycle is the part that matters -- a value difference alone cannot say
+    // whether the clock is wrong or the game arrived at a different time.
+    const bool ds_trace = getenv("SS_DSTRACE") != nullptr;
+    uint64_t ss_resume_cyc = 0, ss_resume_vbl = 0;
+    bool     ss_hashed = false;
+    uint32_t ss_saved_eip = 0;
+    bool     ss_eip_matched = false;
+    uint64_t ss_eip_match_cyc = 0;
+    bool     ss_entered = false;
+    uint64_t ss_enter_cyc = 0;
+    uint32_t ss_marker = 0;
+    uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
+    uint64_t ss_ds_at_save = 0;
+    // A replay run has no save of its own, so everything the verdicts are
+    // keyed on -- ss_done, the marker slot, the saved EIP, the reference hash
+    // -- has to come out of the BLOB instead. Without this the load takes the
+    // save branch (mislabelled "SAVE COMPLETE", and the exactness check never
+    // runs at all), and the saved EIP stays 0 so the resume verdict reads
+    // FAILED no matter what the CPU did. Both of those were true of the run
+    // reported in PLAN.md 45.6. Fixed here; see 46.
+    if (ss_replay) {
+        ss_done       = true;                       // the blob IS the save
+        // The marker slot is GLOBAL's one item, at word 2, and that word IS
+        // reliable -- it reads back the same address the snapshot reports.
+        // The saved EIP is NOT taken from the blob: this bench's parse of
+        // memory_stream's packing drifts in its tail (223 of 65536 dwords, on
+        // a GOOD run as well as a bad one), and the frame sits at the top of
+        // main RAM where that drift lands. It is read out of RESTORED main RAM
+        // through the peek window instead, below, which is authoritative.
+        ss_saved_esp  = (uint32_t)(ddr[2] & 0xFFFFFFFFu);
+        printf("  SS: replay: the blob's marker slot is %08X\n", ss_saved_esp);
+    }
+    uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
+    const size_t IO_RD_MAX = 400000; size_t io_rd_n = 0; bool io_rd_d = false;
+    const char *iort = getenv("SS_IORD");
+    uint32_t *io_rd_trail = iort ? new uint32_t[IO_RD_MAX] : nullptr;
+    const size_t LONG_MAX_N = 400000; size_t long_n = 0;
+    const char *lt_path = getenv("SS_TRAIL");
+    uint32_t *long_trail = lt_path ? new uint32_t[LONG_MAX_N] : nullptr;
+    const size_t LONG_MAX = LONG_MAX_N;
+    uint64_t ss_snap_vbl = 0, ss_busy_start = 0, ss_hash_anchor = 0;
+
     for (uint64_t t = 0; t < max_steps; t++) {
         // clk_ram toggles every step; clk_sys every 2; clk_cpu every 4
         dut->clk_ram = (t >> 0) & 1;
         dut->clk_sys = (t >> 1) & 1;
         dut->clk_cpu = (t >> 2) & 1;
+
+        // The DDR3 the blob lives in. One clk_sys tick per two steps, which
+        // is where memory_stream runs. A read answers on the next tick; a
+        // write lands immediately. The engine holds its request until it sees
+        // rdata_ready, so a lazier model would only make the transfer longer.
+        if ((t & 3) == 0) {
+            bool acq = dut->ddr_acquire;
+            // SS_DDR_BUSY models a SECOND MASTER on DDR3 -- which on hardware is
+            // screen_rotate, and which this bench has never had. It matters now:
+            // before 42 the raster froze during a transfer so rotate was idle,
+            // and now video free-runs and rotate bursts throughout. Deterministic
+            // (no rand) so a failure reproduces. PLAN.md 44.
+            dut->ddr_rdata_ready = 0;
+            if (ddr_lat == 0) {
+                dut->ddr_rdata = ddr[(ddr_lat_addr >> 3) & 0xFFFF];
+                dut->ddr_rdata_ready = 1;
+                ddr_lat = -1;
+                ddr_reads++;
+            } else if (ddr_lat > 0) {
+                ddr_lat--;
+            } else if (acq && dut->ddr_read) {
+                ddr_lat_addr = dut->ddr_addr;
+                ddr_lat = 0;
+            } else if (acq && dut->ddr_write) {
+                uint32_t w = (dut->ddr_addr >> 3) & 0xFFFF;
+                uint64_t cur = ddr[w], nw = dut->ddr_wdata;
+                for (int b = 0; b < 8; b++)
+                    if (dut->ddr_byteenable & (1u << b)) {
+                        uint64_t m = 0xFFULL << (8 * b);
+                        cur = (cur & ~m) | (nw & m);
+                    }
+                ddr[w] = cur;
+                ddr_writes++;
+            }
+        }
 
         dut->eval();
 
@@ -327,6 +498,433 @@ int main(int argc, char **argv)
             hb_d = dut->v_hb; vb_d = dut->v_vb;
 
             cyc++;
+            if (dut->p_eip != eip_last) {
+                eip_changes++;
+                // The first few instruction boundaries after a load is
+                // released: where the restore stub's iret actually landed.
+                if (in_stub_d && trail_armed && trail_n < 24)
+                    trail[trail_n++] = dut->p_eip;
+                // The full instruction trail after the last operation finished.
+                // Diffing two of these names the exact instruction at which a
+                // restored machine first goes a different way, which is a fact
+                // rather than a guess about which section is missing.
+                if (long_trail && ss_hash_anchor && long_n < LONG_MAX)
+                    long_trail[long_n++] = dut->p_eip;
+                eip_last = dut->p_eip;
+            }
+            if (dut->p_ss_in_stub) in_stub_cycles++;
+            if (dut->p_ss_in_stub != in_stub_d) {
+                if (in_stub_runs++ < 16)
+                    printf("  SS: in_stub %d -> %d at cycle %llu, EIP=%08X\n",
+                           in_stub_d, dut->p_ss_in_stub,
+                           (unsigned long long)cyc, dut->p_eip);
+                // Arm the trail when the CPU leaves the stub for the second
+                // time, which on a save-then-load run is the load's exit.
+                if (in_stub_d && !dut->p_ss_in_stub) {
+                    if (ss_done) trail_armed = true;
+                }
+                in_stub_d = dut->p_ss_in_stub;
+            }
+
+            // Phase 0 of the savestate work: the IDT has to be visible and
+            // stable before a gate in it can be overlaid. Record when the boot
+            // code's LIDT lands and whether it ever moves afterwards.
+            if (dut->p_idt_base != idt_base_last) {
+                idt_changes++;
+                if (idt_changes <= 8)
+                    printf("  IDT -> base=%08X limit=%05X at cycle %llu "
+                           "(CS=%04X EIP=%08X)\n",
+                           dut->p_idt_base, dut->p_idt_limit,
+                           (unsigned long long)cyc, dut->p_cs, dut->p_eip);
+                idt_base_last = dut->p_idt_base;
+            }
+
+            // ---- savestates, driven the way the OSD drives them --------
+            // One pulse in, and the board does everything: NMI, stub, freeze,
+            // the whole blob through memory_stream to DDR3, release. Phase 0's
+            // testbench drove each of those steps by hand; none of that is
+            // here any more, which is the point -- what runs now is the path
+            // the hardware takes.
+            dut->ss_save = 0;
+            dut->ss_load = 0;
+            if (ss_at && !ss_fired && cyc >= ss_at && !dut->p_ss_busy) {
+                ss_fired = true;
+                dut->ss_save = 1;
+                printf("  SS: RTC at request: %llu (tick %u)\n",
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+                printf("  SS: save asked for at cycle %llu, CS=%04X EIP=%08X\n",
+                       (unsigned long long)cyc, dut->p_cs, dut->p_eip);
+            }
+            // With SS_LOAD_FILE the slot is already populated, so a restore no
+            // longer has to be preceded by a save in the same run.
+            if (ss_restore_at && ss_done && rs_count < ss_reloads
+                && cyc >= (rs_count ? rs_next : ss_restore_at)
+                && !dut->p_ss_busy) {
+                rs_count++;
+                rs_fired = true;           // the first one still gates the
+                                           // existing verdicts and hashes
+                rs_next  = cyc + ss_reload_gap;
+                dut->ss_load = 1;
+                if (ss_reloads > 1)
+                    printf("  SS: --- load %u of %u ---\n", rs_count, ss_reloads);
+                printf("  SS: RTC at request: %llu (tick %u)\n",
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+                printf("  SS: load asked for at cycle %llu, CS=%04X EIP=%08X\n",
+                       (unsigned long long)cyc, dut->p_cs, dut->p_eip);
+            }
+
+            if (dut->p_ss_snapshot && !ss_snap_cyc) {
+                ss_snap_cyc  = cyc;
+                // Frozen, and the stream has not run yet on a save nor
+                // finished on a load. Hashing main RAM here is layout-free:
+                // the two hashes must match if the restore is exact, and
+                // neither depends on knowing how memory_stream packs a section.
+                uint64_t hh = 1469598103934665603ULL;
+                for (uint32_t i = 0; i < 65536; i++) {
+                    dut->peek_addr = (uint16_t)i;
+                    dut->eval();
+                    uint32_t v = dut->peek_data;
+                    for (int b = 0; b < 4; b++) {
+                        hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
+                    }
+                }
+                ss_snap_vbl = n_vbl;
+                if (!ss_done) ss_ds_at_save = ds_ram_hash(dut);
+                if (!ss_done) ss_hash_at_save = hh;
+                else          ss_hash_pre_load = hh;
+                if (!ss_done) ss_saved_esp = dut->p_ss_esp_out;
+                else          ss_marker    = dut->p_ss_esp_out;
+                printf("  SS: frozen at cycle %llu, marker slot %08X\n",
+                       (unsigned long long)cyc, ss_saved_esp);
+            }
+
+            // busy falls when the whole operation is over.
+            // Every RTC tick that happens while a savestate is in progress,
+            // with the sequencer state it happened in. `pause` is deliberately
+            // NOT asserted in S_ARM, so ticking there is correct on a SAVE --
+            // the machine is live. On a load it was the leak that made three
+            // write-ups blame the RTC; see rtl/spi_ss.sv.
+            if (ds_trace && dut->p_ss_busy && dut->p_ds_rtc != ds_rtc_d)
+                printf("    SS: RTC tick -> %llu at cycle %llu, ss_state=%u\n",
+                       (unsigned long long)dut->p_ds_rtc,
+                       (unsigned long long)cyc, dut->p_ss_state);
+            ds_rtc_d = dut->p_ds_rtc;
+
+            // SS_WINDOW=<first>:<last> -- every cycle in a cycle range, with
+            // spi_ss's state beside spi_cpu's. Built for the rapid-reload
+            // lockup: the interesting event is the CPU leaving the stub while
+            // the transfer is still running, which is ~100 cycles wide and
+            // invisible to any per-operation printf. PLAN.md 46.
+            static uint64_t win_lo = 0, win_hi = 0;
+            static bool win_init = false;
+            if (!win_init) {
+                win_init = true;
+                if (const char *w = getenv("SS_WINDOW")) {
+                    win_lo = strtoull(w, nullptr, 0);
+                    const char *c = strchr(w, ':');
+                    win_hi = c ? strtoull(c + 1, nullptr, 0) : win_lo + 400;
+                }
+            }
+            if (win_hi && cyc >= win_lo && cyc <= win_hi) {
+                static const char *ssn[] = {"IDLE","INVAL","NMI","RUN",
+                                            "4","5","6","7"};
+                static uint32_t pe = 0xFFFFFFFF; static unsigned pst = 99, pseq = 99;
+                static unsigned ph = 9, psn = 9, pis = 9, pw = 0xFFFF;
+                static unsigned prd = 0xFFFF;
+                unsigned h = dut->p_ss_hold, sn = dut->p_ss_snapshot;
+                unsigned is = dut->p_ss_in_stub;
+                if (dut->p_eip != pe || dut->p_ss_state != pst
+                    || dut->p_ss_seq != pseq || h != ph || sn != psn
+                    || is != pis || dut->p_ss_writes != pw
+                    || dut->p_ss_stub_reads != prd) {
+                    printf("  W %llu  cpu=%-5s hold=%u snap=%u in_stub=%u "
+                           "seq=%2u  CS=%04X EIP=%08X  writes=%u wa=%08X "
+                           "wd=%08X busy=%u\n",
+                           (unsigned long long)cyc, ssn[dut->p_ss_state & 7],
+                           h, sn, is, dut->p_ss_seq, dut->p_cs, dut->p_eip,
+                           dut->p_ss_writes, dut->p_ss_last_wa,
+                           dut->p_ss_last_wd, dut->p_ss_busy);
+                    printf("        stub_reads=%u idx=%02X data=%08X\n",
+                           dut->p_ss_stub_reads, dut->p_ss_stub_idx,
+                           dut->p_ss_stub_data);
+                    pe = dut->p_eip; pst = dut->p_ss_state; pseq = dut->p_ss_seq;
+                    ph = h; psn = sn; pis = is; pw = dut->p_ss_writes;
+                    prd = dut->p_ss_stub_reads;
+                }
+            }
+
+            if (!ss_busy_d && dut->p_ss_busy) {
+                ss_busy_start = cyc;
+                printf("  SS: RTC when the operation was armed: %llu (tick %u)\n",
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+            }
+            if (ss_busy_d && !dut->p_ss_busy) {
+                printf("  SS: the board was paused for %llu cycles = %llu "
+                       "model steps\n",
+                       (unsigned long long)(cyc - ss_busy_start),
+                       (unsigned long long)((cyc - ss_busy_start) * 4));
+                if (!ss_done) {
+                    ss_done = true;
+                    printf("  SS: the CPU was frozen for %llu cycles "
+                           "(%.2f ms at clk_sys) and %llu vblanks passed in "
+                           "that time\n",
+                           (unsigned long long)(cyc - ss_snap_cyc),
+                           (double)(cyc - ss_snap_cyc) / 57272.727,
+                           (unsigned long long)(n_vbl - ss_snap_vbl));
+                    printf("  SS: SAVE COMPLETE at cycle %llu -- %llu DDR3 "
+                           "writes, %llu reads\n",
+                           (unsigned long long)cyc,
+                           (unsigned long long)ddr_writes,
+                           (unsigned long long)ddr_reads);
+                    // SS_SAVE_FILE writes the slot out exactly as Main
+                    // would, so it can be replayed by SS_LOAD_FILE in a LATER,
+                    // independently-booted run. That round trip is the only
+                    // way to validate the replay harness itself without the
+                    // board: a blob this bench produced and restored in-run
+                    // must also restore when replayed. If it does not, the
+                    // harness is broken and 45.6's in-game failure says
+                    // nothing. PLAN.md 45.6.
+                    if (const char *sf = getenv("SS_SAVE_FILE")) {
+                        FILE *f = fopen(sf, "wb");
+                        if (f) {
+                            fwrite(ddr.data(), 8, ddr.size(), f);
+                            fclose(f);
+                            printf("  SS: wrote the slot to %s (%zu bytes)\n",
+                                   sf, ddr.size() * 8);
+                        } else {
+                            fprintf(stderr, "SS_SAVE_FILE: cannot write %s\n", sf);
+                        }
+                    }
+                    // What the blob says. Section GLOBAL's header is at word
+                    // 1 and its one item at word 2; MAIN_RAM's header follows.
+                    printf("        blob GLOBAL payload = %08X  (should be the "
+                           "marker slot %08X)\n",
+                           (uint32_t)(ddr[2] & 0xFFFFFFFFu), ss_saved_esp);
+                    // The frame, read out of main RAM rather than out of the
+                    // blob: the stub does not erase it on its way out, and the
+                    // peek window is authoritative where a hand-rolled parse of
+                    // memory_stream's packing is just one more thing to get
+                    // wrong.
+                    static const char *fn[] = {
+                        "marker", "EDI", "ESI", "EBP", "ESP(pushad)", "EBX",
+                        "EDX", "ECX", "EAX", "EIP", "CS", "EFLAGS" };
+                    printf("        the frame on the game's stack:\n");
+                    for (int i = 0; i < 12; i++) {
+                        uint32_t byte = ss_saved_esp + 4u * i;
+                        dut->peek_addr = (uint16_t)((byte >> 2) & 0xFFFF);
+                        dut->eval();
+                        if (i == 9) ss_saved_eip = dut->peek_data;
+                        printf("          [%08X] = %08X   %s\n",
+                               byte, dut->peek_data, fn[i]);
+                    }
+                } else {
+                    // EVERY load, not just the first. A rapid-reload failure is
+                    // by definition never the first one, so a check that runs
+                    // once cannot see it. PLAN.md 46.
+                    rs_done = true;
+                    printf("  SS: LOAD %u COMPLETE at cycle %llu\n",
+                           rs_count, (unsigned long long)cyc);
+                    // Main RAM should now be the blob, byte for byte. The
+                    // frame the CPU is about to pop is part of that, so this
+                    // covers it too.
+                    uint32_t diff = 0;
+                    for (uint32_t i = 0; i < 65536; i++) {
+                        dut->peek_addr = (uint16_t)i;
+                        dut->eval();
+                        uint64_t d = ddr[3 + (i >> 1)];
+                        uint32_t want = (i & 1) ? (uint32_t)(d >> 32)
+                                               : (uint32_t)(d & 0xFFFFFFFFu);
+                        if (dut->peek_data != want) diff++;
+                    }
+                    printf("        main RAM vs the blob: %u of 65536 dwords "
+                           "differ (layout-dependent, diagnostic only)\n", diff);
+                    // The check that counts. Hashed while frozen in both cases,
+                    // so nothing the CPU does after release can contaminate it.
+                    uint64_t hh = 1469598103934665603ULL;
+                    for (uint32_t i = 0; i < 65536; i++) {
+                        dut->peek_addr = (uint16_t)i;
+                        dut->eval();
+                        uint32_t v = dut->peek_data;
+                        for (int b = 0; b < 4; b++) {
+                            hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
+                        }
+                    }
+                    ss_hash_post_load = hh;
+                    // On a replay there is no save in this run to compare
+                    // against, so LOAD 1 becomes the reference and every later
+                    // reload is checked against it. That is exactly the
+                    // property the rapid-reload lockup breaks: the first load
+                    // is always clean and a later one is not.
+                    if (ss_replay && !ss_hash_at_save) {
+                        ss_hash_at_save = hh;
+                        printf("        main RAM restored  : %016llX  "
+                               "<- REFERENCE (load 1 of a replay)\n",
+                               (unsigned long long)hh);
+                    } else {
+                    printf("        main RAM at save   : %016llX\n"
+                           "        main RAM before it : %016llX\n"
+                           "        main RAM restored  : %016llX  %s\n",
+                           (unsigned long long)ss_hash_at_save,
+                           (unsigned long long)ss_hash_pre_load,
+                           (unsigned long long)ss_hash_post_load,
+                           ss_hash_post_load == ss_hash_at_save
+                             ? "<- EXACT" : "<- MISMATCH");
+                    }
+                    {   // The DS2404's SRAM, the same way.
+                        uint64_t dh = ds_ram_hash(dut);
+                        if (ss_ds_at_save)
+                            printf("        DS2404 SRAM        : %016llX  %s\n",
+                                   (unsigned long long)dh,
+                                   dh == ss_ds_at_save ? "<- EXACT"
+                                                       : "<- CORRUPTED");
+                        else
+                            printf("        DS2404 SRAM        : %016llX  "
+                                   "(no save in this run to compare)\n",
+                                   (unsigned long long)dh);
+                    }
+                    // The frame the CPU is about to pop, out of restored main
+                    // RAM. On a replay this is the only place the saved EIP
+                    // can come from, and the marker beside it says whether the
+                    // address is right at all.
+                    if (ss_replay && !ss_saved_eip) {
+                        static const char *rfn[] = {
+                            "marker", "EDI", "ESI", "EBP", "ESP(pushad)", "EBX",
+                            "EDX", "ECX", "EAX", "EIP", "CS", "EFLAGS" };
+                        printf("        the frame the blob restored:\n");
+                        for (int i = 0; i < 12; i++) {
+                            uint32_t byte = ss_saved_esp + 4u * i;
+                            dut->peek_addr = (uint16_t)((byte >> 2) & 0xFFFF);
+                            dut->eval();
+                            if (i == 9) ss_saved_eip = dut->peek_data;
+                            printf("          [%08X] = %08X   %s\n",
+                                   byte, dut->peek_data, rfn[i]);
+                        }
+                    }
+                }
+                ss_snap_cyc = 0;
+                // The anchor for the determinism hash: the last moment the
+                // savestate let go. Unambiguous, and present in both a
+                // save-only run and a save-then-load one, which is what makes
+                // the two comparable at all.
+                if (ss_hash_after && !(ss_restore_at && !rs_done))
+                    ss_hash_anchor = cyc;
+                // The vblank interrupt's state at the moment the machine is
+                // handed back. It is spi_cpu's, not the 386's, and it is not in
+                // the blob -- so if the two runs disagree here, that is what a
+                // vblank-wait loop is diverging on.
+                printf("  SS: at release: irq_pending=%d, RTC=%llu (tick %u)\n",
+                       dut->p_cpu_irq, (unsigned long long)dut->p_ds_rtc,
+                       dut->p_ds_tick);
+            }
+            ss_busy_d = dut->p_ss_busy;
+
+            // The determinism hash, taken a fixed number of cycles after the
+            // savestate let go. Run it once with a save alone and once with a
+            // save and then a load: if the restore is faithful the two must be
+            // identical, because the CPU's evolution is a function of its
+            // registers and main RAM and nothing else.
+            if (ss_hash_anchor && !ss_hashed
+                && cyc >= ss_hash_anchor + ss_hash_after) {
+                ss_hashed = true;
+                uint64_t hh = 1469598103934665603ULL;
+                for (uint32_t i = 0; i < 65536; i++) {
+                    dut->peek_addr = (uint16_t)i;
+                    dut->eval();
+                    uint32_t v = dut->peek_data;
+                    for (int b = 0; b < 4; b++) {
+                        hh ^= (v >> (8 * b)) & 0xFF; hh *= 1099511628211ULL;
+                    }
+                }
+                printf("  SS: RTC %llu cycles after the operation: %llu "
+                       "(tick %u)\n",
+                       (unsigned long long)ss_hash_after,
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+                printf("  SS: RAM hash %llu cycles after the operation "
+                       "finished: %016llX\n",
+                       (unsigned long long)ss_hash_after,
+                       (unsigned long long)hh);
+                // ...and the memory itself, at that same instant, so two runs
+                // can be diffed dword by dword. A hash only ever says
+                // "different", and "different" has meant a handful of dead
+                // stack words as often as it has meant a broken restore.
+                if (const char *dp = getenv("SS_DUMP_AT")) {
+                    FILE *f = fopen(dp, "wb");
+                    if (f) {
+                        for (uint32_t i = 0; i < 65536; i++) {
+                            dut->peek_addr = (uint16_t)i;
+                            dut->eval();
+                            uint32_t v = dut->peek_data;
+                            fwrite(&v, 4, 1, f);
+                        }
+                        fclose(f);
+                    }
+                }
+            }
+
+            // The determinism probe, as in phase 0: measured from the first
+            // cycle after the operation finishes at which the CPU is executing
+            // at the EIP that was saved.
+            if (ss_saved_eip && !ss_resume_cyc
+                && (ss_restore_at ? rs_done : ss_done)
+                && dut->p_eip == ss_saved_eip) {
+                ss_resume_cyc = cyc;
+                ss_resume_vbl = n_vbl;
+                ss_eip_matched = true;
+                ss_eip_match_cyc = cyc;
+                printf("  SS: resumed at the saved EIP %08X, cycle %llu\n",
+                       ss_saved_eip, (unsigned long long)cyc);
+            }
+            if (ss_hash_after && ss_resume_cyc && !ss_hashed
+                && cyc >= ss_resume_cyc + ss_hash_after) {
+                ss_hashed = true;
+                uint64_t hh = 1469598103934665603ULL;
+                for (uint32_t i = 0; i < 65536; i++) {
+                    dut->peek_addr = (uint16_t)i;
+                    dut->eval();
+                    uint32_t v = dut->peek_data;
+                    for (int b = 0; b < 4; b++) {
+                        hh ^= (v >> (8 * b)) & 0xFF;
+                        hh *= 1099511628211ULL;
+                    }
+                }
+                printf("  SS: RAM hash %llu cycles after resume (%llu vblanks "
+                       "since): %016llX\n",
+                       (unsigned long long)ss_hash_after,
+                       (unsigned long long)(n_vbl - ss_resume_vbl),
+                       (unsigned long long)hh);
+            }
+
+            if (ss_fired && !ss_entered && dut->p_ss_in_stub) {
+                ss_entered   = true;
+                ss_enter_cyc = cyc;
+                printf("  SS: in the stub at cycle %llu (%llu after asking), "
+                       "EIP=%08X\n",
+                       (unsigned long long)cyc,
+                       (unsigned long long)(cyc - ss_at), dut->p_eip);
+            }
+
+            // Every I/O read the 386 makes after the operation finishes, with
+            // what it got back. Diffing two of these says what a poll loop is
+            // actually looking at, which is the question four sections were
+            // added without ever asking.
+            // Every non-zero read of the DS2404's data port, with the cycle
+            // and the RTC behind it. The value alone cannot say whether a
+            // difference is the clock being wrong or the game arriving at a
+            // different time; the cycle says which.
+            if (ds_trace && dut->p_io_rd && !io_rd_d
+                && dut->p_io_raddr * 4 == 0x6DC && dut->p_io_rdata != 0)
+                printf("    DS: 0x6DC -> %02X at cycle %llu (anchor+%lld), "
+                       "RTC=%llu tick=%u\n",
+                       dut->p_io_rdata, (unsigned long long)cyc,
+                       (long long)(cyc - (long long)ss_hash_anchor),
+                       (unsigned long long)dut->p_ds_rtc, dut->p_ds_tick);
+
+            if (io_rd_trail && ss_hash_anchor && dut->p_io_rd && !io_rd_d
+                && io_rd_n + 2 < IO_RD_MAX) {
+                io_rd_trail[io_rd_n++] = dut->p_io_raddr * 4;
+                io_rd_trail[io_rd_n++] = dut->p_io_rdata;
+            }
+            io_rd_d = dut->p_io_rd;
 
             if (dut->p_io_wr && !io_wr_d) {
                 io_wr_total++; b_io++;
@@ -365,6 +963,16 @@ int main(int argc, char **argv)
                    (unsigned)(dut->p_cpu_addr << 2), dut->p_cpu_valid,
                    dut->p_cpu_ready, dut->p_cpu_inta, dut->p_cpu_state,
                    dut->p_dma_own, dut->p_dma_busy, dut->p_prg_outstanding);
+            // Why is the CPU not advancing? spi_cpu's mem_accept is an AND of
+            // several holds and the columns above show only some of them. These
+            // are the savestate's, and a wedged load is one of them stuck on.
+            printf("         ss: hold=%u snapshot=%u in_stub=%u nmi=%u state=%u"
+                   "  irq=%u\n",
+                   dut->p_ss_hold, dut->p_ss_snapshot, dut->p_ss_in_stub,
+                   dut->p_ss_nmi, dut->p_ss_state, dut->p_cpu_irq);
+            printf("         stalls: io=%u z80dl=%u ds=%u\n",
+                   (dut->p_ss_stalls >> 2) & 1, (dut->p_ss_stalls >> 1) & 1,
+                   dut->p_ss_stalls & 1);
             printf("         frames=%llu  non-black pixels in last frame=%llu / %d\n",
                    (unsigned long long)frames,
                    (unsigned long long)nonblack_last, FW * FH);
@@ -400,7 +1008,13 @@ int main(int argc, char **argv)
     // even when everything works. The frame itself is verified elsewhere, by
     // replaying MAME's captured state (PLAN.md 12).
     printf("Z80 fetches (ch3)      : %llu%s\n", (unsigned long long)cz80.count,
-           cz80.count ? "" : "  (expected: the Verilator T80 is a stub)");
+           // Was "expected: the Verilator T80 is a stub" -- true when the
+           // Z80 was VHDL and Verilator could not read it, and a lie since
+           // tv80 replaced it (PLAN.md 39.5). Zero fetches is now a real
+           // finding: on a cartridge set it means the 386 has not finished
+           // downloading the sound program yet.
+           cz80.count ? "" : "  (the Z80 has not fetched anything yet -- on a "
+                             "cartridge set, the download is not done)");
     printf("Z80 out-of-reset cycles: %llu, last opcode fetch at %04X\n",
            (unsigned long long)z80_run_cycles, dut->p_snd_pc);
     printf("sound01 fetches        : %llu\n", (unsigned long long)snd01_fetches);
@@ -507,6 +1121,154 @@ int main(int argc, char **argv)
             printf("\nwrote sim/boot_frame.ppm (%llu frames, %llu non-black in the last one)\n",
                    (unsigned long long)frames, (unsigned long long)nonblack_last);
         }
+    }
+
+    printf("IDT at end             : base=%08X limit=%05X (%llu changes), "
+           "CS=%04X EIP=%08X\n",
+           dut->p_idt_base, dut->p_idt_limit,
+           (unsigned long long)idt_changes, dut->p_cs, dut->p_eip);
+    printf("CS base / CR0          : %08X / %08X  (PE=%d PG=%d)\n",
+           dut->p_cs_base, dut->p_cr0,
+           (int)(dut->p_cr0 & 1), (int)((dut->p_cr0 >> 31) & 1));
+
+    if (ss_at) {
+        printf("\n-- savestates --\n");
+        printf("save asked at cycle    : %llu\n", (unsigned long long)ss_at);
+        printf("gate reads answered    : %u  (0 = the CPU never fetched the "
+               "overlaid gate)\n", dut->p_ss_gate_reads);
+        printf("stub entry             : %s\n",
+               ss_entered ? "yes" : "NEVER -- the gate was not taken");
+        printf("stub writes            : %u, last [%08X] = %08X\n",
+               dut->p_ss_writes, dut->p_ss_last_wa, dut->p_ss_last_wd);
+        printf("save completed         : %s\n", ss_done ? "yes" : "NO");
+        printf("DDR3 traffic           : %llu writes, %llu reads\n",
+               (unsigned long long)ddr_writes, (unsigned long long)ddr_reads);
+
+        // The blob's own header, which is what Main_MiSTer reads: dword 0 is a
+        // generation counter it polls, dword 1 the length in dwords, and the
+        // file it writes is (length + 2) * 4 bytes.
+        printf("blob header            : gen=%08X len=%u dwords -> %u bytes\n",
+               (uint32_t)(ddr[0] & 0xFFFFFFFFu),
+               (uint32_t)(ddr[0] >> 32),
+               (uint32_t)(((ddr[0] >> 32) + 2) * 4));
+
+        // Walk the section records the way util/dump_pgmstate.py does, so the
+        // stream can be checked against what the sections claim to hold.
+        printf("sections:\n");
+        // `w` MUST be bounds-checked, and the arithmetic done in 64 bits.
+        // A section header that is not one -- which is what the "?" line below
+        // prints -- carries a garbage count, and `w += 1 + payload` then walks
+        // far off the end of a 65,536-entry vector. Whether that faults depends
+        // on what happens to be mapped after it, so it is INTERMITTENT: the
+        // same save point crashes in one run and not the next. It voided 18 of
+        // 96 points of the first sweep as "empty trail" before it was found,
+        // because a SIGSEGV here kills the run before it writes SS_TRAIL.
+        // PLAN.md 48.
+        uint64_t w = 1;
+        for (int guard = 0; guard < 32; guard++) {
+            if (w >= ddr.size()) {
+                printf("    walked past the end of the slot at dword %llu -- "
+                       "the section list is not intact\n",
+                       (unsigned long long)w);
+                break;
+            }
+            uint64_t hdr = ddr[w];
+            if ((hdr >> 56) == 0xFF) {
+                printf("    terminator at dword %llu\n",
+                       (unsigned long long)w);
+                break;
+            }
+            uint32_t cnt   = (uint32_t)(hdr & 0xFFFFFFFFu);
+            uint32_t wcode = (uint32_t)((hdr >> 32) & 3);
+            uint32_t idx   = (uint32_t)((hdr >> 56) & 0x1F);
+            static const char *nm[] = {"GLOBAL","MAIN_RAM","TILEMAP","PALETTE",
+                                       "SPRITE"};
+            static const int bytes[] = {1,2,4,8};
+            uint64_t payload = ((uint64_t)cnt * bytes[wcode] + 7) / 8;
+            printf("    %-9s idx=%u count=%-6u width=%d-bit  %llu payload "
+                   "dwords\n", idx < 5 ? nm[idx] : "?", idx, cnt,
+                   bytes[wcode] * 8, (unsigned long long)payload);
+            w += 1 + payload;
+        }
+    }
+
+    {
+        // FNV-1a over all 65,536 dwords of main RAM. Two runs that differ
+        // anywhere in the 386's world differ here.
+        uint64_t h = 1469598103934665603ULL;
+        for (uint32_t i = 0; i < 65536; i++) {
+            dut->peek_addr = (uint16_t)i;
+            dut->eval();
+            uint32_t v = dut->peek_data;
+            for (int b = 0; b < 4; b++) {
+                h ^= (v >> (8 * b)) & 0xFF;
+                h *= 1099511628211ULL;
+            }
+        }
+        printf("main RAM hash          : %016llX\n", (unsigned long long)h);
+    }
+    // A dump, so two runs can be diffed dword by dword rather than compared
+    // through a hash that says only "different".
+    if (const char *dp = getenv("SS_DUMP")) {
+        FILE *f = fopen(dp, "wb");
+        if (f) {
+            for (uint32_t i = 0; i < 65536; i++) {
+                dut->peek_addr = (uint16_t)i;
+                dut->eval();
+                uint32_t v = dut->peek_data;
+                fwrite(&v, 4, 1, f);
+            }
+            fclose(f);
+            printf("wrote main RAM to      : %s\n", dp);
+        }
+    }
+    printf("EIP transitions        : %llu   (a stuck CPU shows very few)\n",
+           (unsigned long long)eip_changes);
+    printf("cycles with EIP in stub: %llu\n",
+           (unsigned long long)in_stub_cycles);
+    if (ss_restore_at) {
+        printf("stub window            : %u reads, last idx=%02X data=%08X\n",
+               dut->p_ss_stub_reads, dut->p_ss_stub_idx, dut->p_ss_stub_data);
+        printf("esp the stub was given : %08X\n", dut->p_ss_esp_scratch);
+        {   // Is the stub's scratch address inside the stack segment at all?
+            uint64_t lim = dut->p_ss_limit;
+            uint64_t eff = dut->p_ss_g ? ((lim << 12) | 0xFFF) : lim;
+            printf("SS descriptor          : base=%08X limit=%05X G=%d type=%X"
+                   "  -> spans 0..%llX  (0x40204 %s)\n",
+                   dut->p_ss_base, dut->p_ss_limit, dut->p_ss_g, dut->p_ss_type,
+                   (unsigned long long)eff,
+                   (0x40204u <= eff) ? "INSIDE" : "OUTSIDE -- reads there fault");
+        }
+        // Did the CPU pass through the saved EIP on its way out of the stub?
+        // Not "is it there now": the settled probe reports whatever it reached
+        // after a few cycles, which is an instruction or two later.
+        bool hit = false;
+        for (int i = 0; i < trail_n; i++) if (trail[i] == ss_saved_eip) hit = true;
+        printf("saved EIP / settled at : %08X / %08X\n",
+               ss_saved_eip, dut->p_ss_resume_eip);
+        printf("resumed at the saved EIP: %s\n",
+               hit ? "YES" : "NO -- the iret did not land where it was saved");
+        printf("first EIPs after load  :");
+        for (int i = 0; i < trail_n; i++) printf(" %08X", trail[i]);
+        printf("\n");
+        printf("restore                : %s\n",
+               ss_eip_matched
+                 ? "the CPU resumed at the saved CS:EIP"
+                 : "FAILED -- the CPU never reached the saved EIP");
+        if (ss_eip_matched)
+            printf("  resumed at cycle     : %llu\n",
+                   (unsigned long long)ss_eip_match_cyc);
+    }
+    if (io_rd_trail) {
+        FILE *f = fopen(iort, "wb");
+        if (f) { fwrite(io_rd_trail, 4, io_rd_n, f); fclose(f); }
+        printf("wrote %zu I/O reads after the operation to %s\n",
+               io_rd_n / 2, iort);
+    }
+    if (long_trail) {
+        FILE *f = fopen(lt_path, "wb");
+        if (f) { fwrite(long_trail, 4, long_n, f); fclose(f); }
+        printf("wrote %zu EIPs after the operation to %s\n", long_n, lt_path);
     }
 
     printf("\nverdict: ");

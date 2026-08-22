@@ -8,6 +8,7 @@
 //============================================================================
 
 module spi_top
+	import system_consts::*;
 (
 	input             clk_sys,     // 57.272727 MHz - video, I/O, sound
 	input             clk_cpu,     // 28.636364 MHz - the 386 (clk_sys / 2)
@@ -61,6 +62,60 @@ module spi_top
 	// vital signs panel, the JTAG counters -- went with the instrumentation. Their
 	// modules are still in rtl/, just not instantiated. See PLAN.md 29.
 	input             freeze,
+
+	// ---- savestates -----------------------------------------------------
+	// The board owns the section map and the sequencing; the top level owns
+	// DDR3, the OSD and the slot. See rtl/spi_ss.sv and PLAN.md 38/39.
+	input             ss_save,
+	input             ss_load,
+	output            ss_busy,
+	output            ss_stream_write,
+	output            ss_stream_read,
+	input             ss_stream_busy,
+	ssbus_if.slave    ssbus,
+
+	// Probes, for sim/tb_boot_top only. Unconnected at the top level, so
+	// Quartus prunes them, exactly like the dbg_* surface above.
+	output            ss_in_stub,
+	output            ss_snapshot,
+	output     [31:0] ss_esp_out,
+	output     [15:0] ss_writes,
+	output     [31:0] ss_last_wa,
+	output     [31:0] ss_last_wd,
+	output      [2:0] ss_dbg_state,
+	// spi_ss's OWN state, which is what the wedge overlay paints and what
+	// the bench had no way to see. Distinct from ss_dbg_state, which is
+	// spi_cpu's -- reading one as the other cost a round in PLAN.md 44.5.
+	output      [4:0] ss_dbg_seq,
+	// The DS2404's bookkeeping SRAM, read-only, for the bench (PLAN.md 50).
+	input       [8:0] dbg_ds_ram_addr,
+	output      [7:0] dbg_ds_ram_dout,
+	output            ss_dbg_nmi,
+	output     [15:0] ss_dbg_gate_dw0,
+	output     [15:0] ss_dbg_gate_reads,
+	output            ss_dbg_hold,
+	// {io_stall, z80dl_stall, ds_stall} -- which of the two I/O holds is
+	// keeping the 386 off an instruction boundary. Diagnostic only.
+	output      [2:0] ss_dbg_stalls,
+	// Every I/O register the 386 READS, and what it got back. Writes have been
+	// visible to the testbench since the beginning; reads have not, and a poll
+	// loop is made of reads.
+	output            p_cpu_irq,
+	// The DS2404's counter and its divider. Read-only taps; see spi_ds2404.sv.
+	output     [39:0] p_ds_rtc,
+	output     [31:0] p_ds_tick,
+	output            p_io_rd,
+	output      [8:0] p_io_raddr,
+	output     [31:0] p_io_rdata,
+	output     [15:0] ss_dbg_stub_reads,
+	output      [7:0] ss_dbg_stub_idx,
+	output     [31:0] ss_dbg_stub_data,
+	output     [31:0] ss_dbg_resume_eip,
+	output     [31:0] ss_dbg_esp_scratch,
+	output     [31:0] ss_dbg_ss_base,
+	output     [19:0] ss_dbg_ss_limit,
+	output      [3:0] ss_dbg_ss_type,
+	output            ss_dbg_ss_g,
 
 	// SDRAM ch1: 386 program ROM
 	output     [25:0] sdr_prg_addr,
@@ -127,6 +182,8 @@ module spi_top
 	(
 		.clk        (clk_sys),
 		.reset      (sys_reset),
+		.pause      (ss_pause),
+		.vbl_next   (vbl_next),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
@@ -195,6 +252,7 @@ module spi_top
 	wire  [7:0] z80dl_data;
 	wire        z80dl_req;
 	wire        z80dl_stall;
+	assign ss_dbg_stalls = {z80dl_stall | ds_stall, z80dl_stall, ds_stall};
 	wire [18:0] z80dl_end;
 	wire        z80_rst_n;
 
@@ -254,6 +312,7 @@ module spi_top
 		// Any I/O write still in flight to another clock domain: the Z80
 		// program download, and now the DS2404's ports.
 		.io_stall    (z80dl_stall | ds_stall),
+
 		// Only the sets with a second sound ROM read sound1.u0222's window, and
 		// only their loader tables put anything behind it -- see spi_cpu.sv's
 		// map. rdft's Z80 program is inside `maincpu` instead and rdfts has a
@@ -304,10 +363,51 @@ module spi_top
 		.dbg_why   (),
 		.dbg_eip   (),
 		.dbg_cs    (),
-		.dbg_irq   (),
+		.dbg_idt_base  (),
+		.dbg_idt_limit (),
+		.dbg_cs_base   (),
+		.dbg_cr0       (),
+		.dbg_ss_base   (ss_dbg_ss_base),
+		.dbg_ss_limit  (ss_dbg_ss_limit),
+		.dbg_ss_type   (ss_dbg_ss_type),
+		.dbg_ss_g      (ss_dbg_ss_g),
+		.dbg_irq   (p_cpu_irq),
 		.dbg_gdt0(), .dbg_gdt1(),
 		.dbg_gdt2(), .dbg_gdt3(),
 		.dbg_gdt4(), .dbg_gdt5(),
+
+		.ss_save_req (ss_cpu_save),
+		.ss_restore_req (ss_cpu_restore),
+		.ss_esp_in   (ss_esp_scratch),
+		.ss_snapshot (ss_snapshot),
+		.ss_hold_rel (ss_cpu_hold_rel),
+		.ss_esp_out  (ss_esp_out),
+		.ss_ram_own  (ss_ram_own),
+		.ss_ram_addr (ss_ram_addr),
+		.ss_ram_din  (ss_ram_din),
+		.ss_ram_we   (ss_ram_we),
+		.ss_ram_dout (ss_ram_dout),
+		.ss_inval    (ss_inval),
+		.ss_inval_set(ss_inval_set),
+
+		.ss_in_stub  (ss_in_stub),
+		.ss_writes   (ss_writes),
+		.ss_last_wa  (ss_last_wa),
+		.ss_last_wd  (ss_last_wd),
+		.ss_idle           (ss_cpu_idle),
+		.ss_dbg_state      (ss_dbg_state),
+		.ss_dbg_nmi        (ss_dbg_nmi),
+		.ss_dbg_gate_dw0   (ss_dbg_gate_dw0),
+		.ss_dbg_gate_reads (ss_dbg_gate_reads),
+		.ss_dbg_hold       (ss_dbg_hold),
+		.ss_dbg_stub_reads (ss_dbg_stub_reads),
+		.ss_dbg_stub_idx   (ss_dbg_stub_idx),
+		.ss_dbg_stub_data  (ss_dbg_stub_data),
+		.ss_dbg_resume_eip (ss_dbg_resume_eip),
+		.ss_dma_busy       (ss_dma_busy),
+		.ss_irq_din        (irq_ss_din),
+		.ss_irq_we         (irq_ss_we),
+		.ss_irq_dout       (irq_ss_dout),
 
 		.vbl_toggle (vbl_toggle)
 	);
@@ -351,6 +451,10 @@ module spi_top
 	// Its outputs are stable register values read by clk_sys logic; both clocks
 	// come from the same PLL and sit in the same clock group, so TimeQuest
 	// analyses those transfers normally.
+	assign p_io_rd    = io_rd;
+	assign p_io_raddr = io_addr;
+	assign p_io_rdata = io_rdata;
+
 	spi_io io
 	(
 		.set_sxx2c  (set_sxx2c),
@@ -364,6 +468,10 @@ module spi_top
 		.z80dl_stall(z80dl_stall),
 		.z80dl_end  (z80dl_end),
 		.z80_rst_n  (z80_rst_n),
+		.ss_addr    (io_ss_addr),
+		.ss_din     (io_ss_din),
+		.ss_we      (io_ss_we),
+		.ss_dout    (io_ss_dout),
 		.clk              (clk_cpu),
 		.reset            (cpu_reset),
 
@@ -417,12 +525,60 @@ module spi_top
 	// stalled. The 386 is the side that crosses, and spi_io holds it off with
 	// ds_stall while a byte is in flight. See spi_ds2404.sv.
 	// ------------------------------------------------------------------
+	// The DS2404's freeze, registered in clk_sys before it crosses. See the
+	// .pause connection below for why it is gated on the snapshot at all.
+	reg        ds_pause;
+	always @(posedge clk_sys) ds_pause <= ss_pause && ss_snapshot;
+
 	wire       ds_req, ds_ack, ds_stall;
 	wire [1:0] ds_port;
 	wire [7:0] ds_data, ds_dout;
 
 	spi_ds2404 ds2404
 	(
+		// clk_ram, so this level crosses from clk_sys into a FASTER clock --
+		// which is the easy direction: a level held for a clk_sys cycle is
+		// sampled twice here rather than missed.
+		//
+		// GATED ON THE SNAPSHOT, not on ss_pause alone, and this is load-bearing
+		// (PLAN.md 43). spi_ds2404's `if (pause)` is the first branch of a chain
+		// that also covers `req_edge`, so while it is asserted a request from
+		// the 386 is not delayed -- it is never seen, and `ack` never comes. On
+		// a LOAD, pause asserts while the 386 is STILL RUNNING (it has to run,
+		// to walk to the stub), so it can issue a DS2404 access into a chip that
+		// has stopped listening. spi_io then holds `ds_stall`, spi_top ORs it
+		// into `io_stall`, spi_cpu's `mem_accept` is gated on `!io_stall`, and
+		// the CPU can never reach the instruction boundary where it would take
+		// the NMI. Measured, not deduced: the wedge reads `io=1 ds=1` with
+		// ss_hold=0 and the CPU parked at 0x600 forever.
+		//
+		// Waiting for the snapshot is SAFE rather than merely later: `io_stall`
+		// is exactly what holds the 386 off an instruction boundary while a byte
+		// is in flight, so by construction nothing is in flight at the moment it
+		// freezes. And the chip only has to be still while the blob is read or
+		// written, which is from the snapshot onward -- 40.5's tick_cnt hold
+		// still sees `pause` throughout a restore, because the writes land in
+		// S_STREAMING with the CPU frozen.
+		//
+		// REGISTERED, and that is not tidiness. Doing the AND combinationally
+		// here failed the fit at -0.077 on clk_ram: `ss_snapshot` comes from
+		// spi_cpu on clk_cpu, so the gate put two domains' logic in front of a
+		// crossing into the FASTER clock. 31.7 hit the same endpoint the same
+		// way and answered it the same way. One flop in clk_sys, then a single
+		// level crosses, exactly as bare `ss_pause` did before.
+		.pause    (ds_pause),
+		.dbg_rtc     (p_ds_rtc),
+		.dbg_tick    (p_ds_tick),
+		.ss_addr     (ds_ss_addr),
+		.ss_din      (ds_ss_din),
+		.ss_we       (ds_ss_we),
+		.ss_dout     (ds_ss_dout),
+		.ss_ram_addr (ds_ram_addr),
+		.ss_ram_din  (ds_ram_din),
+		.ss_ram_we   (ds_ram_we),
+		.ss_ram_dout (ds_ram_dout),
+		.dbg_ram_addr (dbg_ds_ram_addr),
+		.dbg_ram_dout (dbg_ds_ram_dout),
 		.clk      (clk_ram),
 		.reset    (reset),
 
@@ -453,6 +609,16 @@ module spi_top
 
 	spi_sound sound
 	(
+		.pause      (ss_pause),
+		.ssbus_z80    (ssb[SSIDX_Z80]),
+		.ssbus_z80ram (ssb[SSIDX_Z80_RAM]),
+		.ssbus_fifo   (ssb[SSIDX_SND_FIFO]),
+		.ssbus_fifo2  (ssb[SSIDX_SND_FIFO2]),
+		.ssbus_regs   (ssb[SSIDX_SND_REGS]),
+		.ssbus_ymf_regs (ssb[SSIDX_YMF_REGS]),
+		.ssbus_ymf_par  (ssb[SSIDX_YMF_PAR]),
+		.ssbus_ymf_st   (ssb[SSIDX_YMF_ST]),
+		.ssbus_ymf_fb   (ssb[SSIDX_YMF_FB]),
 		.set_sxx2c  (set_sxx2c),
 		.jumpers    (jumpers),
 		.fifo2_q    (fifo2_q),
@@ -525,7 +691,163 @@ module spi_top
 	);
 
 	// ------------------------------------------------------------------
+	// Savestates: the section fan-out, and the sequencer
+	//
+	// One ssbus_if per section, muxed onto the single bus save_state_data
+	// drives. Every section this core has is inside the board, so the mux lives
+	// here rather than at the top level as it does in Arcade-IGSPGM.
+	// ------------------------------------------------------------------
+	ssbus_if ssb[SSIDX_COUNT]();
+
+	ssbus_mux #(.COUNT(SSIDX_COUNT)) ss_mux
+	(
+		.clk    (clk_sys),
+		.slave  (ssbus),
+		.masters(ssb)
+	);
+
+	wire        ss_cpu_save, ss_cpu_restore, ss_cpu_hold_rel;
+	wire [31:0] ss_esp_scratch;
+	wire        ss_dma_busy;
+
+	// THE BOARD-WIDE PAUSE, and it is what makes a save state correct rather
+	// than merely possible.
+	//
+	// Freezing only the 386 -- which is all `freeze` does, and all the first
+	// version of this did -- is not enough. A transfer takes about 14 ms, and
+	// in that time the raster, the sound board and the vblank interrupt all run
+	// on, so the 386 comes back into a machine that has moved without it.
+	// Measured: a save taken while rdfts drives its display loop left the run
+	// with 1,567 I/O writes against a baseline 1,569 and a different main RAM
+	// hash, while the same save taken at a quiet point in boot was
+	// bit-identical. No vblank was lost in the window -- it is the raster phase,
+	// not the interrupt count.
+	//
+	// This is deliberately NOT wired to `freeze`. That is the Pause button, and
+	// STATUS.md documents its behaviour as stopping the 386 alone so a frozen
+	// frame stays on screen to be studied -- which is the opposite of what a
+	// save state wants and a useful thing to keep.
+	wire        ss_pause;      // driven by spi_ss, below
+	assign ss_dbg_esp_scratch = ss_esp_scratch;
+	wire        ss_ram_own, ss_ram_we;
+	wire [15:0] ss_ram_addr;
+	wire [31:0] ss_ram_din, ss_ram_dout;
+	wire        ss_inval;
+	wire  [7:0] ss_inval_set;
+
+	spi_ss ss
+	(
+		.clk             (clk_sys),
+		.reset           (sys_reset),
+
+		.ss_save         (ss_save),
+		.ss_load         (ss_load),
+		.vbl_next        (vbl_next),
+		.pause           (ss_pause),
+		.dbg_st          (ss_dbg_st),
+		.cpu_ss_idle     (ss_cpu_idle),
+		.cpu_in_stub     (ss_in_stub),
+
+		.stream_write    (ss_stream_write),
+		.stream_read     (ss_stream_read),
+		.stream_busy     (ss_stream_busy),
+
+		.ssbus_global    (ssb[SSIDX_GLOBAL]),
+		.ssbus_mainram   (ssb[SSIDX_MAIN_RAM]),
+
+		.cpu_save_req    (ss_cpu_save),
+		.cpu_restore_req (ss_cpu_restore),
+		.cpu_snapshot    (ss_snapshot),
+		.cpu_hold_rel    (ss_cpu_hold_rel),
+		.cpu_esp         (ss_esp_out),
+		.cpu_dma_busy    (ss_dma_busy),
+		.cpu_esp_out     (ss_esp_scratch),
+
+		.ram_own         (ss_ram_own),
+		.ram_addr        (ss_ram_addr),
+		.ram_din         (ss_ram_din),
+		.ram_we          (ss_ram_we),
+		.ram_dout        (ss_ram_dout),
+
+		.inval           (ss_inval),
+		.inval_set       (ss_inval_set),
+
+		.busy            (ss_busy)
+	);
+
+	// The raster used to be a section here. It is not saved at all now: a
+	// transfer starts and ends at `vbl_next`, so the phase is re-acquired
+	// rather than carried, and the counters are never written from outside.
+	// PLAN.md 42, and rtl/system_consts.sv says the same thing where the index
+	// used to be.
+	wire        vbl_next;
+
+	// SSIDX_SPI_IO, through the same bridge as main RAM: spi_io is clk_cpu and
+	// the ssbus is clk_sys.
+	wire  [4:0] io_ss_addr;
+	wire [31:0] io_ss_din, io_ss_dout;
+	wire        io_ss_we;
+
+	spi_ss_bridge #(
+		.SS_IDX (SSIDX_SPI_IO),
+		.AW     (5),
+		.DW     (32),
+		.ITEMS  (26)
+	) io_bridge (
+		.clk      (clk_sys),
+		.ssbus    (ssb[SSIDX_SPI_IO]),
+		.ram_addr (io_ss_addr),
+		.ram_din  (io_ss_din),
+		.ram_we   (io_ss_we),
+		.ram_dout (io_ss_dout)
+	);
+
+	// SSIDX_CPU_IRQ: one dword, and the same bridge as everything else that has
+	// to reach into clk_cpu.
+	wire [31:0] irq_ss_din, irq_ss_dout;
+	wire        irq_ss_we;
+	/* verilator lint_off PINCONNECTEMPTY */
+	spi_ss_bridge #(.SS_IDX(SSIDX_CPU_IRQ), .AW(1), .DW(32), .ITEMS(1))
+	irq_bridge (
+		.clk      (clk_sys),
+		.ssbus    (ssb[SSIDX_CPU_IRQ]),
+		.ram_addr (),
+		.ram_din  (irq_ss_din),
+		.ram_we   (irq_ss_we),
+		.ram_dout (irq_ss_dout)
+	);
+	/* verilator lint_on PINCONNECTEMPTY */
+
+	// The DS2404's two sections. It is clk_ram, faster than the ssbus's
+	// clk_sys, so the bridge's hold discipline is generous here rather than
+	// tight -- but it is the same bridge, because a fourth hand-rolled crossing
+	// is how the last one went wrong.
+	wire  [3:0] ds_ss_addr;
+	wire [31:0] ds_ss_din, ds_ss_dout;
+	wire        ds_ss_we;
+	wire  [8:0] ds_ram_addr;
+	wire  [7:0] ds_ram_din, ds_ram_dout;
+	wire        ds_ram_we;
+
+	spi_ss_bridge #(.SS_IDX(SSIDX_DS2404), .AW(4), .DW(32), .ITEMS(16))
+	ds_bridge (
+		.clk (clk_sys), .ssbus (ssb[SSIDX_DS2404]),
+		.ram_addr (ds_ss_addr), .ram_din (ds_ss_din),
+		.ram_we (ds_ss_we), .ram_dout (ds_ss_dout));
+
+	spi_ss_bridge #(.SS_IDX(SSIDX_DS2404_RAM), .AW(9), .DW(8), .ITEMS(512))
+	ds_ram_bridge (
+		.clk (clk_sys), .ssbus (ssb[SSIDX_DS2404_RAM]),
+		.ram_addr (ds_ram_addr), .ram_din (ds_ram_din),
+		.ram_we (ds_ram_we), .ram_dout (ds_ram_dout));
+
+	// ------------------------------------------------------------------
 	// Video RAMs
+	//
+	// Each of the three is a savestate section. The write side is clk_cpu and
+	// the read side clk_sys, so the savestate reaches them through
+	// spi_ss_bridge on the write side -- WR_ONLY, because the read it needs is
+	// the video side's own port, taken below. Nothing here gains a port.
 	// ------------------------------------------------------------------
 	wire [11:0] tm_wa;   wire [31:0] tm_wd;   wire tm_we;
 	wire [11:0] pal_wa;  wire [29:0] pal_wd;  wire pal_we;
@@ -534,22 +856,59 @@ module spi_top
 	wire [11:0] tm_ra;   wire [31:0] tm_rd;
 	wire [11:0] pal_ra;  wire [29:0] pal_rd;
 
+	// The savestate's side of each of the three, and the muxes that let it in.
+	wire [11:0] ss_tm_ra,  ss_tm_wa;   wire [31:0] ss_tm_wd;
+	wire [11:0] ss_pal_ra, ss_pal_wa;  wire [29:0] ss_pal_wd;
+	wire  [9:0] ss_spr_wa;             wire [31:0] ss_spr_wd;
+	wire        ss_tm_rdown, ss_pal_rdown, ss_spr_rdown;
+	wire        ss_tm_we, ss_pal_we, ss_spr_we;
+	// The sprite RAM has no read port of its own here -- spi_sprite reads it
+	// through spr_ra below -- so its savestate read address joins that mux too.
+	wire  [9:0] ss_spr_ra;
+
+	spi_ss_vram #(.SS_IDX(SSIDX_TILEMAP_RAM), .AW(12), .DW(32), .ITEMS(4096))
+	ss_tilemap (
+		.clk(clk_sys), .ssbus(ssb[SSIDX_TILEMAP_RAM]),
+		.rd_own(ss_tm_rdown), .rd_addr(ss_tm_ra), .rd_data(tm_rd),
+		.wr_addr(ss_tm_wa), .wr_data(ss_tm_wd), .wr_en(ss_tm_we));
+
+	spi_ss_vram #(.SS_IDX(SSIDX_PALETTE_RAM), .AW(12), .DW(30), .ITEMS(4096))
+	ss_palette (
+		.clk(clk_sys), .ssbus(ssb[SSIDX_PALETTE_RAM]),
+		.rd_own(ss_pal_rdown), .rd_addr(ss_pal_ra), .rd_data(pal_rd),
+		.wr_addr(ss_pal_wa), .wr_data(ss_pal_wd), .wr_en(ss_pal_we));
+
+	spi_ss_vram #(.SS_IDX(SSIDX_SPRITE_RAM), .AW(10), .DW(32), .ITEMS(1024))
+	ss_sprite (
+		.clk(clk_sys), .ssbus(ssb[SSIDX_SPRITE_RAM]),
+		.rd_own(ss_spr_rdown), .rd_addr(ss_spr_ra), .rd_data(spr_rd),
+		.wr_addr(ss_spr_wa), .wr_data(ss_spr_wd), .wr_en(ss_spr_we));
+
 	spi_dpram #(.DW(32), .AW(12)) tilemap_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
-		 .wr_addr(tm_wa),  .wr_data(tm_wd),  .wr_en(tm_we),
-		 .rd_addr(tm_ra),  .rd_data(tm_rd));
+		 .wr_addr(ss_tm_we ? ss_tm_wa : tm_wa),
+		 .wr_data(ss_tm_we ? ss_tm_wd : tm_wd),
+		 .wr_en  (ss_tm_we | tm_we),
+		 .rd_addr(ss_tm_rdown ? ss_tm_ra : tm_ra),
+		 .rd_data(tm_rd));
 
 	spi_dpram #(.DW(30), .AW(12)) palette_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
-		 .wr_addr(pal_wa), .wr_data(pal_wd), .wr_en(pal_we),
-		 .rd_addr(pal_ra), .rd_data(pal_rd));
+		 .wr_addr(ss_pal_we ? ss_pal_wa : pal_wa),
+		 .wr_data(ss_pal_we ? ss_pal_wd : pal_wd),
+		 .wr_en  (ss_pal_we | pal_we),
+		 .rd_addr(ss_pal_rdown ? ss_pal_ra : pal_ra),
+		 .rd_data(pal_rd));
 
 	wire  [9:0] spr_ra;
 	wire [31:0] spr_rd;
 	spi_dpram #(.DW(32), .AW(10)) sprite_ram
 		(.wr_clk(clk_cpu), .rd_clk(clk_sys),
-		 .wr_addr(spr_wa), .wr_data(spr_wd), .wr_en(spr_we),
-		 .rd_addr(spr_ra), .rd_data(spr_rd));
+		 .wr_addr(ss_spr_we ? ss_spr_wa : spr_wa),
+		 .wr_data(ss_spr_we ? ss_spr_wd : spr_wd),
+		 .wr_en  (ss_spr_we | spr_we),
+		 .rd_addr(ss_spr_rdown ? ss_spr_ra : spr_ra),
+		 .rd_data(spr_rd));
 
 	// ------------------------------------------------------------------
 	// Video DMA
@@ -782,9 +1141,52 @@ module spi_top
 	// ------------------------------------------------------------------
 	wire [7:0] mix_r, mix_g, mix_b;
 
-	assign red   = mix_r;
-	assign green = mix_g;
-	assign blue  = mix_b;
+	// ------------------------------------------------------------------
+	// WEDGE OVERLAY -- diagnostic, PLAN.md 45.
+	//
+	// The rapid-reload lockup only happens on hardware, four candidate fixes
+	// have missed, and there is no probe on the board since 35 deleted the JTAG
+	// modules. So the wedge reports itself: if a savestate stays busy far longer
+	// than any real operation, paint its state across the top of the picture as
+	// a row of blocks, white for 1. A screenshot then says exactly what is
+	// stuck, which is what solved the same class of bug in simulation (43.1).
+	//
+	// A save is ~2.1 M clk_sys cycles and a load ~1.3 M. This trips at 2^23,
+	// 8.4 M, about 146 ms -- four times the longest real operation.
+	// ------------------------------------------------------------------
+	wire  [4:0] ss_dbg_st;
+	assign ss_dbg_seq = ss_dbg_st;
+	wire        ss_cpu_idle;
+	reg  [23:0] ss_stuck_cnt;
+	always @(posedge clk_sys) begin
+		if (sys_reset || !ss_busy) ss_stuck_cnt <= 24'd0;
+		else if (!ss_stuck_cnt[23]) ss_stuck_cnt <= ss_stuck_cnt + 24'd1;
+	end
+	wire ss_wedged = ss_stuck_cnt[23];
+
+	// The bits, LSB first across the screen:
+	//   0..3 spi_ss state   4 is_load       5 pause
+	//   6 io_stall          7 z80dl_stall   8 ds_stall
+	//   9 cpu snapshot     10 cpu in stub
+	wire [10:0] ss_dbg_bits = {ss_in_stub, ss_snapshot,
+	                           ss_dbg_stalls[0], ss_dbg_stalls[1],
+	                           ss_dbg_stalls[2], ss_pause, ss_dbg_st};
+
+	// Rows 16..31, one 16-pixel block per bit starting at column 16. A red block
+	// at column 0 says the overlay is live, so a screenshot without it means the
+	// core is not wedged rather than that the probe failed.
+	wire dbg_row  = ss_wedged && (vcnt >= 10'd16) && (vcnt < 10'd32);
+	wire dbg_mark = dbg_row && (hcnt < 10'd16);
+	wire dbg_cell = dbg_row && (hcnt >= 10'd16) && (hcnt < 10'd16 + 11*10'd16);
+	/* verilator lint_off UNUSEDSIGNAL */
+	wire [9:0] dbg_off = hcnt - 10'd16;   // only [7:4] selects the block
+	/* verilator lint_on UNUSEDSIGNAL */
+	wire [3:0] dbg_idx = dbg_off[7:4];
+	wire dbg_bit  = ss_dbg_bits[dbg_idx];
+
+	assign red   = dbg_mark ? 8'hFF : dbg_cell ? (dbg_bit ? 8'hFF : 8'h10) : mix_r;
+	assign green = dbg_mark ? 8'h00 : dbg_cell ? (dbg_bit ? 8'hFF : 8'h10) : mix_g;
+	assign blue  = dbg_mark ? 8'h00 : dbg_cell ? (dbg_bit ? 8'hFF : 8'h40) : mix_b;
 
 	// SXX2E is a mono board: the YMF271's four outputs are summed onto one
 	// speaker, so both sides carry the same sample.

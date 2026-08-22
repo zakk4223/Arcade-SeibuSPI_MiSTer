@@ -1,8 +1,202 @@
 # Where this is, and what to do next
 
-Live state as of 2026-08-18. `PLAN.md` is the design record and stays
+Live state as of 2026-08-22. `PLAN.md` is the design record and stays
 chronological; this file is the short answer to "what was I doing". Delete the
 finished parts as they go.
+
+## SAVE STATES, on branch `savestate-phase0` -- this is where the work is
+
+None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; the plan file is
+`~/.claude/plans/what-would-be-involved-calm-stearns.md`.
+
+It fits and it mostly works:
+
+    setup +0.260   hold +0.231   TNS 0.000, SEED 3, md5 75999219 (on the board)
+    -- 47's handshake stress tested on hardware; 49's OSD fix is UNTESTED
+    blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
+
+**IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
+boots and plays on the savestate bitstream; save and load were then visibly
+disruptive to the low-latency scaler, because `spi_video_timing` gated its
+counters with the savestate pause and sync went flat for 14 ms of an 18.5 ms
+frame. Fixed the way PGM does it -- **the raster never stops now** -- and the
+restore is byte-identical to the old code's on the determinism hash. PLAN.md 42.
+
+The fit is current as of 43. 42 improved it (82 registers and 59 ALMs back,
+and the thin `ascal` margin more than doubled). Worst paths are all `ascal`, the
+framework's HDMI scaler, which nothing here runs on. **Do not re-roll the seed
+for margin on it** -- seed 1 FAILS at -0.110 on clk_ram (41.1).
+
+The 386 is never instrumented -- it is NMI'd into a six-instruction stub that
+pushes its own registers onto the game's stack, which is main RAM and is in the
+blob anyway (38). The board is paused at a chosen instant, one tick before the
+raster raises vblank, which is what makes the interrupt state knowable rather
+than something to carry (39.3).
+
+**Proven in simulation, three sets:** a save is transparent (6 dwords of 65,536
+differ at the same logical point, five of them the stub's own footprint on dead
+stack, and it does not grow); a restore is exact in memory; the 386 resumes at
+the saved CS:EIP; every one of 24,283 I/O reads matches.
+
+**The sweep 39.8 asked for is done, and it found the bug** (`PLAN.md` 40). 86
+save points, three sets, 250 k to 100 M cycles. Main RAM restores EXACT and the
+386 resumes at the saved CS:EIP at every one; the DS2404's read sequence is
+identical on all three sets; every register's value sequence is identical at 85
+of the 86.
+
+    set      DS2404 reads          per-register values     lockstep
+    rdfts    identical 737/737     identical, all          167 k .. 399 k
+    rdft2    identical 1006/1006   identical, all          284 k .. 399 k
+    rfjet    identical  936/936    identical, 9 of 10      165 k .. 399 k
+
+**"Do not save during boot" was NOT the explanation, and neither was the RTC.**
+`pause` was low in S_ARM -- correct on a save, a leak on a load, where the board
+ran up to a frame with the old state before the blob was written over the top.
+One line. Prefix agreement at the bad points went 10 -> 201,431..211,773 and
+16 -> 165,688. The cartridge sets' SXX2C Z80 download was never missing state:
+rdft2 and rfjet boot-time saves now reach 399,472 and 264,590.
+
+**Do not quote a raw prefix number.** It is dominated by the SKEW: a run in
+perfect lockstep at a 40-instruction offset reads about 10 at offset zero. The
+old 16 / 167,678 / 10 triple is that artefact and nothing else. Align first, then
+report skew, lockstep, and PER-REGISTER value sequences -- a whole-stream diff
+mistakes a one-poll phase shift for a wrong value, which it did once here.
+
+**The three instruments that work**, and the one that does not:
+
+    SS_TRAIL=<f>   every EIP after the operation; align two runs, the first
+                   difference names the instruction. NEEDS SS_HASH_AFTER SET
+                   as well -- the anchor that arms it is only assigned inside
+                   the hash block.
+    SS_IORD=<f>    every I/O read with its value; names the register
+    SS_DSTRACE     every RTC tick during an operation, and every non-zero read
+                   of the DS2404 data port WITH THE CYCLE. The cycle is the
+                   part that matters: a value difference alone cannot say
+                   whether the clock is wrong or the game arrived early.
+    SS_HASH_AFTER  the determinism sweep -- DISTRUST IT. It read 4 of 12 at the
+                   point the trail agreement had improved four orders of
+                   magnitude. Never quote it without a trail number beside it.
+
+The residual is a poll-loop phase offset -- tens of instructions on rdfts,
+hundreds on the cartridge sets -- landing on 0x600 and 0x60C, both hardwired
+constants. No read returns a wrong value anywhere.
+
+The bench's `resumed at the saved EIP: NO` line is keyed on a short trail that is
+usually empty and was a FALSE VERDICT throughout 39. Believe the
+`restore : the CPU resumed at the saved CS:EIP` line beside it.
+
+Still open, and the list is shorter than it was:
+
+* **THE RAPID-RELOAD LOCKUP IS FIXED, DETERMINISTICALLY, AND STRESS TESTED ON
+  HARDWARE** (2026-08-22, `PLAN.md` 46 found it and 47 made it structural).
+  Saving during active gameplay and reloading rapidly -- the case that wedged in
+  about three, and about ten after the NMI retry -- now survives with no wedges
+  at all, in both directions. On the board: `49668c89`.
+
+  **The cause was a cache hit that skipped the freeze.** The restore stub's
+  `pop esp` is the only thing that can stop the 386: `ss_hold` gates
+  `mem_accept`, and past that instruction there is no memory cycle left to gate,
+  because `popad` and `iret` read stack lines the interrupt's own pushes just
+  cached. On the FIRST load of a session that read misses and the design works
+  by accident. On the second the line is still resident from load 1's own read
+  of it, nothing stalls, and `popad`/`iret` run off the un-restored stack. That
+  is the attract-versus-gameplay split -- it was always a working-set question.
+
+  **The fix is two parts and neither works alone** (46.6): evict the ESP slot's
+  cache line in SS_INVAL alongside the gate's, and put 32 bytes of NOP between
+  `mov esp, imm32` and `pop esp` so the write buffer has idle to drain in.
+
+  **The margin is GONE -- 47 replaced it with a handshake.** The root defect was
+  that the stub window was never marked uncacheable, while the I/O window beside
+  it always has been; it is declared now, via a second mask/base pair in
+  `l1_cache`/`z386`. And both stubs now POLL a flag (`ss_go = !ss_active`)
+  instead of the freeze relying on a marker write having retired in time. There
+  is no halt to use instead: z386 has no clock enable, and `single_step` sets a
+  `halted` latch that is never cleared -- so `ss_hold` can only ever stop the
+  NEXT memory access, never an instruction already fed by cache or prefetch.
+  A poll read COMPLETES, which is what lets the write buffer drain; a stall
+  deadlocks it (measured twice, 46.5). The SAVE got the poll too, and needed it.
+  `PLAN.md` 47.
+
+  **The reproducer is spent.** `tools/savestate-debug/rdft-ingame-wedges.ss`
+  replays six clean loads now. Take a FRESH in-game save off the board before
+  debugging any future wedge.
+
+  **New instruments, and they are the reason this was found:**
+  `SS_SAVE_FILE=<f>` dumps the slot, which is what validated the replay harness
+  without a board (46.1 -- a round trip is byte- and cycle-identical, so ignore
+  45.6's advice to replay an attract save first); `SS_WINDOW=<lo>:<hi>` prints
+  every signal change in a cycle range with spi_ss's own state beside spi_cpu's
+  (`ss_dbg_seq` is exported for it). Nothing per-operation could have found this.
+
+  Backups: pre-46 `861db700` is
+  `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0406`; the last pre-savestate
+  clean build `c1d99fef` (233d7fc) is `.20260822-0022`.
+* **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
+  naively: the save now ends ~191 k cycles later, so any restore offset tuned to
+  the old timing silently becomes a back-to-back test. Move them out first. A
+  bad offset produced a false `restore: FAILED` here and cost a round.
+* The sound path's MAME correlation has still not been redone since T80 was
+  swapped for tv80, and for a CPU swap that is the measurement that counts.
+  This is the largest genuine engineering task left and is independent of
+  everything else.
+* **Simulation sweep work is DEFERRED by decision (2026-08-22)**, not forgotten.
+  `tools/savestate_sweep.py` is checked in and working; rdft ran 48/48 clean and
+  rdft2's differences were all measurement artefacts, both fixed. rfjet is
+  covered by real gameplay on hardware instead of by the bench. Pick it up again
+  only if a bug turns up that looks systematic.
+* **The savestate UI PASSED on hardware** -- every item in section A of
+  `tools/savestate-debug/HARDWARE-SESSION.md`: slot switching on the pad and in
+  the OSD, the two agreeing, per-slot save/load, autoincrement, and audio
+  continuity across a load.
+
+  **That session found a different bug, now fixed and awaiting a look**
+  (`PLAN.md` 49): every OSD entry below the savestate block did the job of the
+  one above it -- "Video Settings" did nothing, "Sample Flash" opened Video
+  Settings. Main counts the `I,` info list as a MENU LINE, and this core had it
+  in the middle of the menu between two separators, where it rendered as a
+  near-blank row that reads as spacing. Moved to the end, which is where every
+  other core puts it. **On the board as `75999219`; the menu has not been looked
+  at since.** The help text is fixed in the same field
+  (`Slot=Start+LR|Save/Load=Start+DU`).
+
+  **The menu fix is CONFIRMED, C1 passed, and B2 -- the live Cart copy toggle --
+  PASSED**, which was the last path in the flash work that had only ever been
+  simulated.
+
+  **The nvram corruption is GONE and was not what it looked like** (`PLAN.md`
+  50). It showed as CHECK SUM ERROR in Cart copy; deleting the file cleared it,
+  and Cart copy proved clean. The mechanism 50.7 proposed -- `spi_nvram`'s save
+  side reads the DS2404's SRAM live and cannot be held off, while a savestate
+  restore rewrites all 512 bytes, with no interlock between them -- **was
+  written as a falsifiable prediction and FAILED it**: savestates plus an OSD
+  save now give a byte-clean file. It is a real LATENT HAZARD and is left
+  recorded rather than fixed blind (50.9).
+
+  What fits better: the corrupt file was written in the session where the OSD
+  was off by one, where a mis-aimed selection could move `status[22]` and fire
+  `copy_reset` -- blank the stamp, restart the board. That explains the
+  half-blanked stamp and the torn test patterns, and it is fixed by 49.
+
+  **The checklist is:
+  `tools/savestate-debug/HARDWARE-SESSION.md`**, and it covers the Sample Flash
+  toggle and a variant boot in the same sitting, because all of it is blocked on
+  the same thing -- there is no way to drive the OSD from a host.
+
+  Two things that file found while being written, both worth knowing before you
+  sit down: the **on-screen help text is wrong for this core** (it says
+  `Slot=DPAD`, but `joySS` is wired to Start, so bare DPAD does nothing), and
+  **Start is both the savestate modifier and the game's Start button**, so
+  holding it pops the help overlay mid-game and Start+Up loads a state. That
+  second one is a design judgement, not a bug.
+* Quartus keeps re-adding files to `SeibuSPI.qsf`'s stale duplicate list --
+  though it did NOT across the four compiles in 41 and 42, so this may be less
+  frequent than it looked.
+
+**If a fit fails or the register count jumps**, read
+`output_files/SeibuSPI.map.rpt`'s per-entity table FIRST. Two write statements to
+one array stops Quartus inferring memory and builds it out of flip-flops; it
+happened twice here and once got written up as "the device is full" (39.7).
 
 ## The goal that is nearly done
 

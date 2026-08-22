@@ -12,7 +12,14 @@ module l1_cache #(
     // -- SeibuSPI: parameterised so an arcade board can mark its
     //    memory-mapped I/O window uncacheable instead.
     parameter [31:0] UNCACHED_MASK = 32'hFFFE_0000,
-    parameter [31:0] UNCACHED_BASE = 32'h000A_0000
+    parameter [31:0] UNCACHED_BASE = 32'h000A_0000,
+    // A SECOND such window. -- SeibuSPI: one pair is not enough once a board
+    // has two regions the fabric answers combinationally, and they are too far
+    // apart for a single mask. This one defaults to matching nothing (a base
+    // outside the mask can never compare equal), so existing instantiations are
+    // unaffected. See PLAN.md 47.
+    parameter [31:0] UNCACHED2_MASK = 32'hFFFF_FFFF,
+    parameter [31:0] UNCACHED2_BASE = 32'hFFFF_FFFE
 ) (
     input         clk,
     input         reset,
@@ -76,7 +83,9 @@ wire [SET_BITS-1:0] cpu_set = cpu_addr[SET_MSB:SET_LSB];
 wire [WORD_OFFSET_BITS-1:0] cpu_word = cpu_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
 wire [BRAM_ADDR_BITS-1:0] cpu_bram_addr = {cpu_set, cpu_word};
 wire [SET_BITS-1:0] snoop_set = snoop_addr[SET_MSB:SET_LSB];
-wire cpu_uncacheable = !cache_enable || ((cpu_addr & UNCACHED_MASK) == UNCACHED_BASE);
+wire cpu_uncacheable = !cache_enable
+                     || ((cpu_addr & UNCACHED_MASK)  == UNCACHED_BASE)
+                     || ((cpu_addr & UNCACHED2_MASK) == UNCACHED2_BASE);
 wire cpu_protect_write = PROTECT_UMA_ROM && cpu_write && (cpu_addr[24:18] == 7'b000_0011);
 
 // Tag/data storage.

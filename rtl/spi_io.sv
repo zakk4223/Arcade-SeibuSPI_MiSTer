@@ -89,12 +89,30 @@ module spi_io
 	output reg  [7:0] z80dl_data,
 	output reg        z80dl_req,
 	input             z80dl_ack,
+
 	output            z80dl_stall,
 	// High-water mark of the download: one past the highest region offset the
 	// 386 has ever written. Everything at or above it is SDRAM nobody has
 	// filled, and `spi_sound` reads it back as MAME's zero padding instead.
 	output reg [18:0] z80dl_end,
-	output reg        z80_rst_n
+	output reg        z80_rst_n,
+	// ---- the savestate's view of this file, as 26 dwords ----------------
+	// Presented as a little memory so it can go through spi_ss_bridge like
+	// everything else, rather than growing a fourth hand-rolled crossing from
+	// the ssbus's clk_sys into this file's clk_cpu. Nothing in here free-runs
+	// -- there is no counter, no timer and no raster input -- so it needs no
+	// pause: with the 386 frozen and the DS2404 and the Z80 held, every
+	// register below is already still.
+	//
+	// What is NOT here, and why: the one-cycle strobes (the three DMA
+	// triggers, the sound FIFO write, the coin and FIFO2 reads), which are low
+	// whenever the CPU is not mid-write; the SXX2C Z80 download engine, which
+	// only runs at boot; and the two crossing handshakes, which are idle at an
+	// instruction boundary because `io_stall` is what holds the CPU off one.
+	input       [4:0] ss_addr,
+	input      [31:0] ss_din,
+	input             ss_we,
+	output reg [31:0] ss_dout
 );
 
 	// ------------------------------------------------------------------
@@ -154,12 +172,29 @@ module spi_io
 	initial for (ci = 0; ci < 20; ci = ci + 1) crtc_ram[ci] = 32'd0;
 
 	always @(posedge clk) begin
-		if (wr && crtc_sel) begin
+		// The savestate wins, which costs nothing: it only ever writes while
+		// the CPU is frozen, so `wr` is low.
+		if (ss_we && (ss_addr < 5'd20)) crtc_ram[ss_addr] <= ss_din;
+		else if (wr && crtc_sel) begin
 			if (be[0]) crtc_ram[dw[6:2]][ 7: 0] <= wdata[ 7: 0];
 			if (be[1]) crtc_ram[dw[6:2]][15: 8] <= wdata[15: 8];
 			if (be[2]) crtc_ram[dw[6:2]][23:16] <= wdata[23:16];
 			if (be[3]) crtc_ram[dw[6:2]][31:24] <= wdata[31:24];
 		end
+	end
+
+	// Registered, because spi_ss_bridge expects a RAM's one-cycle read latency.
+	always @(posedge clk) begin
+		case (ss_addr)
+			5'd20:   ss_dout <= {scroll_by, scroll_bx};
+			5'd21:   ss_dout <= {scroll_my, scroll_mx};
+			5'd22:   ss_dout <= {scroll_fy, scroll_fx};
+			5'd23:   ss_dout <= {7'd0, rf2_layer_bank, z80_rst_n,
+			                     layer_enable, layer_bank};
+			5'd24:   ss_dout <= {14'd0, dma_src};
+			5'd25:   ss_dout <= {16'd0, dma_len};
+			default: ss_dout <= crtc_ram[ss_addr];
+		endcase
 	end
 
 	// The whole 16-bit reg_1a is kept, and the two flags are derived from it, so
@@ -217,6 +252,25 @@ module spi_io
 			dma_src <= 18'd0;
 			dma_len <= 16'd0;
 			layer_bank <= 16'd0;
+		end
+		else if (ss_we) begin
+			// rowscroll_enable and fore_layer_d13 are not written here: they
+			// are derived from layer_bank one cycle later by the block above,
+			// so restoring layer_bank restores them too.
+			case (ss_addr)
+				5'd20: {scroll_by, scroll_bx} <= ss_din;
+				5'd21: {scroll_my, scroll_mx} <= ss_din;
+				5'd22: {scroll_fy, scroll_fx} <= ss_din;
+				5'd23: begin
+					layer_bank     <= ss_din[15:0];
+					layer_enable   <= ss_din[20:16];
+					z80_rst_n      <= ss_din[21];
+					rf2_layer_bank <= ss_din[24:22];
+				end
+				5'd24: dma_src <= ss_din[17:0];
+				5'd25: dma_len <= ss_din[15:0];
+				default: ;
+			endcase
 		end
 		else if (wr) begin
 			case (dw)

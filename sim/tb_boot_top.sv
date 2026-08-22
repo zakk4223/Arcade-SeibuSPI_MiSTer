@@ -85,6 +85,74 @@ module tb_boot_top
 	output            p_z80_rst_n,
 	output     [15:0] p_snd_pc,
 
+	// Where the 386 has put its IDT. Phase 0 of the savestate work needs to
+	// overlay one gate in it, and the first question is whether the base is
+	// visible and sane once the boot code has run its LIDT.
+	output     [31:0] p_idt_base,
+	output     [19:0] p_idt_limit,
+	output     [31:0] p_eip,
+	output     [15:0] p_cs,
+	output     [31:0] p_cs_base,
+	output     [31:0] p_cr0,
+
+	// Savestates. The C++ side asks for one the way the OSD does -- a single
+	// pulse -- and the board does the rest: NMI, stub, freeze, and the whole
+	// blob to and from a DDR3 the model below stands in for. Phase 0 drove
+	// spi_cpu's ports directly from here; nothing does now, so what this
+	// testbench exercises is the path the hardware will take.
+	input             ss_save,
+	input             ss_load,
+	output            p_ss_busy,
+	output            p_ss_snapshot,
+	output     [31:0] p_ss_esp_out,
+
+	// The DDR3 side of memory_stream, for the C++ model to answer.
+	output     [31:0] ddr_addr,
+	output     [63:0] ddr_wdata,
+	input      [63:0] ddr_rdata,
+	output            ddr_read,
+	output            ddr_write,
+	output      [7:0] ddr_burstcnt,
+	output      [7:0] ddr_byteenable,
+	input             ddr_busy,
+	input             ddr_rdata_ready,
+	output            ddr_acquire,
+
+	output            p_ss_in_stub,
+	output     [15:0] p_ss_writes,
+	output     [31:0] p_ss_last_wa,
+	output     [31:0] p_ss_last_wd,
+	// A window onto main RAM for the testbench alone. The savestate work needs
+	// to read back what the 386's stub pushed, and later to hash the whole
+	// 256 KB either side of a restore; nothing synthesised has this.
+	input      [15:0] peek_addr,
+	output     [31:0] peek_data,
+
+	output      [2:0] p_ss_state,
+	output      [4:0] p_ss_seq,
+	input       [8:0] p_ds_ram_addr,
+	output      [7:0] p_ds_ram_dout,
+	output            p_ss_nmi,
+	output     [15:0] p_ss_gate_dw0,
+	output     [15:0] p_ss_gate_reads,
+	output            p_ss_hold,
+	output      [2:0] p_ss_stalls,
+	output            p_cpu_irq,
+	output     [39:0] p_ds_rtc,
+	output     [31:0] p_ds_tick,
+	output            p_io_rd,
+	output      [8:0] p_io_raddr,
+	output     [31:0] p_io_rdata,
+	output     [15:0] p_ss_stub_reads,
+	output      [7:0] p_ss_stub_idx,
+	output     [31:0] p_ss_stub_data,
+	output     [31:0] p_ss_resume_eip,
+	output     [31:0] p_ss_esp_scratch,
+	output     [31:0] p_ss_base,
+	output     [19:0] p_ss_limit,
+	output      [3:0] p_ss_type,
+	output            p_ss_g,
+
 	// video out, so the testbench can see what the core actually draws
 	output            v_ce_pix,
 	output      [7:0] v_r,
@@ -100,6 +168,36 @@ module tb_boot_top
 	wire        flash_sdr_req;
 	/* verilator lint_on UNUSEDSIGNAL */
 
+	// The blob's trip to DDR3, exactly as SeibuSPI.sv wires it. `ddr_if` is an
+	// interface, so it is unrolled onto plain ports for the C++ model.
+	ssbus_if ssbus();
+	ddr_if   ss_ddr();
+
+	wire ss_stream_write, ss_stream_read, ss_stream_busy;
+
+	save_state_data ss_data
+	(
+		.clk         (clk_sys),
+		.reset       (reset),
+		.ddr         (ss_ddr),
+		.read_start  (ss_stream_read),
+		.write_start (ss_stream_write),
+		.index       (2'd0),
+		.busy        (ss_stream_busy),
+		.ssbus       (ssbus)
+	);
+
+	assign ddr_addr           = ss_ddr.addr;
+	assign ddr_wdata          = ss_ddr.wdata;
+	assign ddr_read           = ss_ddr.read;
+	assign ddr_write          = ss_ddr.write;
+	assign ddr_burstcnt       = ss_ddr.burstcnt;
+	assign ddr_byteenable     = ss_ddr.byteenable;
+	assign ddr_acquire        = ss_ddr.acquire;
+	assign ss_ddr.rdata       = ddr_rdata;
+	assign ss_ddr.busy        = ddr_busy;
+	assign ss_ddr.rdata_ready = ddr_rdata_ready;
+
 	spi_top dut
 	(
 		.clk_sys      (clk_sys),
@@ -114,6 +212,45 @@ module tb_boot_top
 		.jumpers      (8'hFC),
 		// The one debug control still in the core: the CPU freeze. Off here.
 		.freeze       (1'b0),
+
+		.ss_save         (ss_save),
+		.ss_load         (ss_load),
+		.ss_busy         (p_ss_busy),
+		.ss_stream_write (ss_stream_write),
+		.ss_stream_read  (ss_stream_read),
+		.ss_stream_busy  (ss_stream_busy),
+		.ssbus           (ssbus),
+		.ss_snapshot     (p_ss_snapshot),
+		.ss_esp_out      (p_ss_esp_out),
+
+		.ss_in_stub   (p_ss_in_stub),
+		.ss_writes    (p_ss_writes),
+		.ss_last_wa   (p_ss_last_wa),
+		.ss_last_wd   (p_ss_last_wd),
+		.ss_dbg_state      (p_ss_state),
+		.ss_dbg_seq        (p_ss_seq),
+		.dbg_ds_ram_addr   (p_ds_ram_addr),
+		.dbg_ds_ram_dout   (p_ds_ram_dout),
+		.ss_dbg_nmi        (p_ss_nmi),
+		.ss_dbg_gate_dw0   (p_ss_gate_dw0),
+		.ss_dbg_gate_reads (p_ss_gate_reads),
+		.ss_dbg_hold       (p_ss_hold),
+		.ss_dbg_stalls     (p_ss_stalls),
+		.p_cpu_irq         (p_cpu_irq),
+		.p_ds_rtc          (p_ds_rtc),
+		.p_ds_tick         (p_ds_tick),
+		.p_io_rd           (p_io_rd),
+		.p_io_raddr        (p_io_raddr),
+		.p_io_rdata        (p_io_rdata),
+		.ss_dbg_stub_reads (p_ss_stub_reads),
+		.ss_dbg_stub_idx   (p_ss_stub_idx),
+		.ss_dbg_stub_data  (p_ss_stub_data),
+		.ss_dbg_resume_eip (p_ss_resume_eip),
+		.ss_dbg_esp_scratch(p_ss_esp_scratch),
+		.ss_dbg_ss_base    (p_ss_base),
+		.ss_dbg_ss_limit   (p_ss_limit),
+		.ss_dbg_ss_type    (p_ss_type),
+		.ss_dbg_ss_g       (p_ss_g),
 
 		// Ports spi_top grew after this file was last touched. Leaving them
 		// off is not free: Verilator's -Wall makes PINMISSING an error, so the
@@ -222,5 +359,15 @@ module tb_boot_top
 	// synthesised net now (PLAN.md 29), so this reaches into spi_sound the same
 	// way every other probe in this file reaches into the DUT.
 	assign p_snd_pc          = dut.sound.dbg_z80_pc;
+	assign p_idt_base        = dut.cpu.dbg_idt_base;
+	assign p_idt_limit       = dut.cpu.dbg_idt_limit;
+	assign p_eip             = dut.cpu.dbg_eip;
+	assign p_cs              = dut.cpu.dbg_cs;
+	assign p_cs_base         = dut.cpu.dbg_cs_base;
+	assign peek_data         = {dut.cpu.mainram.mem3[peek_addr],
+	                            dut.cpu.mainram.mem2[peek_addr],
+	                            dut.cpu.mainram.mem1[peek_addr],
+	                            dut.cpu.mainram.mem0[peek_addr]};
+	assign p_cr0             = dut.cpu.dbg_cr0;
 
 endmodule
