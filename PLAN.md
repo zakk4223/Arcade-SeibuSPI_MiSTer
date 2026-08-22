@@ -11021,3 +11021,73 @@ placement noise and nothing more.
 If the off-by-one survives, the next thing to look at is the count of near-blank
 rows around the savestate block on screen: the theory above predicts exactly one
 fewer of them after this change.
+
+### 50.6 Cart copy is NOT broken, and the toggle WORKS (2026-08-22)
+
+Deleted the nvram, loaded rdft fresh, selected Cart copy: **the game rebooted
+into the update countdown with no checksum error.**
+
+That is two results. The Cart copy path is clean, and **B2 passed** -- the live
+0 -> 1 edge, blanking the stamp and self-resetting, which was the last path in
+the whole flash effort that had only ever run in simulation (32.3, and RESUME
+had it listed as unverifiable from a host). It works.
+
+So the corruption was written into the FILE by something earlier in the session,
+and 50.4's step 1 and 2 are done.
+
+### 50.7 The mechanism: the save side reads the SRAM LIVE, and cannot be held off
+
+`spi_nvram` streams the 516-byte file a byte at a time, and the tail comes
+**straight out of the DS2404's live array**:
+
+    assign ioctl_din = !up_run ? 8'd0
+                     : in_tail ? sram_dout
+                     :           cur[{up_cnt[2:0], 3'b000} +: 8];
+
+with the reason stated a few lines above it:
+
+    hps_io samples ioctl_din on the same edge it advances its address, and
+    NOTHING CAN HOLD IT OFF
+
+There is no snapshot. And **there is no interlock of any kind between the
+savestate path and this stream** -- grep finds no cross-reference in either
+direction.
+
+A savestate RESTORE writes all 512 bytes of that array through `ss_ram_we`. If
+Main is streaming the file out while that happens, the file gets a contiguous run
+of bytes from one version and the rest from the other. **A torn eight-byte run is
+exactly the shape observed** (50.1), and the stamp's byte 0 has the same
+explanation one level down: it comes from a prefetched SDRAM line, and the
+savestate is hammering SDRAM.
+
+**This is a regression that savestates introduced.** Before 38, the only writer
+of that SRAM was the game itself, one byte at a time through the DS2404's command
+sequence -- a torn read there costs at most one stale byte, which is why this
+never showed up in the DS2404 work. A restore rewrites all 512 at once.
+
+It also explains why 50.3's bench check came back EXACT and was still worth
+having: the mechanism is not that the restore writes the WRONG bytes. It writes
+the right ones, at a moment nothing coordinates with.
+
+### 50.8 The prediction that tests this, and the fix if it holds
+
+**Falsifiable, and step 3 of the bisect:** with a good nvram file, load a
+savestate a few times while the game runs, then pull the file and compare it
+against the reference. **If this mechanism is right it will corrupt again**, and
+the corruption will be a contiguous run rather than scattered bytes.
+
+If it holds, the invariant to restore is: *while Main is streaming the file out,
+the bytes it reads must not change.* Two ways, and the second is the correct one:
+
+* **Gate the savestate's SRAM writes on `!up_run`.** One line, no extra RAM. The
+  restore can be stalled -- the bridge holds its request until acked -- and a
+  516-byte stream is short. But it only closes one direction: a stream STARTING
+  while the restore is mid-write still tears, and that window is small rather
+  than absent.
+* **Stream from a shadow copy.** 512 bytes, snapshotted when a save is requested,
+  with the save side reading the shadow and never the live array. Correct in both
+  directions, and a slightly stale but CONSISTENT file is strictly better than a
+  torn one. One write port on the shadow, so nothing about memory inference
+  changes (39.7).
+
+Do not build either until the prediction has been run.

@@ -160,9 +160,19 @@ Still open, and the list is shorter than it was:
   at since.** The help text is fixed in the same field
   (`Slot=Start+LR|Save/Load=Start+DU`).
 
-  Still open from that checklist: **the Sample Flash toggle (section B) and a
-  variant boot (C1)**, both of which need the OSD -- so they were blocked by the
-  off-by-one and are worth doing on the next visit. **The checklist is:
+  **The menu fix is CONFIRMED, C1 passed, and B2 -- the live Cart copy toggle --
+  PASSED**, which was the last path in the flash work that had only ever been
+  simulated.
+
+  **But a savestate session corrupts the nvram file** (`PLAN.md` 50). It shows as
+  CHECK SUM ERROR in Cart copy; deleting the file and starting fresh clears it,
+  and Cart copy itself is clean. The cause is that `spi_nvram`'s save side reads
+  the DS2404's SRAM **live** and by design cannot be held off, while a savestate
+  restore rewrites all 512 bytes of it -- and there is NO interlock between them.
+  A torn file is the result, and the observed damage is a contiguous eight-byte
+  run over the game's own test patterns, which is what it checksums.
+  **NEXT: run 50.8's prediction** -- load a savestate a few times, then pull the
+  file and compare. If it corrupts again, 50.8 names the fix. **The checklist is:
   `tools/savestate-debug/HARDWARE-SESSION.md`**, and it covers the Sample Flash
   toggle and a variant boot in the same sitting, because all of it is blocked on
   the same thing -- there is no way to drive the OSD from a host.
