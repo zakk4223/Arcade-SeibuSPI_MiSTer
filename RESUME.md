@@ -164,15 +164,21 @@ Still open, and the list is shorter than it was:
   PASSED**, which was the last path in the flash work that had only ever been
   simulated.
 
-  **But a savestate session corrupts the nvram file** (`PLAN.md` 50). It shows as
-  CHECK SUM ERROR in Cart copy; deleting the file and starting fresh clears it,
-  and Cart copy itself is clean. The cause is that `spi_nvram`'s save side reads
-  the DS2404's SRAM **live** and by design cannot be held off, while a savestate
-  restore rewrites all 512 bytes of it -- and there is NO interlock between them.
-  A torn file is the result, and the observed damage is a contiguous eight-byte
-  run over the game's own test patterns, which is what it checksums.
-  **NEXT: run 50.8's prediction** -- load a savestate a few times, then pull the
-  file and compare. If it corrupts again, 50.8 names the fix. **The checklist is:
+  **The nvram corruption is GONE and was not what it looked like** (`PLAN.md`
+  50). It showed as CHECK SUM ERROR in Cart copy; deleting the file cleared it,
+  and Cart copy proved clean. The mechanism 50.7 proposed -- `spi_nvram`'s save
+  side reads the DS2404's SRAM live and cannot be held off, while a savestate
+  restore rewrites all 512 bytes, with no interlock between them -- **was
+  written as a falsifiable prediction and FAILED it**: savestates plus an OSD
+  save now give a byte-clean file. It is a real LATENT HAZARD and is left
+  recorded rather than fixed blind (50.9).
+
+  What fits better: the corrupt file was written in the session where the OSD
+  was off by one, where a mis-aimed selection could move `status[22]` and fire
+  `copy_reset` -- blank the stamp, restart the board. That explains the
+  half-blanked stamp and the torn test patterns, and it is fixed by 49.
+
+  **The checklist is:
   `tools/savestate-debug/HARDWARE-SESSION.md`**, and it covers the Sample Flash
   toggle and a variant boot in the same sitting, because all of it is blocked on
   the same thing -- there is no way to drive the OSD from a host.

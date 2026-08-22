@@ -11091,3 +11091,54 @@ the bytes it reads must not change.* Two ways, and the second is the correct one
   changes (39.7).
 
 Do not build either until the prediction has been run.
+
+### 50.9 The prediction FAILED, and a better explanation was in front of me
+
+Ran exactly as 50.8 asked: a good file, savestates loaded several times, then an
+OSD-triggered nvram save. The file is **clean**.
+
+    stamp        80 4a 4a 36              correct, programmed
+    tail[20..27] 67 45 23 01 ef cd ab 89  the test patterns, correct
+    vs the 32.7 reference: 2 bytes differ -- tail[18] and tail[30], both on the
+    six-byte RTC stride 32.7 already documented as expected
+
+**So 50.7 is NOT the cause.** It is the fifth confident mechanism in this file's
+history to fail its first test, and the only difference this time is that the
+prediction was written down before the fix was built, so the fix was not built.
+
+**What 50.7 still is:** a real latent hazard. The save side does read the live
+array, it genuinely cannot be held off, and there genuinely is no interlock.
+Nothing about that changed -- only the claim that it explains this corruption.
+Downgraded from cause to hazard, and left alone rather than fixed blind. 40.4 is
+the argument for writing it down: a latent hazard masked by something unrelated
+is worse than an open one.
+
+**What fits the evidence far better, and was in front of me the whole time:** the
+corrupt file was written in the session where **the OSD was off by one** (49).
+Every menu selection in that session did the job of the item above it. Toggling
+what looked like one option moved a different status bit -- and `status[22]` is
+Sample Flash, whose 0 -> 1 edge fires `copy_reset`: blank the stamp and restart
+the board.
+
+That explains both halves of the damage, which 50.7 only ever explained loosely:
+
+* **stamp `3A FF FF FF`** -- caught mid-blank. Bytes 1-3 blanked, byte 0 not yet.
+  A far better fit than "the savestate is hammering SDRAM".
+* **the test patterns garbage** -- the self-reset reboots the game, which rewrites
+  its DS2404 test patterns on the way up. A save landing in that window tears them.
+
+It also predicts what was observed afterwards: **since the menu fix, savestates
+plus an OSD save produce a clean file**, and Cart copy works from a clean start.
+
+This is not confirmed either, and it is not worth chasing retroactively -- the
+menu bug that would have caused it is fixed, and the symptom is gone. It is
+recorded so that nobody re-derives 50.7 from the same evidence.
+
+### 50.10 Where section B stands
+
+    B1  Cart copy at boot, the updater runs to completion   PASS
+    B2  the live 0 -> 1 toggle, blank and self-reset        PASS
+    B3  switching back does nothing until the next boot     not separately run
+
+Which finishes the flash work: every mode and every transition has now run on
+hardware.
