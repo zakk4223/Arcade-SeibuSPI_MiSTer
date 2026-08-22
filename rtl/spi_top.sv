@@ -83,6 +83,10 @@ module spi_top
 	output     [31:0] ss_last_wa,
 	output     [31:0] ss_last_wd,
 	output      [2:0] ss_dbg_state,
+	// spi_ss's OWN state, which is what the wedge overlay paints and what
+	// the bench had no way to see. Distinct from ss_dbg_state, which is
+	// spi_cpu's -- reading one as the other cost a round in PLAN.md 44.5.
+	output      [4:0] ss_dbg_seq,
 	output            ss_dbg_nmi,
 	output     [15:0] ss_dbg_gate_dw0,
 	output     [15:0] ss_dbg_gate_reads,
@@ -1146,6 +1150,7 @@ module spi_top
 	// 8.4 M, about 146 ms -- four times the longest real operation.
 	// ------------------------------------------------------------------
 	wire  [4:0] ss_dbg_st;
+	assign ss_dbg_seq = ss_dbg_st;
 	wire        ss_cpu_idle;
 	reg  [23:0] ss_stuck_cnt;
 	always @(posedge clk_sys) begin

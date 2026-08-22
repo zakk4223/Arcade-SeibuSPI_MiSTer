@@ -541,7 +541,17 @@ module spi_cpu
 			SS_RESTORE_IDX:
 			         ss_stub_rom = 32'hBC50E089;   // mov eax,esp / push eax / mov esp,
 			8'h11:   ss_stub_rom = SS_STUB_ESP;    //   ...this constant address
-			8'h12:   ss_stub_rom = 32'h90CF615C;   // pop esp / popad / iret
+			// Thirty-two bytes of NOP sit between `mov esp, imm32` and this,
+			// so the CPU's write buffer has somewhere to drain. `pop esp` is
+			// the read the restore turns on -- it must be serviced AFTER the
+			// marker `push eax` has retired, because that write is what
+			// latches the freeze. Measured without the gap: the read is
+			// serviced ten cycles BEFORE the marker retires, `popad` then runs
+			// off the un-restored stack, and the machine comes back at
+			// 00009A80. Stalling the read instead DEADLOCKS -- the z386 will
+			// not drain its write buffer while a read is outstanding, measured
+			// twice, at mem_accept and at the response. PLAN.md 46.
+			8'h18:   ss_stub_rom = 32'h90CF615C;   // pop esp / popad / iret
 			// The datum the stub pops. Combinational, so it is whatever the
 			// caller has put there by the time the CPU reads it -- which is
 			// after the blob has been streamed in, and is why this works where
@@ -728,6 +738,28 @@ module spi_cpu
 			// Give the invalidate time to retire before the NMI is offered.
 			SS_INVAL: begin
 				ss_arm_cnt <= ss_arm_cnt + 4'd1;
+				// ...and evict SS_STUB_ESP's line too, which is the second
+				// address in this window the CPU reads as DATA. It has to be a
+				// MISS or the whole restore falls apart, and on the second and
+				// later loads of a session it was a HIT -- the line is left
+				// behind by the previous restore's own read of it.
+				//
+				// The stub is written so that `mov esp, cs:[SS_STUB_ESP]`
+				// cannot complete until the blob has landed: the read reaches
+				// this module, is not answered (ss_esp_rd_stall), and the CPU
+				// parks on it while the marker write retires behind it and the
+				// freeze takes hold. A CACHE HIT skips all of that. The mov
+				// completes out of the stale line, the CPU runs on to `popad`
+				// and `iret` before the snapshot is even taken, and comes back
+				// on a stack the blob has not been written into.
+				//
+				// Measured, replaying a real in-game save: load 1 reads idx
+				// 0x81 and stalls; load 2 never reads it at all and is past
+				// the mov by the time the marker retires. PLAN.md 46.
+				if (ss_arm_cnt == 4'd2) begin
+					ss_snoop_addr  <= SS_STUB_ESP;
+					ss_snoop_valid <= 1'b1;
+				end
 				if (ss_arm_cnt == 4'd8) begin
 					ss_nmi   <= 1'b1;
 					ss_state <= SS_NMI;

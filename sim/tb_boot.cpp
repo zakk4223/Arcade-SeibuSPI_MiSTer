@@ -259,7 +259,16 @@ int main(int argc, char **argv)
     // Main writes the slot verbatim, so the file IS the DDR3 image: byte n of
     // the file is byte n at the slot base.
     std::vector<uint64_t> ddr(65536, 0);
-    if (const char *lf = getenv("SS_LOAD_FILE")) {
+    const bool ss_replay = getenv("SS_LOAD_FILE") != nullptr;
+    // Main RAM inside the blob: MAIN_RAM's payload starts at word 3, two
+    // dwords to the word, which is the packing the load's compare below
+    // already assumes.
+    auto blob_dw = [&ddr](uint32_t i) -> uint32_t {
+        uint64_t d = ddr[3 + (i >> 1)];
+        return (i & 1) ? (uint32_t)(d >> 32) : (uint32_t)(d & 0xFFFFFFFFu);
+    };
+    if (ss_replay) {
+        const char *lf = getenv("SS_LOAD_FILE");
         FILE *f = fopen(lf, "rb");
         if (!f) { fprintf(stderr, "SS_LOAD_FILE: cannot open %s\n", lf); return 2; }
         size_t n = fread(ddr.data(), 1, ddr.size() * 8, f);
@@ -295,6 +304,25 @@ int main(int argc, char **argv)
     uint64_t ss_enter_cyc = 0;
     uint32_t ss_marker = 0;
     uint64_t ss_hash_at_save = 0, ss_hash_pre_load = 0, ss_hash_post_load = 0;
+    // A replay run has no save of its own, so everything the verdicts are
+    // keyed on -- ss_done, the marker slot, the saved EIP, the reference hash
+    // -- has to come out of the BLOB instead. Without this the load takes the
+    // save branch (mislabelled "SAVE COMPLETE", and the exactness check never
+    // runs at all), and the saved EIP stays 0 so the resume verdict reads
+    // FAILED no matter what the CPU did. Both of those were true of the run
+    // reported in PLAN.md 45.6. Fixed here; see 46.
+    if (ss_replay) {
+        ss_done       = true;                       // the blob IS the save
+        // The marker slot is GLOBAL's one item, at word 2, and that word IS
+        // reliable -- it reads back the same address the snapshot reports.
+        // The saved EIP is NOT taken from the blob: this bench's parse of
+        // memory_stream's packing drifts in its tail (223 of 65536 dwords, on
+        // a GOOD run as well as a bad one), and the frame sits at the top of
+        // main RAM where that drift lands. It is read out of RESTORED main RAM
+        // through the peek window instead, below, which is authoritative.
+        ss_saved_esp  = (uint32_t)(ddr[2] & 0xFFFFFFFFu);
+        printf("  SS: replay: the blob's marker slot is %08X\n", ss_saved_esp);
+    }
     uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
     const size_t IO_RD_MAX = 400000; size_t io_rd_n = 0; bool io_rd_d = false;
     const char *iort = getenv("SS_IORD");
@@ -510,7 +538,7 @@ int main(int argc, char **argv)
             }
             // With SS_LOAD_FILE the slot is already populated, so a restore no
             // longer has to be preceded by a save in the same run.
-            if (ss_restore_at && (ss_done || getenv("SS_LOAD_FILE")) && rs_count < ss_reloads
+            if (ss_restore_at && ss_done && rs_count < ss_reloads
                 && cyc >= (rs_count ? rs_next : ss_restore_at)
                 && !dut->p_ss_busy) {
                 rs_count++;
@@ -562,6 +590,49 @@ int main(int argc, char **argv)
                        (unsigned long long)cyc, dut->p_ss_state);
             ds_rtc_d = dut->p_ds_rtc;
 
+            // SS_WINDOW=<first>:<last> -- every cycle in a cycle range, with
+            // spi_ss's state beside spi_cpu's. Built for the rapid-reload
+            // lockup: the interesting event is the CPU leaving the stub while
+            // the transfer is still running, which is ~100 cycles wide and
+            // invisible to any per-operation printf. PLAN.md 46.
+            static uint64_t win_lo = 0, win_hi = 0;
+            static bool win_init = false;
+            if (!win_init) {
+                win_init = true;
+                if (const char *w = getenv("SS_WINDOW")) {
+                    win_lo = strtoull(w, nullptr, 0);
+                    const char *c = strchr(w, ':');
+                    win_hi = c ? strtoull(c + 1, nullptr, 0) : win_lo + 400;
+                }
+            }
+            if (win_hi && cyc >= win_lo && cyc <= win_hi) {
+                static const char *ssn[] = {"IDLE","INVAL","NMI","RUN",
+                                            "4","5","6","7"};
+                static uint32_t pe = 0xFFFFFFFF; static unsigned pst = 99, pseq = 99;
+                static unsigned ph = 9, psn = 9, pis = 9, pw = 0xFFFF;
+                static unsigned prd = 0xFFFF;
+                unsigned h = dut->p_ss_hold, sn = dut->p_ss_snapshot;
+                unsigned is = dut->p_ss_in_stub;
+                if (dut->p_eip != pe || dut->p_ss_state != pst
+                    || dut->p_ss_seq != pseq || h != ph || sn != psn
+                    || is != pis || dut->p_ss_writes != pw
+                    || dut->p_ss_stub_reads != prd) {
+                    printf("  W %llu  cpu=%-5s hold=%u snap=%u in_stub=%u "
+                           "seq=%2u  CS=%04X EIP=%08X  writes=%u wa=%08X "
+                           "wd=%08X busy=%u\n",
+                           (unsigned long long)cyc, ssn[dut->p_ss_state & 7],
+                           h, sn, is, dut->p_ss_seq, dut->p_cs, dut->p_eip,
+                           dut->p_ss_writes, dut->p_ss_last_wa,
+                           dut->p_ss_last_wd, dut->p_ss_busy);
+                    printf("        stub_reads=%u idx=%02X data=%08X\n",
+                           dut->p_ss_stub_reads, dut->p_ss_stub_idx,
+                           dut->p_ss_stub_data);
+                    pe = dut->p_eip; pst = dut->p_ss_state; pseq = dut->p_ss_seq;
+                    ph = h; psn = sn; pis = is; pw = dut->p_ss_writes;
+                    prd = dut->p_ss_stub_reads;
+                }
+            }
+
             if (!ss_busy_d && dut->p_ss_busy) {
                 ss_busy_start = cyc;
                 printf("  SS: RTC when the operation was armed: %llu (tick %u)\n",
@@ -585,6 +656,25 @@ int main(int argc, char **argv)
                            (unsigned long long)cyc,
                            (unsigned long long)ddr_writes,
                            (unsigned long long)ddr_reads);
+                    // SS_SAVE_FILE writes the slot out exactly as Main
+                    // would, so it can be replayed by SS_LOAD_FILE in a LATER,
+                    // independently-booted run. That round trip is the only
+                    // way to validate the replay harness itself without the
+                    // board: a blob this bench produced and restored in-run
+                    // must also restore when replayed. If it does not, the
+                    // harness is broken and 45.6's in-game failure says
+                    // nothing. PLAN.md 45.6.
+                    if (const char *sf = getenv("SS_SAVE_FILE")) {
+                        FILE *f = fopen(sf, "wb");
+                        if (f) {
+                            fwrite(ddr.data(), 8, ddr.size(), f);
+                            fclose(f);
+                            printf("  SS: wrote the slot to %s (%zu bytes)\n",
+                                   sf, ddr.size() * 8);
+                        } else {
+                            fprintf(stderr, "SS_SAVE_FILE: cannot write %s\n", sf);
+                        }
+                    }
                     // What the blob says. Section GLOBAL's header is at word
                     // 1 and its one item at word 2; MAIN_RAM's header follows.
                     printf("        blob GLOBAL payload = %08X  (should be the "
@@ -607,10 +697,13 @@ int main(int argc, char **argv)
                         printf("          [%08X] = %08X   %s\n",
                                byte, dut->peek_data, fn[i]);
                     }
-                } else if (!rs_done) {
+                } else {
+                    // EVERY load, not just the first. A rapid-reload failure is
+                    // by definition never the first one, so a check that runs
+                    // once cannot see it. PLAN.md 46.
                     rs_done = true;
-                    printf("  SS: LOAD COMPLETE at cycle %llu\n",
-                           (unsigned long long)cyc);
+                    printf("  SS: LOAD %u COMPLETE at cycle %llu\n",
+                           rs_count, (unsigned long long)cyc);
                     // Main RAM should now be the blob, byte for byte. The
                     // frame the CPU is about to pop is part of that, so this
                     // covers it too.
@@ -637,6 +730,17 @@ int main(int argc, char **argv)
                         }
                     }
                     ss_hash_post_load = hh;
+                    // On a replay there is no save in this run to compare
+                    // against, so LOAD 1 becomes the reference and every later
+                    // reload is checked against it. That is exactly the
+                    // property the rapid-reload lockup breaks: the first load
+                    // is always clean and a later one is not.
+                    if (ss_replay && !ss_hash_at_save) {
+                        ss_hash_at_save = hh;
+                        printf("        main RAM restored  : %016llX  "
+                               "<- REFERENCE (load 1 of a replay)\n",
+                               (unsigned long long)hh);
+                    } else {
                     printf("        main RAM at save   : %016llX\n"
                            "        main RAM before it : %016llX\n"
                            "        main RAM restored  : %016llX  %s\n",
@@ -645,6 +749,25 @@ int main(int argc, char **argv)
                            (unsigned long long)ss_hash_post_load,
                            ss_hash_post_load == ss_hash_at_save
                              ? "<- EXACT" : "<- MISMATCH");
+                    }
+                    // The frame the CPU is about to pop, out of restored main
+                    // RAM. On a replay this is the only place the saved EIP
+                    // can come from, and the marker beside it says whether the
+                    // address is right at all.
+                    if (ss_replay && !ss_saved_eip) {
+                        static const char *rfn[] = {
+                            "marker", "EDI", "ESI", "EBP", "ESP(pushad)", "EBX",
+                            "EDX", "ECX", "EAX", "EIP", "CS", "EFLAGS" };
+                        printf("        the frame the blob restored:\n");
+                        for (int i = 0; i < 12; i++) {
+                            uint32_t byte = ss_saved_esp + 4u * i;
+                            dut->peek_addr = (uint16_t)((byte >> 2) & 0xFFFF);
+                            dut->eval();
+                            if (i == 9) ss_saved_eip = dut->peek_data;
+                            printf("          [%08X] = %08X   %s\n",
+                                   byte, dut->peek_data, rfn[i]);
+                        }
+                    }
                 }
                 ss_snap_cyc = 0;
                 // The anchor for the determinism hash: the last moment the

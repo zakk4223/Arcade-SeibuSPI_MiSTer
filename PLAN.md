@@ -10589,3 +10589,185 @@ Every real step came from measurement: the `ss_dbg_stalls` probe (43), the
 hardware bisect (44), the overlay (45.2), and the user's attract-vs-gameplay
 split. The bench passed five back-to-back loads throughout and would never have
 found any of it.
+
+## 46. The rapid-reload lockup, found: a cache hit that skips the freeze (2026-08-22)
+
+45 handed over one instruction: validate the replay harness before believing
+anything it says. Doing that took two bench bugs out of the way, and the harness
+then reproduced the hardware failure exactly and named its cause.
+
+### 46.1 The harness is sound, and here is the proof it was missing
+
+45.6 could not say whether replaying a hardware blob into an independently
+booted simulation means anything. It does, and no board is needed to show it:
+`SS_SAVE_FILE=<f>` writes the slot out at the end of a save exactly as Main
+would, so a blob this bench PRODUCED can be replayed by `SS_LOAD_FILE` in a
+LATER run and the two outcomes compared.
+
+    run A   save at 6,000,000, restore at 8,000,000 in the same run
+    run B   fresh boot, no save, SS_LOAD_FILE=<run A's slot>, restore at same
+
+    main RAM after the restore   F44EA6C163B5EBB4   both
+    the frame it came back on    EIP 0026BA4C, CS 0018, marker 0003FF98   both
+    stub exit                    cycle 9347296   both
+
+Byte-identical, cycle-identical. A blob does carry everything, and replay is a
+real test. **Replaying an attract-mode save, which 45.6 asked for, is no longer
+the gate on believing any of this** -- the round trip is stronger, because it
+compares against a known-good restore of the SAME blob rather than against a
+guess about what the hardware would have done.
+
+### 46.2 Two bench bugs, and why 45.6 could not be read
+
+Both in the replay path, both invisible until the round trip above put a
+known-good case through it:
+
+* **The load took the SAVE branch.** `ss_done` is false in a replay -- there is
+  no save in the run -- so load 1 fell into the `!ss_done` arm. It printed
+  "SAVE COMPLETE ... 0 DDR3 writes, 39068 reads", which is visibly a load, and
+  **the main-RAM-vs-blob exactness check never ran at all.** 45.6 never checked
+  that anything restored.
+* **The saved EIP stayed 0**, read out of a frame at `esp=0`, so
+  `restore: FAILED` was printed no matter what the CPU did. 45.6's FAILED line
+  says nothing; its raw EIPs are still real.
+
+Both fixed. A replay now seeds `ss_done`, the marker slot (`ddr[2]`, which IS
+reliable) and its reference hash from the blob and from load 1, and reads the
+frame out of RESTORED main RAM through the peek window. **The saved EIP is NOT
+parsed out of the blob** -- this bench's model of memory_stream's packing drifts
+in its tail, 223 of 65536 dwords on a GOOD run as well as a bad one, and the
+frame sits exactly where that drift lands. The peek window is authoritative.
+
+And the per-load check runs on EVERY load now, not just the first. A
+rapid-reload failure is by definition never the first one, so a check that ran
+once could not have seen it.
+
+### 46.3 The reproduction
+
+    SS_LOAD_FILE=tools/savestate-debug/rdft-ingame-wedges.ss \
+    SS_RESTORE_AT=6000000 SS_RELOADS=6 ./obj_dir/Vtb_boot_top <sdram> 70000000 rdft
+
+    load 1   restores, resumes at 0026B178          clean
+    load 2   leaves the stub at EIP=00009A80        the 386 is lost
+
+That is mode A off the hardware -- the restore completes, spi_ss goes idle, and
+the 386 is executing rubbish.
+
+### 46.4 What the cycle trace says, which is the whole answer
+
+`SS_WINDOW=<lo>:<hi>` prints every change of spi_cpu's state, spi_ss's state,
+hold, snapshot, in_stub, the stub-window read index and the write counter. The
+restore stub, decoded from the window ROM rather than from the comment above it:
+
+    40  89 E0            mov  eax, esp
+    42  50               push eax          <- the marker. the freeze latches on
+                                              THIS WRITE RETIRING
+    43  BC imm32         mov  esp, 00040204
+    48  5C               pop  esp          <- the read this module answers, and
+                                              the only thing that can stop the CPU
+    49  61               popad
+    4A  CF               iret
+
+Two loads, same blob, same board:
+
+    load 1 (clean)   pop esp MISSES -> read reaches this module -> blocked by
+                     ss_hold -> CPU parks. marker retires with EIP at 40049.
+    load 2 (broken)  pop esp HITS THE L1 DATA CACHE -- the line was filled by
+                     LOAD 1's own read of it and nothing evicts it. The read
+                     never reaches this module, nothing stalls, popad and iret
+                     run off the un-restored stack, and the marker retires ten
+                     cycles later with EIP already at 4004A.
+
+**The freeze was never what held the CPU. The cache miss was.** `ss_hold` gates
+`mem_accept`, so it stops a memory cycle -- and after `pop esp` there is no
+memory cycle left to stop: `popad` reads stack lines that the interrupt's own
+pushes have just put in the cache, and `iret` likewise. On the first load of a
+session the ESP slot is cold and the design works by accident. On the second it
+is warm and there is nothing between the stub and the game's old registers.
+
+This is exactly the attract-versus-gameplay split (45.1): whether that line is
+still resident at the next load is a question about the game's working set, and
+"state the game only has when it is being played" is what a working set IS.
+
+### 46.5 Two fixes that did not work, and what they measured
+
+Recorded because each one killed a plausible mechanism.
+
+* **Refuse the read at `mem_accept`.** Deadlocks. The CPU presents `pop esp`
+  AHEAD of the marker `push eax` still sitting in its write buffer, so refusing
+  the read refuses the write that would release it. Writes stop at 2 and nothing
+  moves again.
+* **Accept the read and withhold the response.** Deadlocks identically. So it is
+  not an ordering quirk of the accept path: **the z386 will not drain its write
+  buffer while a read is outstanding**, measured twice, and that closes off
+  every "just stall the CPU there" fix.
+
+### 46.6 The fix
+
+Two parts, and neither works without the other.
+
+**Evict the ESP slot's cache line with the gate's**, in SS_INVAL. The line has to
+MISS or the read never reaches this module at all. Necessary, and on its own
+insufficient -- with the line evicted the read is serviced ten cycles BEFORE the
+marker retires, and load 2 still comes back at 00009A80.
+
+**Put thirty-two bytes of NOP between `mov esp, imm32` and `pop esp`**, moving
+the tail of the stub from window index 0x12 to 0x18. The CPU walks them out of
+the instruction cache issuing no memory cycle, which is the idle the write
+buffer needs. The marker then retires during the NOPs, `ss_hold` is set well
+before `pop esp` is reached, and the read stalls the way it always did on the
+first load.
+
+    before   the read is serviced 10 cycles BEFORE the marker retires
+    after    ss_hold is set with 20 NOPs still to walk, about 120 cycles of slack
+
+### 46.7 Measured
+
+    replay of the real in-game save, 6 loads
+      every load restores main RAM to 3EB6C8EF324FAF78   EXACT, all six
+      load 1 resumes at 0026B178; no load leaves the stub anywhere else
+
+    save at 6,000,000 then 8 back-to-back loads
+      every load EXACT at F44EA6C163B5EBB4
+      restore: the CPU resumed at the saved CS:EIP
+
+    make verify   exit 0
+
+The `Z80 program MISMATCH` line at the end of a boot run is PRE-EXISTING -- an
+A/B with only `rtl/spi_cpu.sv` reverted gives 48316 of 57907 against 48315 of
+57906. It is not a regression and it is not related.
+
+### 46.8 What this is NOT
+
+**It is not a proof, and it must not be written up as one.** The NOP gap turns a
+10-cycle deficit into about 120 cycles of slack; it does not BOUND the wait. A
+write buffer drain that is held off by the video DMA owning the main RAM port is
+"a few thousand cycles at worst" by spi_ss's own reckoning, and 120 does not
+cover that. What the gap buys is a margin that can be measured, where before
+there was a race that usually came out right.
+
+**The deterministic version is a spin loop**, and it is the next thing to build
+if this proves insufficient: replace the NOPs with a poll of a hardware flag
+this module answers -- each read COMPLETES, so the write buffer drains between
+iterations and there is no deadlock, and the CPU cannot pass until the hardware
+says the blob has landed. It needs the flag's line snooped on every iteration,
+which this module can drive, because otherwise the first fill makes every later
+poll a cache hit -- the same bug as 46.4, one level up.
+
+**Nothing here has been on hardware, and there has been no fit.** The 86-point
+sweep has not been re-run either; 45's note that it cannot be re-run naively
+still stands.
+
+### 46.9 The lesson
+
+44 and 45 both wrote down "measure, do not reason", and both then shipped a fix
+reasoned from source. What found this was three instruments in a row, each one
+answering the question the last one raised: the round trip said the harness was
+sound, the per-load check said load 2 was where it broke, and the cycle window
+said the read never happened. The mechanism was not guessable -- it is a cache
+hit in a core nobody here wrote, visible only as a read that is ABSENT from a
+trace.
+
+The corollary for the two dead fixes: both were killed by the same measurement,
+and neither would have been proposed at all if the write buffer's behaviour had
+been measured before rather than after.

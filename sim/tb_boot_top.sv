@@ -129,6 +129,7 @@ module tb_boot_top
 	output     [31:0] peek_data,
 
 	output      [2:0] p_ss_state,
+	output      [4:0] p_ss_seq,
 	output            p_ss_nmi,
 	output     [15:0] p_ss_gate_dw0,
 	output     [15:0] p_ss_gate_reads,
@@ -225,6 +226,7 @@ module tb_boot_top
 		.ss_last_wa   (p_ss_last_wa),
 		.ss_last_wd   (p_ss_last_wd),
 		.ss_dbg_state      (p_ss_state),
+		.ss_dbg_seq        (p_ss_seq),
 		.ss_dbg_nmi        (p_ss_nmi),
 		.ss_dbg_gate_dw0   (p_ss_gate_dw0),
 		.ss_dbg_gate_reads (p_ss_gate_reads),

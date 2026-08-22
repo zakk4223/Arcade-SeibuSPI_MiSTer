@@ -1,19 +1,19 @@
 # Where this is, and what to do next
 
-Live state as of 2026-08-21. `PLAN.md` is the design record and stays
+Live state as of 2026-08-22. `PLAN.md` is the design record and stays
 chronological; this file is the short answer to "what was I doing". Delete the
 finished parts as they go.
 
 ## SAVE STATES, on branch `savestate-phase0` -- this is where the work is
 
-Fourteen commits, none of them on `main`, nothing pushed. `PLAN.md` 38, 39 and
-40 are the design record; the plan file is
+None of them on `main`, nothing pushed. `PLAN.md` 38-46 are the design record; the plan file is
 `~/.claude/plans/what-would-be-involved-calm-stearns.md`.
 
 It fits and it mostly works:
 
     setup +0.250   hold +0.116   TNS 0.000, SEED 3, md5 861db700 (on the board)
-    -- and the tree has UNCOMMITTED changes on top of that; see 45.5/45.7
+    -- and the tree is AHEAD of it: 45.5's ss_idle and 46's cache fix are
+       both committed and NEITHER has been fitted or run on hardware
     blob in a 512 KB slot, EIGHTEEN sections (the raster is no longer one)
 
 **IT RUNS ON HARDWARE, and the first thing that ran found a real bug.** rdft
@@ -88,43 +88,55 @@ usually empty and was a FALSE VERDICT throughout 39. Believe the
 
 Still open, and the list is shorter than it was:
 
-* **THE RAPID-RELOAD LOCKUP IS NOT FIXED. This is the top of the list, and
-  `PLAN.md` 45 is the handoff -- read it before touching anything.**
+* **THE RAPID-RELOAD LOCKUP IS FOUND AND FIXED IN SIMULATION. It has NOT been
+  on hardware, and there has been no fit.** `PLAN.md` 46 is the record.
 
-  Rapid repeated LOADS wedge the board. Save in ATTRACT and 10+ reloads are
-  clean; save in ACTIVE GAMEPLAY and it goes in about three. TWO modes: music
-  still playing with no overlay (spi_ss IDLE, restore completed, the 386 is
-  executing rubbish -- a corruption) and sound stopped with the overlay up
-  (spi_ss stuck in S_ASK -- a deadlock).
+  **The cause: a cache hit that skips the freeze.** The restore stub's
+  `pop esp` is the only thing that can stop the 386 -- `ss_hold` gates
+  `mem_accept`, and after that instruction there is no memory cycle left to
+  gate, because `popad` and `iret` read stack lines the interrupt's own pushes
+  just cached. On the FIRST load of a session that read misses and the design
+  works. On the second the line is still there from load 1's own read of it, the
+  read never reaches the module, and `popad`/`iret` run off the un-restored
+  stack. That is the attract-versus-gameplay split: whether the line survives to
+  the next load is a question about the game's working set.
 
-  **What the on-screen overlay read, wedged:** `S_ASK, is_load=1, pause=1,
-  snapshot=0, in_stub=0, io_stall=0, z80dl_stall=0, ds_stall=0`. NOTHING is
-  stalled, which invalidated every theory before it. Screenshot and decode it
-  with `tools/savestate-debug/read_wedge.sh` (or rebuild it -- 45.2).
+  **The fix is two parts and neither works alone** (46.6): evict the ESP slot's
+  line in SS_INVAL alongside the gate's, and put 32 bytes of NOP between
+  `mov esp, imm32` and `pop esp` so the write buffer has idle to drain in. The
+  marker write then retires with ~120 cycles to spare where it used to be 10
+  cycles late.
 
-  **Fixed and real but partial:** SS_NMI drops the NMI whether or not the 386
-  took it, and SS_RUN then waits forever for a marker write that never comes,
-  parking spi_cpu so every later operation hangs. SS_RUN re-offers the NMI now.
-  Measured 3 -> ~10 reloads. Not sufficient.
+  **Measured:** the real in-game save replays six loads, every one restoring
+  main RAM EXACT; a normal save then 8 back-to-back loads, every one EXACT;
+  `make verify` exit 0. The `Z80 program MISMATCH` line is pre-existing -- an
+  A/B with `spi_cpu.sv` reverted gives the same count within one byte.
 
-  **In the tree UNCOMMITTED and UNVALIDATED** (45.5): `ss_idle` from spi_cpu, and
-  spi_ss waiting for it in S_ARM/S_SETTLE, with the in-stub test moved into
-  clk_cpu so it cannot race the crossing. Sound reasoning, untested on hardware,
-  and it did NOT change the replay's outcome.
+  **It is a MARGIN, not a proof** (46.8). 120 cycles does not bound a write
+  buffer drain that the video DMA is holding off. If hardware still wedges, the
+  deterministic version is a spin loop on a hardware flag -- reads that COMPLETE,
+  so the buffer drains between them, with the flag's line snooped every
+  iteration or the poll becomes the same cache hit one level up.
 
-  **NEXT ACTION, before anything else:** `SS_LOAD_FILE=<x.ss>` replays a real
-  savestate off the board (new, 45.6, and the biggest hole it closes is that
-  NOTHING in simulation ever exercised a real in-game save). It reproduces what
-  looks like mode A -- but **the harness itself is unvalidated. Replay an
-  ATTRACT-mode save first, which the hardware restores fine. If that fails too,
-  the harness is broken and its result means nothing.**
+  **The replay harness is VALIDATED now** (46.1), and it did not need the board:
+  `SS_SAVE_FILE=<f>` dumps the slot, and replaying that blob in a fresh run gives
+  a byte-identical, cycle-identical restore. 45.6's advice to replay an
+  attract-mode save first is superseded -- the round trip is the stronger test.
 
-  On the board: `861db700`. The last CLEAN build is `c1d99fef` (233d7fc), kept as
+  **45.6's own output was unreadable and two bench bugs are why** (46.2): a
+  replay's load took the SAVE branch, so the exactness check never ran, and the
+  saved EIP stayed 0, so `restore: FAILED` printed unconditionally. Both fixed.
+
+  **New instruments:** `SS_SAVE_FILE=<f>` (dump the slot) and
+  `SS_WINDOW=<lo>:<hi>` (every signal change in a cycle range, with spi_ss's own
+  state beside spi_cpu's -- `ss_dbg_seq` is exported for it now). The cycle
+  window is what found this; nothing per-operation could have.
+
+  On the board: `861db700`, which does NOT have any of this. The last CLEAN
+  build is `c1d99fef` (233d7fc), kept as
   `/media/fat/_Arcade/cores/SeibuSPI.rbf.20260822-0022`.
 
-  **`output_files/SeibuSPI.rbf` is STALE** -- it is a fit that predates the
-  `ss_idle` change now committed, left behind when work stopped. Refit before
-  deploying anything from it. Same trap 41 opened this whole run with.
+  **`output_files/SeibuSPI.rbf` is STALE.** Refit before deploying anything.
 * **The 86-point sweep has not been re-run since 42**, and it cannot be re-run
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
