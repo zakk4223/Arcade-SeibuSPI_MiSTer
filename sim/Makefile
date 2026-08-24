@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sound run-sdram
+.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sound run-sdram run-timing
 
 SLOP_BIAS ?= 1
 
@@ -25,7 +25,7 @@ FRAME ?= 2400
 # and is the same for every scene, so several captures share one.
 SDRAM ?= $(CAP)/../sdram.bin
 
-all: run-rom_decode run-ddr_rom_reader run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram run-ds2404
+all: run-rom_decode run-ddr_rom_reader run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-ymf271-math run-ymf271 run-nvram run-ds2404 run-timing
 
 # The sound subsystem on its own, which is quicker to iterate on than the top.
 lint-sound:
@@ -218,6 +218,17 @@ run-dma: obj_dir/Vspi_dma
 
 obj_dir/Vspi_dma: $(RTL)/spi_dma.sv tb_dma.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) --top-module spi_dma $(RTL)/spi_dma.sv tb_dma.cpp
+
+# The raster itself: frame rate, pixel window lengths, sync widths and the
+# analog offset clamp. Needs no capture, so unlike run-video it is in `all`.
+# run-video renders through a fixed mode and cannot see the frame RATE, so a
+# refresh option that silently fell back to Normal would still pass it.
+run-timing: obj_dir/Vspi_video_timing
+	@./obj_dir/Vspi_video_timing
+
+obj_dir/Vspi_video_timing: $(RTL)/spi_video_timing.sv $(RTL)/spi_defs.vh tb_timing.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) --top-module spi_video_timing \
+	    $(RTL)/spi_video_timing.sv tb_timing.cpp
 
 run-video: obj_dir/Vtb_video_top
 	@./obj_dir/Vtb_video_top $(CAP) $(SDRAM)

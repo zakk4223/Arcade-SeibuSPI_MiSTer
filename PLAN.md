@@ -11563,3 +11563,345 @@ is withdrawn; what is measured is that it changes no logic at all.
 hardware** -- the observable there is a negative and needs a human: load a core
 with a good save file, open the OSD without touching the controls, and the file's
 mtime should not move; put a credit in and it should.
+
+## 53. Variable refresh: the pixel window moves, the raster does not (2026-08-24)
+
+Arcade-IremM72 has an OSD "Video Timing" option (Normal / 50 / 57 / 60 Hz) and
+an "Analog Video H-Pos / V-Pos" pair. This core had neither. Adding them is not
+a port, because M72 gets its rate change from `jtframe_frac_cen` -- a fractional
+pixel enable -- and that works there only because its whole video pipeline is
+one clock per pixel. Ours is not.
+
+### 53.1 Three routes, and the one the software cannot detect
+
+**Raising `clk_sys` is out**, and `rtl/pll.v:21-31` already said so: breaking the
+2:1 `clk_ram`:`clk_sys` ratio built at **-4.7 ns / TNS -999**, because
+`sys/sys_top.sdc` puts every core PLL output in one clock group. 60 Hz would
+want `clk_ram` at 127 MHz on top of that.
+
+**Changing the raster works, and the game can see it.** VBSTART stays 240, so
+every line added or removed comes out of the vertical blanking interval. 60 Hz
+means VTOTAL 266, which cuts blanking from 56 lines to 26 -- 3.5 ms to 1.6 ms --
+and SPI games run their sprite and tilemap DMA in the vblank handler. VTOTAL
+must also stay EVEN, because `spi_layers.sv:379` flips the display line-buffer
+bank on `vcnt[0]`.
+
+**Scaling the pixel window is invisible.** HTOTAL, VTOTAL, VBSTART, the count of
+blanked lines and the vblank DMA window measured in scanlines are all identical
+in every mode. Only wall-clock time changes. That is the one property worth
+having, so that is what was built.
+
+### 53.2 What made it cheap: the mixer saturates
+
+The render engines are not phase-locked to the /8 at all. `spi_layers` and
+`spi_sprite` take `clk`, `vcnt` and `line_start` and nothing else
+(`spi_layers.sv:47-52`, `spi_sprite.sv:50-54`) -- free-running state machines
+with a per-line *cycle* budget. Only `spi_mixer` counts cycles inside a pixel.
+
+And `spi_mixer.sv:270` is `else if (step != 3'd7) step <= step + 3'd1`. The step
+counter **saturates rather than wrapping**, and every stage held at step 7 is
+idempotent: `q_spr2 <= m6` re-evaluates on inputs that are stable, and
+`rgb_text <= pal_pen` re-reads the same `pen_text` because `pen_sel`'s default
+arm is `pen_text`. So a pixel LONGER than eight cycles already worked, untouched,
+and had done since the pipeline was built. Nothing slower than 53.99 Hz costs
+anything.
+
+A pixel SHORTER than eight truncates the schedule -- `rgb_fore` latches at step
+6 and `rgb_text` at step 7 -- and drops a layer. That is the whole reason 57 and
+60 Hz are not in the table yet; they need the schedule retimed to seven steps,
+which is a shift rather than a redesign (the palette read port is the real
+bottleneck at five cycles a pixel, and a 7-step schedule still puts at most two
+exact blends in series, so `spi_mixer.sv:213`'s 6 ns setup failure does not come
+back). Until then `pix_n_of` maps modes 2 and 3 to Normal, so a stale `.CFG`
+cannot corrupt the picture.
+
+### 53.3 The generator
+
+A Bresenham accumulator, `rtl/spi_video_timing.sv`: add `PIX_N` to a 12-bit
+register every `clk_sys` cycle and take the carry out as the pixel tick. The
+modulus is 4096 by construction, so "subtract m on overflow" is the natural wrap
+and the whole thing is one 12-bit adder with no comparator and no subtract.
+
+    mode      PIX_N   avg window   refresh    error
+    Normal      512     8.0000     53.9869    exact
+    50 Hz       474     8.6414     49.9800    -0.040%
+    (57 Hz)     541     7.5712     57.0447    +0.078%   needs the retime
+    (60 Hz)     569     7.1986     59.9971    -0.005%   needs the retime
+
+512/4096 is exactly 1/8, which is the point: the default path is bit-identical
+to the fixed `div` it replaced. The accumulator reaches 3584 on the eighth cycle
+and carries on the same edge `div == 3'd7` used to fire.
+
+Mode and offsets are latched at the frame wrap and nowhere else. Section 42 is
+what that rule is for.
+
+### 53.4 Analog H/V position
+
+`hoffset`/`voffset` move the sync pulses only; `hblank`/`vblank`, and therefore
+DE, are untouched. So they reposition the picture on an analog CRT or direct
+video and do nothing over HDMI, where the scaler re-locks on sync. That is the
+same behaviour as M72's option of the same name, and it is deliberate rather
+than a limitation.
+
+The pulse is clamped inside blanking. M72's `jtframe_resync` does not clamp,
+because at its geometry ±8 never reaches an edge; the clamp here costs a few
+LUTs and means no combination of mode and offset can push sync into active
+video -- which matters more once 57/60 Hz land and blanking is the same 56 lines
+but the sync sits in a shorter frame in wall-clock terms.
+
+The 4-bit field is two's complement and the OSD label shows the NEGATED value,
+copying M72 (`Arcade-IremM72.sv:246-247`): moving the sync pulse later moves the
+picture left, so the field the RTL sees and the direction the user asked for are
+opposites.
+
+### 53.5 `new_vmode` was tied to 0, and had to stop being
+
+`SeibuSPI.sv` passed `.new_vmode(0)` to `hps_io`. That is fine for a fixed-rate
+core and wrong the moment the rate moves: `sys/hps_io.sv:950-954` re-reports the
+video mode when the ACTIVE pixel counts change **or** when `new_vmode` toggles,
+and the active area here is 320x240 in every mode *by design*. Without the
+toggle Main keeps the stale refresh rate and never re-derives the HDMI PLL. M72
+has exactly this wiring for exactly this reason.
+
+### 53.6 What was measured
+
+`sim/tb_timing.cpp` (`make run-timing`, in `all` -- it needs no capture) drives
+`spi_video_timing` directly and checks the raster rather than the picture. This
+exists because **`make run-video` cannot see the frame rate**: it renders through
+one fixed mode, so an option that silently fell back to Normal would still pass
+it.
+
+    mode        cycles    pixels   refresh    window   sync
+    Normal      1060864   132608   53.9869    8..8     H373..409 V275..282
+    50 Hz       1145912   132608   49.9800    8..9     H373..409 V275..282
+    57 Hz n/i   1060864   132608   53.9869    8..8     (falls back, as intended)
+    60 Hz n/i   1060864   132608   53.9869    8..8     (falls back, as intended)
+
+The two lines that carry the design: **pixels per frame is 132608 in every
+mode** (448 x 296 -- the raster genuinely does not move), and **no window is
+ever shorter than 8** (50 Hz emits only 8s and 9s, never a 7). Normal is exactly
+132608 x 8 = 1060864 cycles, which is the bit-identity claim made good rather
+than asserted. The bench also sweeps all 16 offset codes in both modes and
+checks the pulse never leaves blanking.
+
+`make run-video` passes byte-identical at Normal **and at 50 Hz** -- 0 of 76800
+pixels differ against MAME's frame in both. That is what turns "a stretched
+pixel is safe because the counter saturates" from an argument about source into
+a measurement, per `seibuspi-measure-dont-reason`.
+
+And the bit-identity claim was checked against the tree rather than argued from
+it: `make run-boot` was run on this branch and again with the change stashed.
+
+    Z80 clock enables      : 1249749, of which stalled on SDRAM 43732 (3.499%)
+    main RAM hash          : 3252B42D04B9588C
+    EIP transitions        : 1817691
+    9 frames, 4096 non-black in the last
+
+Identical in both, to the digit. So at Normal the 386 sees the same vblank on the
+same cycle as before -- which is what "the accumulator carries on the same edge
+`div == 3'd7` fired" has to mean if it means anything.
+
+**Not yet run on hardware, and not yet fitted.** The observables there are the
+OSD video-info page reporting ~50 Hz in the 50 Hz mode, and H/V-Pos moving the
+picture on analog or direct video while doing nothing over HDMI.
+
+### 53.7 Phase 2 attempted: the mixer was never the constraint
+
+The plan for 57 and 60 Hz was to retime `spi_mixer` from an eight-step schedule
+to seven, which would let the pixel window drop below eight clk_sys cycles. That
+was done, and it worked exactly as predicted -- and the modes still do not fit,
+because the thing standing in the way was a different module.
+
+**The retime itself was correct.** Issue moved to steps 0-4, the latches to 2-6,
+the composite to steps 4,5,6,0,1, the publish stayed at step 2, and the step
+counter saturated at 6 instead of 7. Measured against `ce_pix` nothing moved at
+all: the last latch and `q_spr2` still land on the `ce_pix` cycle, `q_spr3` one
+after, `q_text` two, the publish three. The two cycles removed were the two that
+issued reads nothing latched. `make run-video` stayed **byte-identical at
+Normal** with the retimed schedule running 8- and 9-cycle windows against a
+7-step counter, which is the idempotent-hold argument made good.
+
+**Then 60 Hz broke the picture: 686 of 76800 pixels, and 57 Hz broke 4.** The
+tell was not in the mixer at all:
+
+    render-bank flips at (vcnt,hcnt): (0,0) (1,2) (2,3) (3,0) ... (9,3) (10,1)
+
+`lb_bank` is `spi_layers`' `render_bank` (`spi_layers.sv:368`), and it flips only
+on the DEFERRED restart at `:451` -- the one that waits for a tile boundary
+because a line's rendering overran. At Normal every flip is at `hcnt` 0. At 57
+and 60 Hz they scatter, which is the layer renderer being cut off mid-line.
+
+**The measurement that settles it, and the estimate it demolishes.** `run-video`
+now reports per-line renderer occupancy directly (rdfts, FRAME=2400):
+
+    line budget: 3584 cycles available, renderer busy 3247, finished=yes
+    renderer occupancy: worst line 45 busy 3584 of 3584 (100.0%), mean 3336 (93.1%)
+    busiest: L45:3584/3584 L49:3584/3584 L53:3584/3584 L41:3582/3584
+
+The renderer is **saturated at the board's own dot clock.** It fits, with
+nothing whatever to spare. `spi_layers.sv`'s budget comment claimed roughly
+2500 of 3584 -- about 30% headroom -- and that estimate is what made this look
+reachable. It missed that the emit side dominates, not SDRAM: 320 pixels x 4
+tile layers is 1280 emit cycles that cannot be compressed at one pixel per
+cycle, the clear takes 320 more, and the sprite engine emits into the same line
+and contends for the same SDRAM. The comment has been corrected in place with
+the measured figures, because it will otherwise mislead the next reader exactly
+as it misled this plan.
+
+A 7-cycle pixel makes the line 3136 cycles and takes 448 the renderer already
+needs. There is no retiming of the mixer that recovers them.
+
+**So the retime was reverted**, along with the `pix_win_min` export and the
+`spr_budget` plumbing that existed only to size the sprite cap for a shorter
+line. They solve a problem that cannot be reached, and `spi_mixer` is the most
+delicate module in the core to carry dead complexity in. Redoing the retime is
+mechanical if the renderer is ever made faster -- the schedule is written out
+above, and the frame diff is the gate.
+
+**What is now known about the ceiling.** Slower than 53.99 Hz is free and needs
+nothing. Faster cannot come out of the LINE. It can only come out of the FRAME
+-- fewer scanlines -- and that has the cost this whole section was written to
+avoid: VBSTART stays at 240, so every line removed comes out of vertical
+blanking, and 60 Hz (VTOTAL 266) cuts the vblank window from 3.5 ms to 1.6 ms
+with the game's sprite and tilemap DMA inside it. That is a real trade rather
+than a free one, and it is not mine to make silently.
+
+One consolation if it is ever taken: the renderer does NOT need the blanked
+lines. `spi_layers.sv:136` points `next_line` at line 0 for the whole of
+vblank, so those 56 lines are spent re-rendering the same line redundantly.
+Removing 30 of them costs the renderer nothing at all -- the cost falls
+entirely on the 386's DMA window.
+
+### 53.8 The tile engine's 56 redundant renders, and the trap in fixing them
+
+A standing code-review note observed that `spi_layers`' `next_line` pins to 0 for
+the whole of vertical blanking, so lines 240..295 each restart and re-render the
+same line 0 -- 104 tiles and ~200 SDRAM reads, 56 times over -- and suggested a
+one-line guard, `restart only if next_line != render_line`. The question was
+whether fixing it would help 57/60 Hz.
+
+**It does not, and the measurement says so twice.** The redundant passes are on
+blanked lines; the saturation that blocks a shorter pixel window is on active
+lines 41-53. The renderer restarts per line, so work skipped during blanking
+hands no cycles to an active line. `run-video`'s occupancy report, split active
+vs blanked, before and after the fix:
+
+    before   active 0-239: 3370/line     blanked 240-295: 3193/line
+    after    active 0-239: 3370/line     blanked 240-295:   57/line
+
+Active occupancy is **identical to the cycle**. The 57/60 Hz ceiling is exactly
+where it was.
+
+The second hope was that it would buy back the vblank DMA window -- the cost of
+the VTOTAL route -- by freeing SDRAM while the 386 is running its transfers. It
+cannot: `spi_mainram.sv` is on-chip M10K and the DMA shares the CPU's port
+there, so **the video DMA never touches SDRAM at all**. There is no contention
+to relieve.
+
+**The suggested guard would have introduced a bug, and it is worth writing down
+because nothing in the test suite catches it.** The pass that matters is the
+LAST one, not the first. The renderer draws line 0 during line 239; the 386's
+vblank handler then DMAs the new tilemap in on line 240 -- measured, every
+frame, by a scanline tap added to `tb_boot`:
+
+    tilemap DMA triggers   : 3
+      landed on lines      : 240(vbl) 240(vbl) 240(vbl)
+
+So `next_line != render_line` alone keeps only the pre-DMA pass and line 0 shows
+the PREVIOUS frame's tilemap: a one-scanline-stale top row, every frame the
+tilemap moves. `make run-video` is blind to it -- it renders from a frozen VRAM
+snapshot, where the early and late passes produce identical pixels.
+
+The guard actually applied keeps the pass on the final blanked line:
+
+    !redundant_pass || last_blank_line
+
+Two passes a frame instead of 56, and the one the display consumes is still the
+last one before the wrap, after the DMA. `restart_req` is deliberately left
+standing on a skipped pass rather than cleared -- `line_start` re-raises it every
+line anyway -- and it stays ONE `if` with the `else case (state)` hanging off it,
+because splitting it lets the state machine advance on a cycle the restart owns.
+
+**It is not cycle-neutral for the CPU, and that is the point of doing it.** Frame
+still byte-exact, every render-bank flip still at `hcnt` 0, but `run-boot`'s
+trace moves: EIP transitions 1817691 -> 1817772 and the main RAM hash with it.
+Roughly 175,000 clk_sys cycles a frame of SDRAM traffic stop being spent on
+redraws nobody sees, and the 386's prefetch and the Z80 get them instead.
+
+### 53.9 Making the reclocking viable: the renderer was waiting, not working
+
+53.7 concluded that 57/60 Hz could not come out of the line because the layer
+renderer was saturated -- 3584 of 3584 cycles on the worst line. That was true
+and it was the wrong conclusion to stop at. Saturated is not the same as busy.
+A state histogram of the sequencer, per active line, says where the cycles went:
+
+    IDLE:213  TM_REQ:103 TM_WT:103 TM_LAT:103
+    GA_REQ:103 GA_WT:747  GB_REQ:83 GB_WT:670
+    EMIT:1335  NEXT:103
+
+**1417 cycles waiting for graphics data, against 1335 actually emitting
+pixels.** And only 29 of those 1417 were bus contention with the sprite engine
+(the bench tracks that separately) -- the rest is raw round-trip latency on two
+blocking reads per tile, taken one after the other with the bus idle through the
+whole emit. The engine was not short of bandwidth. It was short of overlap.
+
+**Change 1: fetch the high half under the emit.** A tile row is 12 bytes out of
+a 128-bit window, so `spi_layers` reads the low 64 bits, then the high 64, then
+emits. But `row_bytes` is `win >> 8*offset` and group *g* is
+`row_bytes[24g+23 : 24g]`, so the high half is not needed until group 2 (offset
+0) or group 1 (offset 4) -- four to eight emit cycles in, against a round trip
+of about eight. So the request is issued the moment the low half lands and the
+emit starts immediately, stalling only at the group that actually needs it
+(`need_gfx_b` / `gfx_b_rdy`). S_GB_REQ and S_GB_WT are gone.
+
+The safety property that makes it sound: the LAST group needs the high half in
+every case that issues the read, so the emit cannot run to completion with the
+request still outstanding and hand the next tile's S_TM_REQ a toggle already in
+flight. (Text at offset <= 2 needs neither group from it, and skips the read
+entirely -- that path was already there.)
+
+    worst line 3584 -> 3249,  mean 3370 -> 2856
+
+**Change 2: read the next tile's tilemap word under the emit too.** The trick
+is that `col` can be advanced at emit entry -- the emit reads it once, to seed
+`emit_x`, and never again -- so `cur_col`/`tile_index` already name the next
+tile and the prefetch needs no duplicate index arithmetic. A three-step counter
+(`pf`) issues the read and captures `tword_n` independently of `emit_i`, so an
+emit stall cannot re-issue or mistime it. S_NEXT then swaps `tword_n` in and
+goes straight to S_GA_REQ; the tilemap chain is walked only for the first tile
+of a layer now.
+
+    worst line 3249 -> 2863,  mean 2856 -> 2558
+    TM_REQ/WT/LAT: 312 cycles a line -> 12
+
+**Then the mixer retime went back in.** 53.7 reverted it as dead complexity, and
+that was right at the time and wrong now: with the renderer fitting, a 7-cycle
+pixel is reachable and the mixer is the floor again. Re-applied exactly as 53.7
+recorded it -- issue at steps 0-4, latch at 2-6, composite at 4,5,6,0,1, publish
+at 2, counter saturating at 6.
+
+**All four modes now render byte-identical frames.**
+
+    mode      cycles    pixels   refresh    window   run-video
+    Normal   1060864    132608   53.9869    8..8     0/76800 differ
+    50 Hz    1145912    132608   49.9800    8..9     0/76800 differ
+    57 Hz    1003997    132608   57.0447    7..8     0/76800 differ
+    60 Hz     954591    132608   59.9971    7..8     0/76800 differ
+
+At 60 Hz a line is 3225 cycles and the worst line finishes in 2863 -- 88.8%,
+about 360 to spare -- with every render-bank flip back at `hcnt` 0 (no deferred
+restarts) and no sprite starvation. The raster is untouched in every mode:
+448x296, 56 blanked lines, 132608 pixel ticks a frame. The game still cannot
+tell which mode it is in.
+
+**What is still on the table.** `GA_WT` is 792 cycles a line and is now the
+biggest non-emit item; hiding it needs a one-tile lookahead on the graphics
+fetch, with shadow copies of `tword`/`gfx_a` and duplicated address arithmetic.
+That is the move if a mode above 60 Hz is ever wanted -- along with
+`spi_sprite`'s `BUDGET`, a fixed 3200 that fits inside a 60 Hz line by only 24
+cycles.
+
+**Not fitted, not on hardware.** The margin above is one capture (rdfts,
+FRAME=2400, the busy title scene). Occupancy is scene-dependent and a heavier
+game could sit closer to the line; the observable is sprites or tile columns
+dropping at 60 Hz that are clean at Normal.

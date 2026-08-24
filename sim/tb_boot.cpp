@@ -186,6 +186,7 @@ int main(int argc, char **argv)
     std::set<uint32_t> fetch_pages;          // 4 KB granularity
     uint32_t first_fetch = 0xFFFFFFFF;
     uint64_t n_dma_tm = 0, n_dma_pal = 0, n_dma_spr = 0, n_vbl = 0;
+    std::vector<int> dma_tm_lines;
     std::map<uint32_t, std::pair<uint64_t, uint32_t>> io_writes; // addr -> (count, last value)
     uint64_t io_wr_total = 0;
 
@@ -1042,6 +1043,11 @@ int main(int argc, char **argv)
             }
             io_wr_d = dut->p_io_wr;
 
+            if (dut->p_dma_tilemap && !tm_d) {
+                // Which scanline did this DMA land on? VBSTART is 240, so
+                // >= 240 means it arrived during vertical blanking.
+                if (dma_tm_lines.size() < 64) dma_tm_lines.push_back(dut->p_vcnt);
+            }
             if (dut->p_dma_tilemap && !tm_d)  { n_dma_tm++;  b_tm++;  }
             if (dut->p_dma_palette && !pal_d) { n_dma_pal++; b_pal++; }
             if (dut->p_dma_sprite  && !spr_d) { n_dma_spr++; b_spr++; }
@@ -1175,6 +1181,10 @@ int main(int argc, char **argv)
     }
 
     printf("tilemap DMA triggers   : %llu\n", (unsigned long long)n_dma_tm);
+    printf("  landed on lines       :");
+    for (size_t i = 0; i < dma_tm_lines.size(); i++)
+        printf(" %d%s", dma_tm_lines[i], dma_tm_lines[i] >= 240 ? "(vbl)" : "");
+    printf("\n");
     printf("palette DMA triggers   : %llu\n", (unsigned long long)n_dma_pal);
     printf("sprite  DMA triggers   : %llu\n", (unsigned long long)n_dma_spr);
     // This used to be always zero and not a fault, because sim/T80s.sv was a

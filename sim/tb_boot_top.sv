@@ -93,6 +93,10 @@ module tb_boot_top
 	output      [8:0] p_io_addr,
 	output     [31:0] p_io_wdata,
 	output      [3:0] p_io_be,
+	// Where in the frame the DMA lands. The tile engine renders line 0 during
+	// vertical blanking, so whether a tilemap DMA arrives before or after that
+	// render decides whether line 0 shows this frame's data or last frame's.
+	output      [9:0] p_vcnt,
 	output            p_dma_tilemap,
 	output            p_dma_palette,
 	output            p_dma_sprite,
@@ -241,6 +245,13 @@ module tb_boot_top
 		// The one debug control still in the core: the CPU freeze. Off here.
 		.freeze       (1'b0),
 
+		// Normal video timing and centred sync. This bench checks the 386 boots
+		// and the vblank IRQ arrives on phase, both of which are defined
+		// against the hardware raster.
+		.video_mode   (2'd0),
+		.hoffset      (4'd0),
+		.voffset      (4'd0),
+
 		.ss_save         (ss_save),
 		.ss_load         (ss_load),
 		.ss_busy         (p_ss_busy),
@@ -376,6 +387,7 @@ module tb_boot_top
 	assign p_io_addr     = dut.io_addr;
 	assign p_io_wdata    = dut.io_wdata;
 	assign p_io_be       = dut.io_be;
+	assign p_vcnt        = dut.vcnt;
 	assign p_dma_tilemap = dut.dma_tilemap;
 	assign p_dma_palette = dut.dma_palette;
 	assign p_dma_sprite  = dut.dma_sprite;

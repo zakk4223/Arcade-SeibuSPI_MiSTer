@@ -404,6 +404,44 @@ described -- but a fit is still worth CHECKING rather than assuming.
 
 ## Also open
 
+* **Variable refresh: 50 Hz is in, 57/60 Hz wait on the mixer.** `PLAN.md` 53.
+  The OSD refresh option scales the PIXEL WINDOW (a 12-bit Bresenham cen in
+  `spi_video_timing.sv`) and leaves the raster alone, so 448x296 and the 56
+  blanked lines are identical in every mode and the game cannot detect which is
+  picked. Normal is `PIX_N`=512 = exactly 1/8, bit-identical to the divider it
+  replaced. `make run-timing` proves it; `make run-video` passes byte-identical
+  at Normal and at 50 Hz.
+
+  **All four modes are in and render byte-identical frames** -- PLAN.md 53.7
+  and 53.9. Getting 57/60 Hz took two goes. The first (53.7) retimed `spi_mixer`
+  to seven steps, which was correct but not sufficient: the LAYER RENDERER was
+  saturated at the board's own dot clock, 3584 of 3584 cycles on the worst line,
+  and 60 Hz broke 686 of 76800 pixels. Its budget comment had claimed ~30%
+  headroom and was simply wrong.
+
+  **What made it viable (53.9): the renderer was waiting, not working.** A state
+  histogram showed 1417 cycles a line waiting on two blocking SDRAM round trips
+  per tile against 1335 actually emitting -- and only 29 of those were bus
+  contention. Two overlaps fixed it: the tile row's high 64 bits are now fetched
+  DURING the emit (not needed until group 1 or 2), and the next tile's tilemap
+  word is read during the emit too (`col` advances at emit entry, so the
+  existing index arithmetic already names it). Worst line 3584 -> 2863, against
+  the 3225 a 60 Hz line has. The mixer retime then went back in.
+
+  **Still open if a mode above 60 Hz is ever wanted:** `GA_WT` is 792 cycles a
+  line -- hiding it needs a one-tile lookahead with shadow `tword`/`gfx_a` and
+  duplicated address arithmetic. And `spi_sprite`'s `BUDGET` is a fixed 3200
+  that fits inside a 60 Hz line by only 24 cycles.
+
+  **Nothing is fitted or on hardware.** The 88.8% worst-line figure is one
+  capture (rdfts FRAME=2400); occupancy is scene-dependent, so the thing to
+  watch on the board is sprites or tile columns dropping at 60 Hz that are clean
+  at Normal.
+
+  **Neither fitted nor run on hardware yet.** The observables are the OSD
+  video-info page reading ~50 Hz, and H/V-Pos moving the picture on analog or
+  direct video while doing nothing over HDMI (that last one is by design).
+
 * **The 386 clock: decided, not built.** The board is a 386DX-25; `clk_cpu` is
   28.636364 MHz, 14.5% fast. `PLAN.md` 16.9 settles the approach -- an
   `altclkctrl` gate on clk_cpu killing one edge in eight, giving 25.0568 MHz
@@ -521,9 +559,24 @@ Building the inputs:
 
 ## Hardware
 
-The MiSTer at 192.168.1.125 is on a **diagnostic build** (timing-failing).
-Reflash something known-good before using it: `/media/fat/_Arcade/cores/` has
-dated `SeibuSPI.rbf.*` backups.
+The MiSTer at 192.168.1.125 is on the **variable-refresh build** as of
+2026-08-24: `SeibuSPI.rbf` md5 `ecaf8174`, timing MET (setup +0.263, hold +0.245,
+TNS 0.000, SEED 3). PLAN.md 53. The diagnostic build it replaced is backed up
+alongside it as `SeibuSPI.rbf.20260824-1058` (md5 `b4fc4f38`), and
+`/media/fat/_Arcade/cores/` keeps every earlier dated `SeibuSPI.rbf.*` too.
+
+**Not yet exercised on the board.** What to look at, in order:
+* Video Settings -> Video Timing. All four rates should show in MiSTer's OSD
+  video-info page as ~54 / ~50 / ~57 / ~60 Hz.
+* 57 and 60 Hz are the ones with something to prove. The layer renderer finishes
+  a worst line in 2863 cycles against the 3225 a 60 Hz line has, but that margin
+  is from ONE capture (rdfts, FRAME=2400) and occupancy is scene-dependent. The
+  symptom to watch for is sprites or tile columns dropping at 60 Hz that are
+  clean at Normal -- a busier game than rdfts is the real test.
+* Analog Video H-Pos / V-Pos move the picture on analog or direct video and do
+  NOTHING over HDMI. That is correct, not a fault.
+* Sound pitch must not change with the refresh rate: the Z80 and YMF271 run off
+  their own dividers, not the pixel clock.
 
 Save files were renamed with the MRAs twice over -- first with the collapse
 (`rdft-update.nvm` -> `rdft.nvm`), then with the descriptive names -- and have now
