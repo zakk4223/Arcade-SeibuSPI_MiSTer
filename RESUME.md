@@ -358,6 +358,20 @@ described -- but a fit is still worth CHECKING rather than assuming.
 
 ## Also open
 
+* **The 386 clock: decided, not built.** The board is a 386DX-25; `clk_cpu` is
+  28.636364 MHz, 14.5% fast. `PLAN.md` 16.9 settles the approach -- an
+  `altclkctrl` gate on clk_cpu killing one edge in eight, giving 25.0568 MHz
+  (+0.23%), with the divider parameterised so it doubles as the OSD CPU-speed
+  throttle. No second PLL, no asynchronous clock group, and STA is untouched
+  because TimeQuest still sees 28.636 MHz on a gated output. Nothing is written
+  yet; 16.9 has the five-step order of work, and step 4 (the EIP profiler's busy
+  fraction scaling by 8/7) is the check that the gate is real.
+
+  Two traps recorded there: `cpu_en` (`spi_cpu.sv:84`) is NOT a throttle -- it
+  gates the bus only and the L1 caches run straight through it -- and z386 has no
+  CE port, so a hand-threaded clock enable would mean ~90 `always_ff` blocks in a
+  vendored core. What is still unmeasured, and what actually decides accuracy, is
+  z386x's IPC against a real 386DX (`PLAN.md` 16.7).
 * **The OSD toggle itself is unverified.** `/dev/MiSTer_cmd` has no menu
   command, and Main's `.CFG` is not the raw status word (writing byte 2 bit 6 of
   a 16-byte file did nothing). Everything downstream of `derive_sel` was proved

@@ -2515,7 +2515,8 @@ Crossings that needed care:
   a 25 MHz clock enable will therefore run the game *faster* than real hardware in
   CPU-bound sections. Plan: expose a CPU speed option in the OSD, default to a
   value calibrated against MAME, and record the calibration here once measured.
-  **Open item — but see section 16, which measures it.** The 386 is idle 80-85%
+  **Open item — but see section 16, which measures it, and 16.9, which decides
+  it: a 7/8 gated clk_cpu at 25.0568 MHz.** The 386 is idle 80-85%
   of a frame in rdft attract, so 25 MHz is cosmetic: the same work is 17-24% of a
   frame there too. Exact 25.000 MHz also needs a second PLL and an asynchronous
   `clk_cpu`. What is still unmeasured is z386x's throughput against a real
@@ -5588,6 +5589,77 @@ What it unblocks: 16.5's missing number needs a MAME-side figure that MAME will
 not give up, but the OUR-side half is now exact rather than sampled, and it can
 run during PLAY -- which is what T-N still owes and where the peak load lives.
 Attract's 36% peak (16.4) is an attract number.
+
+### 16.9 Decided: a 7/8 gated `clk_cpu`, and why the gate is the point (2026-08-24)
+
+16.1-16.8 stand -- at the measured loads the frequency is cosmetic. The decision
+is to do it anyway, by the cheapest route that does not disturb timing closure,
+and to build it as a TUNABLE THROTTLE rather than a fixed frequency, because the
+number that matters is throughput and nobody has measured it yet.
+
+**The ratio.** 28.636364 x 7/8 = **25.0568 MHz**, +0.23% against 25.000. Better
+than /50's +0.8%, and it needs no second PLL, no asynchronous clock group and no
+CDC rework. Kill one `clk_cpu` edge in eight.
+
+**Why gate the clock instead of adding a clock enable to z386.** z386 has no CE
+port -- `rtl/z386/z386.sv:30` is `clk`, `reset_n`, and nothing else. Threading one
+through means touching ~90 `always_ff` blocks across 16 files (226 KB in `z386.sv`
+alone), plus the read enables on the inferred M10K microcode ROM and the two L1
+cache RAMs, in a vendored core we re-sync through `patches/`. That is a large
+silent-breakage surface for no gain. Gating the domain at the top costs one
+`altclkctrl`.
+
+**`cpu_en` is not a throttle and cannot be made into one.** `spi_cpu.sv:84` calls
+it "0 = stall the CPU (pause, throttle)", but it only gates `mem_accept`
+(`spi_cpu.sv:1019`). With L1 I and D caches the core keeps executing out of cache
+while the bus is stalled -- the same mechanism as section 46, the cache hit that
+skipped the savestate freeze. Do not reach for `cpu_en` here.
+
+**What the gate does to STA: nothing.** An `altclkctrl` enable is glitch-free, and
+TimeQuest still sees 28.636364 MHz on the output because two live edges can still
+be adjacent. That is the correct and conservative constraint -- no path gets
+easier, no SDC changes, `derive_pll_clocks` keeps working.
+
+**What it does to the crossings.** The surviving edges are a SUBSET of the current
+ones, so every `clk_cpu` edge still coincides with a `clk_sys` edge and the two
+stay in one clock group. This is NOT the asynchronous case 16.1 priced. What
+changes is pulse WIDTH: the places that assume "one clk_cpu cycle = two clk_sys
+cycles" -- the coin latch (`spi_top.sv:603`), `sndfifo_wr` (`spi_top.sv:399`), the
+DMA triggers -- become two OR four. Every one of them edge-detects on the clk_sys
+side, so wider is safe. Narrower would not have been.
+
+**The clk_ram side.** `sdr_req`/`sdr_ack` (`spi_top.sv:344`) is a level handshake
+and clk_ram already tolerates 4:1, so a stretched request is fine. Gating the
+whole clk_cpu domain -- spi_cpu, spi_io, the dpram write ports -- keeps it
+internally coherent: nothing in it advances while the edge is dead.
+
+**Second order.** The savestate watchdog at 2^23 clk_cpu cycles (`spi_cpu.sv:839`,
+~293 ms) becomes ~335 ms. Harmless, but that comment's number goes stale.
+
+**Build it as a ratio, not as 7/8.** The whole advantage of the gate over a PLL is
+that it generalises -- an N/M enable or a fractional accumulator throttles to any
+rate, which is exactly what section 6 wanted from an OSD "CPU speed" option. Ship
+7/8 as the default and leave the divider parameterised. A second PLL would give
+one fixed frequency that is still probably wrong.
+
+**Why this is not finished when it builds.** 16.7's open item is unchanged: z386x's
+IPC against a real 386DX-25 is still unmeasured, and it has L1 caches and hardwired
+fast paths a real 386 does not have. At 1.5x the IPC, a 25 MHz clock is still 50%
+fast. The gate is the MECHANISM for matching hardware throughput; the NUMBER still
+has to be measured, and 16.8's EIP profiler is the instrument for our half of it.
+
+**Order of work:**
+
+1. `altclkctrl` on `clk_cpu` with a parameterised N/M enable, default 7/8,
+   instantiated in `SeibuSPI.sv` beside the PLL (`SeibuSPI.sv:369`).
+2. `make && make timing`. Expect clk_cpu's slack to be **unchanged** -- the
+   constraint has not moved. If it moves, the gate is not where it should be.
+3. Boot rdft and rfjet on hardware. Watch for anything that depended on a pulse
+   being exactly two clk_sys cycles wide.
+4. Re-run the EIP profiler (16.8) on rfjet attract. The busy fraction should scale
+   by 8/7 -- 35.1% peak becomes ~40%. That is the confirmation the gate is really
+   slowing the CPU rather than having been optimised away.
+5. Only then, the throughput calibration 16.7 owes.
 
 ---
 
