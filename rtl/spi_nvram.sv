@@ -452,8 +452,13 @@ module spi_nvram
 			fetching   <= 1'b0;
 			fetch_nxt  <= 1'b0;
 			dirty_seen <= 1'b0;
-			dirty_d    <= 1'b0;
-			sdirty_d   <= 1'b0;
+			// dirty_d and sdirty_d are DELIBERATELY absent here, and adding them
+			// back is the tidy-up to resist. They are the PREVIOUS VALUE of flags
+			// their own modules keep ACROSS a reset on purpose (spi_ds2404.sv:510:
+			// the 512 bytes nv_dirty tracks survive one). Forcing the copy to a
+			// constant while the original holds is what manufactures an edge, and
+			// it asked for one save per core load. PLAN.md 52.2. What they feed is
+			// reset, which is the part that matters.
 			quiet      <= '0;
 			want_save  <= 1'b0;
 			sram_addr  <= 9'd0;

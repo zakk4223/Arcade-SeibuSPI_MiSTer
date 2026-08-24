@@ -11436,3 +11436,130 @@ against MAME's 31 over rdft's 52 s. Rare, and it changes no note.
 * **The 47.95 s divergence on rdft is asserted to be the attract demo, not
   proved.** The proof would be a second run reaching it at a different moment.
   What is proved is that everything before it is identical.
+
+## 52. The nvram save is not firing spuriously -- except once per core load (2026-08-24)
+
+### 52.1 The suspicion, and why it was wrong
+
+The nvram file appeared to be written on every OSD open, and the obvious reading
+was that `ioctl_upload_req` is ungated -- that the core asks Main for a save
+whenever it is asked, and Main obliges. That reading is wrong twice over, and it
+is written down here because `spi_nvram.sv` is long enough that the next reader
+will arrive at it too.
+
+**The gate exists.** `spi_nvram.sv:413-430` raises `want_save` only when
+`sram_dirty` or `flash_dirty` MOVES, and then only after ~0.15 s of quiet. The
+request is a level that clears when Main starts the transfer, and it is
+deliberately never re-presented (the reasoning is at `:399-407`, and it is about
+an `-update` MRA with no `<nvram>` element turning a renewed request into an OSD
+stuck in a "Saving..." loop).
+
+**The dirty flag is honest.** `spi_ds2404.sv:379` toggles `nv_dirty` only inside
+the copy loop -- the game's own store into the bookkeeping SRAM. A LOAD writing
+all 512 bytes does not toggle it (`spi_ds2404.sv:122-124` says so, and
+`tb_ds2404` checks it), and neither does a savestate restore through `ss_ram_we`.
+
+**So the saves are real.** What writes the DS2404's SRAM during normal play is
+exactly what you would expect to: credits, game starts, the audit page behind the
+test menu's INCOME. Insert a coin and the file genuinely changes; asking Main to
+write it on the next OSD open is the mechanism working. **Nothing about the
+gating was changed, and nothing should be.**
+
+If this is ever revisited, the measurement that settles it is the file's mtime,
+not the RTL: open the OSD twice without touching the controls and it does not
+move; put a credit in between and it does.
+
+### 52.2 What WAS wrong: a reset that invented an edge
+
+Reading that path turned up one genuine defect, and it is an asymmetry between
+two modules that each reasoned correctly on its own.
+
+`spi_ds2404` does not clear `nv_dirty` on reset, ON PURPOSE -- the 512 bytes it
+tracks are battery-backed and survive one, so the flag that tracks them must too
+(`spi_ds2404.sv:510`). But `spi_nvram`'s reset block forced its own delayed copy
+`sdirty_d` to 0, and `dirty_d` with it. The two then disagreed across a reset:
+
+    reset high     sdirty_d forced to 0, while nv_dirty holds at 1
+    reset release  (sram_dirty != sdirty_d) is (1 != 0) -- an EDGE
+                   dirty_seen latches, the quiet timer runs out, want_save rises
+
+**One spurious save per core load, on the parity of a flag nobody controls.** An
+even number of SRAM bytes written since power-on and it does not happen; an odd
+number and it does.
+
+The effect was small enough that it had never been noticed: the file is written
+with correct contents, and the game rewrites its bookkeeping during boot anyway
+(50.9), so a legitimate request usually followed close behind. It is fixed
+because a phantom edge has no business in the one part of this design that
+reasons hardest about edges.
+
+**The fix is a deletion.** `dirty_d <= flash_dirty` and `sdirty_d <= sram_dirty`
+already run unconditionally at `:288-289`; the reset block was overriding them.
+Removing the override lets both delay flops track their inputs straight THROUGH
+reset, so at its release they agree with the current values and only a real
+change reads as one. What they feed -- `dirty_seen`, `quiet`, `want_save` -- stays
+reset, which is the part that actually matters: no stale request survives either.
+
+The two lines are replaced by a comment saying why they are absent, because
+putting them back is precisely the tidy-up a future reader would make.
+
+`tb_nvram` grew the case: hold both dirty flags high across a reset and require
+that no request appears in the 4,000 cycles after it. It fails on the old RTL
+with 3,743 cycles of request and passes on the new. It also caught a second
+thing on the way, which is the tell that the ordering is right -- the pending
+phantom was still latched when the `enable`-low block ran, and `ioctl_upload_req`
+is not gated on `enable`, so that test failed too. Both cleared together.
+
+### 52.3 The fit, and a baseline that was worth the ten minutes
+
+Cold at canonical SEED 3, `db/` deleted first, with the full stage list -- Shell,
+Shell, **Analysis & Synthesis**, Fitter, Assembler, TimeQuest -- so synthesis
+genuinely ran (37's rule).
+
+    setup  +0.033   sdram|ch4_rq~DUPLICATE -> SDRAM_A[8]
+    hold   +0.114   ds2404's SRAM block PORT_B_WRITE_ENABLE_REG -> ss_bridge data_out
+    TNS 0.000 on every clock, 0 errors, 1 critical warning (the pre-existing
+    ymf271_synth MIF depth one, from synthesis and unrelated)
+
+**Both watched paths are clear.** `spi_ds2404|*->arm[*]` does not appear in the
+worst 25 setup paths at all -- the multicycle constraint from 50 is holding --
+and the YMF ch5 hold path is not in the worst 10.
+
++0.033 is tighter than the +0.111 on record, which is why this got a baseline
+rather than a shrug: **the same tree refitted cold with `spi_nvram.sv` reverted
+to HEAD and nothing else changed.**
+
+                        setup                         hold
+    baseline  +0.079  mod_byte[0] -> part_base_r[24]  +0.132  ch5_arb -> ymf ext_data
+    with fix  +0.033  sdram ch4_rq -> SDRAM_A[8]      +0.114  ds2404 SRAM WE -> ss bridge
+
+**The binding endpoints are different in the two fits**, and neither has any
+logical connection to two deleted reset assignments in spi_nvram. That is the
+signature of placement noise, not of a cost. Both close everywhere. The tightness
+is the TREE's, not this change's -- the baseline sits at +0.079 without a line of
+it, so whatever squeezed clk_ram came from elsewhere in the working tree.
+
+The resource figures said the same thing more sharply, after first appearing to
+say the opposite:
+
+    post-fit   baseline 35,324 registers  36,303 ALMs
+               with fix 35,339 registers  36,457 ALMs   (+15, +154)
+
+Fifteen registers and 154 ALMs ADDED by a change that only deletes is not a
+result you write down without checking, and the plan for this work had claimed
+the edit "can only shrink logic". It cannot be read either way, because
+**Analysis & Synthesis produces the same netlist both ways**:
+
+    make map   baseline 33,421 registers      with fix 33,421 registers
+               0 errors, 271 warnings         0 errors, 271 warnings
+
+Identical before the fitter touches it. The whole delta is the fitter's own
+placement and duplication decisions on a cold build (it created 174 register
+duplicates in one and 156 in the other), which is the same cold-elaboration
+variance 37 recorded. The claim that the edit shrinks logic was unsupported and
+is withdrawn; what is measured is that it changes no logic at all.
+
+`output_files/SeibuSPI.rbf` is the fixed build, md5 `66a85d49`. **Not yet run on
+hardware** -- the observable there is a negative and needs a human: load a core
+with a good save file, open the OSD without touching the controls, and the file's
+mtime should not move; put a credit in and it should.

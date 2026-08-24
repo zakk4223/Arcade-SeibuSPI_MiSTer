@@ -358,6 +358,28 @@ int main(int argc, char **argv) {
     if (reqs == 3 && !short_req)
         printf("request: one per settled burst, held until taken and not renewed\n");
 
+    // ---- a reset must not invent a dirty edge ----------------------------
+    // spi_ds2404 does NOT clear nv_dirty on reset, on purpose: the 512 bytes it
+    // tracks survive one, so the flag that tracks them must too. This module's
+    // delayed copy used to be forced to 0 by ITS reset, so when the two
+    // disagreed the first cycle out of reset compared 1 against 0 and latched a
+    // request nothing had asked for -- one spurious save per core load, on the
+    // parity of a flag nobody controls.
+    //
+    // Both flags are driven high, so the flash's `dirty_d` is checked here as
+    // well as the DS2404's `sdirty_d`.
+    dut->sram_dirty = 1; dut->flash_dirty = 1;
+    dut->reset = 1; run(8);
+    dut->reset = 0;
+    int phantom = 0;
+    for (int i = 0; i < 4000; i++) { tick(); if (dut->ioctl_upload_req) phantom++; }
+    if (phantom) {
+        printf("FAIL: a reset with the dirty flags high invented a save request "
+               "on %d cycles\n", phantom);
+        errors++;
+    }
+    else printf("reset: dirty flags that survive a reset do not invent a request\n");
+
     // ---- enable low: the whole device is inert --------------------------
     // `enable` is "the MRA declared an <nvram> element". Every set the core runs
     // has a DS2404 to remember, so nothing drives this low today -- what varies
