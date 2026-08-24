@@ -7,10 +7,17 @@
 //  same values, and MAME hardcodes the resulting raster (seibuspi.cpp:898):
 //
 //    dot clock 28.63636 MHz / 4 = 7.1590909 MHz  ( = clk_sys / 8 )
-//    448 x 296 total, 320 x 240 visible          => 53.99 Hz
+//    448 x 296 total, 320 x 240 visible            => 53.99 Hz
 //
-//  Vertical blanking really starts at line 253 on hardware; only 240 lines are
-//  ever visible, so we blank at 240 and keep the total at 296.
+//  VBSTART is 240. The CRTC register (0x408) nominally says vblank starts at
+//  253, but the real board only displays 240 lines -- confirmed on hardware:
+//  turning the monitor's height down does NOT reveal lines 240..252, so they are
+//  blanked, not overscanned. MAME blanks at 240 for the same reason. A brief
+//  experiment set this to 253 and un-blanked two overscan tile-strips the board
+//  does not show, so it was reverted. VBSTART drives both the vblank output and
+//  the 386's vblank IRQ; whether the real IRQ fires at 240 or 253 is still open
+//  and needs an INTR-pin capture to settle -- see spi_defs.vh and memory
+//  seibuspi-crtc-timing-verified.
 //
 //  THE RASTER NEVER STOPS. Not for a savestate, not for anything. An earlier
 //  version froze the counters for the length of a savestate transfer, which
