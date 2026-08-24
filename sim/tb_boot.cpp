@@ -23,11 +23,12 @@
 //  covers spi_cpu.sv's sound01 window, rom_loader's part for it and spi_io's
 //  port 0x688 path in one go, with the game's own code driving all three.
 //
-//  What it CANNOT tell you is whether the game then runs: the Z80 is a stub
-//  here (sim/T80s.sv), so after the download the 386 waits forever on a sound
-//  FIFO that never answers, and a cartridge run ends on a black screen no
-//  matter how healthy the core is. Judge those runs by the download check and
-//  the register log, not by the picture.
+//  It CAN tell you whether the game then runs, which it could not before the
+//  Z80 became tv80: sim/T80s.sv was a Verilator stand-in for a VHDL core and
+//  never executed a cycle, so a cartridge run used to end on a black screen no
+//  matter how healthy the core was, with the 386 waiting on a sound FIFO that
+//  nothing drained. The real Z80 runs here now, the sound board plays, and
+//  SND_WAV / SND_YMF below take the measurement (PLAN.md 51).
 //
 //  usage: Vtb_boot_top <sdram.bin> [cycles] [rdfts|rdft|rdft2]
 //============================================================================
@@ -94,6 +95,30 @@ static uint64_t ds_ram_hash(Vtb_boot_top *dut)
     return h;
 }
 
+// A plain 16-bit stereo RIFF at the YMF271's own rate. Written here rather than
+// piped through a tool so the file is the chip's samples untouched: the point of
+// measuring in simulation at all is that there is no capture chain to account
+// for (19.4 spent three experiments on one).
+static void write_wav(const char *path, const std::vector<int16_t> &pcm)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) { printf("cannot write %s\n", path); return; }
+    const uint32_t rate = 44100, ch = 2, bits = 16;
+    const uint32_t data_bytes = (uint32_t)(pcm.size() * 2);
+    const uint32_t byte_rate  = rate * ch * bits / 8;
+    const uint16_t align      = (uint16_t)(ch * bits / 8);
+    auto u32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
+    auto u16 = [&](uint16_t v) { fwrite(&v, 2, 1, f); };
+    fwrite("RIFF", 1, 4, f); u32(36 + data_bytes); fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f); u32(16); u16(1); u16((uint16_t)ch);
+    u32(rate); u32(byte_rate); u16(align); u16((uint16_t)bits);
+    fwrite("data", 1, 4, f); u32(data_bytes);
+    fwrite(pcm.data(), 2, pcm.size(), f);
+    fclose(f);
+    printf("wrote %s (%.2f s, %zu frames)\n",
+           path, pcm.size() / 2.0 / rate, pcm.size() / 2);
+}
+
 int main(int argc, char **argv)
 {
     Verilated::commandArgs(argc, argv);
@@ -141,7 +166,7 @@ int main(int argc, char **argv)
 
     // cdl is not a channel, only an owner tag: the download shares ch3 with the
     // Z80 fetch and writes rather than reads, so it retires differently.
-    Chan cprg, cgfx, cspr, cz80, cdl;
+    Chan cprg, cgfx, cspr, cz80, cdl, cpcm;
 
     dut->reset     = 1;
     dut->rom_ready = 0;
@@ -153,6 +178,8 @@ int main(int argc, char **argv)
     dut->sdr_z80_ack = 0;
     dut->sdr_z80_dout = 0;
     dut->z80dl_sdr_ack = 0;
+    dut->sdr_pcm_ack = 0;
+    dut->sdr_pcm_dout = 0;
 
     // Observations
     uint64_t rom_fetches = 0;
@@ -161,6 +188,21 @@ int main(int argc, char **argv)
     uint64_t n_dma_tm = 0, n_dma_pal = 0, n_dma_spr = 0, n_vbl = 0;
     std::map<uint32_t, std::pair<uint64_t, uint32_t>> io_writes; // addr -> (count, last value)
     uint64_t io_wr_total = 0;
+
+    // Byte-merged shadow of the Seibu CRTC window (0x400-0x44F, 20 dwords),
+    // reconstructed exactly the way spi_io.sv merges it: per byte, gated by the
+    // CPU's byte-enables. The game programs the sync geometry here as 16-bit
+    // stores, so the raw 32-bit io_wdata is not enough on its own -- only the
+    // enabled half is valid on any given write. Merging with `be` yields the
+    // same crtc_ram[] the RTL holds, so 0x404/0x40C (the sync registers MAME
+    // left decoded as "not sure how") can be read back and decoded. See spi_io
+    // "Read/write storage behind the whole CRTC window".
+    uint32_t crtc[20] = {0};
+    uint64_t crtc_writes[20] = {0};
+    // CRTC_DUMP=1 prints every write to the window as it happens, with the
+    // byte-enables, so the boot-time programming sequence is visible and not
+    // just the settled result.
+    const bool crtc_trail = getenv("CRTC_DUMP") != nullptr;
     uint64_t inta_cycles = 0;
     uint64_t stall_cycles = 0;               // valid held with no ready
 
@@ -173,6 +215,25 @@ int main(int argc, char **argv)
     int      z80dl_delay = -1;
     uint64_t z80_run_cycles = 0;
     uint8_t  z80_rst_d = 0;
+
+    // ---- the sound board's output ---------------------------------------
+    // SND_WAV writes 16-bit stereo at the YMF271's own 44,100 Hz; SND_YMF logs
+    // every register write the Z80 makes, with the sample index it landed on,
+    // which is the stream MAME's own ymf271 write handler can be tapped for.
+    // Together they separate "the Z80 plays something different" from "the
+    // chip renders it differently" -- and after the tv80 swap the first is the
+    // question. PLAN.md 51.
+    const char *wav_path = getenv("SND_WAV");
+    const char *ymf_path = getenv("SND_YMF");
+    // SND_SKIP drops this many leading samples, so a run can pass over boot
+    // without carrying it in the file.
+    const uint64_t snd_skip =
+        getenv("SND_SKIP") ? strtoull(getenv("SND_SKIP"), nullptr, 0) : 0;
+    std::vector<int16_t> wav;
+    FILE *ymf_f = ymf_path ? fopen(ymf_path, "w") : nullptr;
+    uint64_t snd_samples = 0, ymf_writes = 0;
+    uint8_t  ymf_wr_d = 0;
+    uint64_t z80_ce_ticks = 0, z80_stall_ticks = 0;
 
     uint8_t io_wr_d = 0, tm_d = 0, pal_d = 0, spr_d = 0, vbl_d = 0;
 
@@ -405,6 +466,7 @@ int main(int argc, char **argv)
             latch(cgfx, dut->sdr_gfx_req, dut->sdr_gfx_addr);
             latch(cspr, dut->sdr_spr_req, dut->sdr_spr_addr);
             latch(cz80, dut->sdr_z80_req, dut->sdr_z80_addr);
+            latch(cpcm, dut->sdr_pcm_req, dut->sdr_pcm_addr);
             if (cprg.delay == 0 && cprg.addr >= SND01_BASE
                                 && cprg.addr <  SND01_BASE + SND01_SIZE)
                 snd01_fetches++;
@@ -424,6 +486,7 @@ int main(int argc, char **argv)
                     else if (bus_owner == &cgfx) retire(cgfx, dut->sdr_gfx_ack, dut->sdr_gfx_dout);
                     else if (bus_owner == &cspr) retire(cspr, dut->sdr_spr_ack, dut->sdr_spr_dout);
                     else if (bus_owner == &cz80) retire(cz80, dut->sdr_z80_ack, dut->sdr_z80_dout);
+                    else if (bus_owner == &cpcm) retire(cpcm, dut->sdr_pcm_ack, dut->sdr_pcm_dout);
                     else {
                         // The download's masked 16-bit write, retiring.
                         uint32_t a = dut->z80dl_sdr_addr & ~1u;
@@ -454,6 +517,9 @@ int main(int argc, char **argv)
             else if (cgfx.delay == 0) { bus_owner = &cgfx; bus_busy = burst_len(); }
             else if (cprg.delay == 0) { bus_owner = &cprg; bus_busy = burst_len(); }
             else if (cspr.delay == 0) { bus_owner = &cspr; bus_busy = burst_len(); }
+            // ch5, the YMF271's samples, below sprites and above ch3 -- the
+            // order sdram.sv's IDLE arm actually uses (ch2, ch1, ch4, ch5, ch3).
+            else if (cpcm.delay == 0) { bus_owner = &cpcm; bus_busy = burst_len(); }
             // ch3 last, both directions: the Z80 fetch and then the download,
             // which is the priority the real arbiter gives them.
             else if (cz80.delay == 0) { bus_owner = &cz80; bus_busy = burst_len(); }
@@ -461,6 +527,29 @@ int main(int argc, char **argv)
         }
 
         dut->eval();
+
+        // The sound board runs on clk_sys, so both of its probes are read on
+        // that edge. The audio pair is taken on the chip's own sample_tick --
+        // one capture per output pair, which makes the file 44,100 Hz by
+        // construction rather than by a divider that could drift.
+        if (((t & 3) == 2) && !dut->reset) {
+            if (dut->p_z80_ce)    z80_ce_ticks++;
+            if (dut->p_z80_stall) z80_stall_ticks++;
+            if (dut->p_ymf_wr) {
+                ymf_writes++;
+                if (ymf_f)
+                    fprintf(ymf_f, "%llu %X %02X\n",
+                            (unsigned long long)snd_samples,
+                            dut->p_ymf_addr & 0xF, dut->p_ymf_din & 0xFF);
+            }
+            if (dut->p_snd_tick) {
+                if (snd_samples >= snd_skip && wav_path) {
+                    wav.push_back((int16_t)dut->p_audio_l);
+                    wav.push_back((int16_t)dut->p_audio_r);
+                }
+                snd_samples++;
+            }
+        }
 
         // Video capture on the clk_sys rising phase, gated by ce_pix.
         if (((t & 3) == 2) && !dut->reset) {
@@ -931,6 +1020,25 @@ int main(int argc, char **argv)
                 auto &e = io_writes[dut->p_io_addr];
                 e.first++;
                 e.second = dut->p_io_wdata;
+
+                // CRTC window: 0x400-0x44F is io_addr 0x100-0x113. Merge the
+                // enabled bytes into the shadow, mirroring spi_io.sv exactly.
+                uint32_t a = dut->p_io_addr;
+                if (a >= 0x100 && a <= 0x113) {
+                    unsigned idx = a - 0x100;
+                    uint32_t wd = dut->p_io_wdata;
+                    uint8_t  be = dut->p_io_be;
+                    for (int by = 0; by < 4; by++)
+                        if (be & (1u << by)) {
+                            uint32_t m = 0xFFu << (8 * by);
+                            crtc[idx] = (crtc[idx] & ~m) | (wd & m);
+                        }
+                    crtc_writes[idx]++;
+                    if (crtc_trail)
+                        printf("  [%.2fM] CRTC 0x%03X be=%X wdata=%08X "
+                               "=> reg=%08X\n",
+                               t / 1e6, 0x400 + idx * 4, be, wd, crtc[idx]);
+                }
             }
             io_wr_d = dut->p_io_wr;
 
@@ -998,15 +1106,80 @@ int main(int argc, char **argv)
     for (auto &kv : io_writes)
         printf("    0x%03X  x%-8llu last=%08X\n", kv.first * 4,
                (unsigned long long)kv.second.first, kv.second.second);
+
+    // The Seibu CRTC register file as the game left it, byte-merged. Only the
+    // registers the game actually touched are shown. Decode of the four timing
+    // registers, against seibu_crtc.cpp's map (each dword is hi16|lo16):
+    //   0x400: hi = hblank_start-1 (= hactive-1),  lo = hblank_len-1
+    //   0x408: hi = vblank_start-1 (= vactive-1),  lo = vblank_len-1
+    // so active = hi+1, blank_len = lo+1, total = active + blank_len. Both agree
+    // with spi_defs.vh (H 320/448, V 253/296 -- note the real vblank_start is
+    // 253, which the core simplifies to 240 per MAME's own comment).
+    //
+    //   0x404 (HS) / 0x40C (VS): the two MAME leaves as "not sure how". The
+    // delta hi-lo is certain regardless of the origin -- it is the sync WIDTH.
+    // For the absolute position the self-consistent reading is that each half
+    // stores 0x400 minus the distance from that sync edge to the end of the
+    // line/frame, i.e. position = total - (0x400 - half). That places both sync
+    // pulses inside their blanking intervals with the widths the deltas give,
+    // and is the reading reported below -- flagged as inferred, since MAME does
+    // not decode these and this has not been checked on a scope.
+    {
+        bool any = false;
+        for (unsigned i = 0; i < 20; i++) if (crtc_writes[i]) any = true;
+        if (any) {
+            unsigned htot = ((crtc[0] >> 16) + 1u) + ((crtc[0] & 0xFFFF) + 1u);
+            unsigned vtot = ((crtc[2] >> 16) + 1u) + ((crtc[2] & 0xFFFF) + 1u);
+            printf("\nSeibu CRTC register file (byte-merged, as the game left it):\n");
+            for (unsigned i = 0; i < 20; i++) {
+                if (!crtc_writes[i]) continue;
+                uint32_t v  = crtc[i];
+                uint16_t lo = v & 0xFFFF, hi = v >> 16;
+                printf("    0x%03X = %08X  (lo=%04X hi=%04X)  x%llu",
+                       0x400 + i * 4, v, lo, hi,
+                       (unsigned long long)crtc_writes[i]);
+                switch (i) {
+                    case 0: // 0x400
+                        printf("   H: active=%u blank=%u total=%u",
+                               hi + 1u, lo + 1u, htot);
+                        break;
+                    case 1: { // 0x404 HS
+                        unsigned s = htot - (0x400u - lo);   // start (earlier)
+                        unsigned e = htot - (0x400u - hi);   // end   (later)
+                        printf("   HS start~%u end~%u width=%u px [inferred]",
+                               s, e, hi - lo);
+                        break;
+                    }
+                    case 2: // 0x408
+                        printf("   V: active=%u blank=%u total=%u",
+                               hi + 1u, lo + 1u, vtot);
+                        break;
+                    case 3: { // 0x40C VS
+                        unsigned s = vtot - (0x400u - lo);
+                        unsigned e = vtot - (0x400u - hi);
+                        printf("   VS start~%u end~%u width=%u lines [inferred]",
+                               s, e, hi - lo);
+                        break;
+                    }
+                    default: break;
+                }
+                printf("\n");
+            }
+            printf("  0x404/0x40C positions are inferred (position = total - "
+                   "(0x400 - half));\n"
+                   "  the width (hi-lo) is exact. MAME leaves these two "
+                   "registers undecoded.\n");
+        } else {
+            printf("\nSeibu CRTC: no writes to the 0x400-0x44F window in this run.\n");
+        }
+    }
+
     printf("tilemap DMA triggers   : %llu\n", (unsigned long long)n_dma_tm);
     printf("palette DMA triggers   : %llu\n", (unsigned long long)n_dma_pal);
     printf("sprite  DMA triggers   : %llu\n", (unsigned long long)n_dma_spr);
-    // Always zero, and not a fault: sim/T80s.sv is a stand-in with no CPU in
-    // it, because the real core is VHDL. So the Z80 fetches nothing, answers
-    // nothing, and the 386 spins on the sound FIFO once it has handed the
-    // program over -- which is why a cartridge run ends on a black screen here
-    // even when everything works. The frame itself is verified elsewhere, by
-    // replaying MAME's captured state (PLAN.md 12).
+    // This used to be always zero and not a fault, because sim/T80s.sv was a
+    // stand-in with no CPU in it. It is a live count since tv80 (PLAN.md 39.5)
+    // and zero now means the download has not finished.
     printf("Z80 fetches (ch3)      : %llu%s\n", (unsigned long long)cz80.count,
            // Was "expected: the Verilator T80 is a stub" -- true when the
            // Z80 was VHDL and Verilator could not read it, and a lie since
@@ -1018,6 +1191,22 @@ int main(int argc, char **argv)
     printf("Z80 out-of-reset cycles: %llu, last opcode fetch at %04X\n",
            (unsigned long long)z80_run_cycles, dut->p_snd_pc);
     printf("sound01 fetches        : %llu\n", (unsigned long long)snd01_fetches);
+    printf("YMF271 PCM fetches     : %llu\n", (unsigned long long)cpcm.count);
+    // What the sound CPU lost to SDRAM, which MAME does not model and the real
+    // board does not do. It is HEADROOM, not tempo: 4.175% of enables on rdft
+    // against a 0.147% difference in elapsed time, because the music is paced
+    // by the YMF271's timer and the Z80 only has to arrive before the next
+    // tick. PLAN.md 51.9 -- the first draft of that section got this wrong by
+    // reasoning about it instead of counting.
+    printf("Z80 clock enables      : %llu, of which stalled on SDRAM %llu "
+           "(%.3f%%)\n",
+           (unsigned long long)z80_ce_ticks, (unsigned long long)z80_stall_ticks,
+           z80_ce_ticks ? 100.0 * z80_stall_ticks / z80_ce_ticks : 0.0);
+    printf("YMF271 register writes : %llu\n", (unsigned long long)ymf_writes);
+    printf("audio samples (44.1kHz): %llu = %.2f s\n",
+           (unsigned long long)snd_samples, snd_samples / 44100.0);
+    if (ymf_f) { fclose(ymf_f); printf("wrote %s\n", ymf_path); }
+    if (wav_path && !wav.empty()) write_wav(wav_path, wav);
     printf("Z80 download writes    : %llu\n", (unsigned long long)z80dl_writes);
 
     // What actually reached the Z80's memory, and whether it is the program

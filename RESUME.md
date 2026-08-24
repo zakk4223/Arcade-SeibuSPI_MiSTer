@@ -144,10 +144,56 @@ Still open, and the list is shorter than it was:
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
   bad offset produced a false `restore: FAILED` here and cost a round.
-* The sound path's MAME correlation has still not been redone since T80 was
-  swapped for tv80, and for a CPU swap that is the measurement that counts.
-  This is the largest genuine engineering task left and is independent of
-  everything else.
+* **THE SOUND PATH'S MAME CORRELATION IS REDONE, on three sets, and it did not
+  need the board** (2026-08-22, `PLAN.md` 51). The tv80 swap is what made it
+  possible: `sim/T80s.sv` never executed a cycle, so the simulator can run the
+  real sound board for the first time and the whole measurement is done with no
+  capture chain at all.
+
+  **The load-bearing result is not the audio.** The Z80's YMF271 register-write
+  stream is tapped on both sides at the same point in the same map and compared
+  per register: **the sound CPU wrote every register that carries a note -- key
+  on, frequency, envelope, volume, PCM address -- the same values in the same
+  order MAME's did.** 8,980 register writes on rdfts, 6,844 on rdft2, 47,165 on
+  rdft. The only register that ever differs is control 0x13, the timer/IRQ
+  acknowledge, whose Timer A / Timer B order the two machines swap.
+
+      set     span      envelope r   spectrum r   per-second r         silence
+      rdfts   13.10 s   0.9856       0.9998       median 0.9998, 100%  100.0%
+      rdft2   13.10 s   0.9852       0.9999       median 0.9998, 100%   99.7%
+      rdft    52.38 s   0.9417       0.9996       median 0.9978, 100%  100.0%
+
+  `make -C sim run-sound GAME=<set> SDRAM=<image> STEPS=<n> ROMS=<dir>` is the
+  whole workflow. ~229M steps per second of audio; music starts around 4 s on
+  rdft and 6 s on rdft2, so anything under ~1.5G steps is boot and silence.
+
+  **Three things it found, and two of them were in the measuring kit:**
+
+  - **The bench was tying off ch5** (`sdr_pcm_ack(1'b0)`). Harmless while the
+    Z80 was a stub; with tv80 executing, the chip's first sample fetch never
+    returned, the sound board stopped, and the 386 stalled behind a full FIFO.
+    rdft2's busiest frame went from 845 non-black pixels to 58,880. **Any sound
+    number taken from this bench before today was taken from a starved chip.**
+  - **`compare_audio.py`'s aligner was broken and had been depressing its own
+    results.** Its coarse pass stepped half a second, which is wider than the
+    peak -- 19.4 measured that peak as one 20 ms window wide without noticing it
+    had described something its aligner steps over. On rdft2 it returned r =
+    0.436 at 126.00 s where the true optimum is 0.977 at 6.38 s. It is an exact
+    FFT search now. **Read every pre-2026-08-22 figure out of it as a LOWER
+    BOUND**, 19.4's and 19.5's included.
+  - **Two recorded open questions close, and neither was a bug.** The 4.1 dB
+    stereo gap (6612) was two different passages being compared: on the same
+    passage the core reads -16.8 dB against MAME's -16.8. The unexplained 2.58x
+    level offset was the capture chain too -- aligned, the channels are within
+    0.5%.
+
+  **Do not quote the envelope figure as if it measured the program.** Over
+  rdft's first 47.95 s the register writes are provably identical, and across
+  10 s blocks of exactly that span the envelope figure still moves between 0.68
+  and 0.99 while the spectra sit at 0.999. It measures sub-window phase on
+  noise-like material. The spectral figures are the ones with a mechanism.
+
+  Not covered: rfjet and viprp1, and nothing here ran on hardware.
 * **Simulation sweep work is DEFERRED by decision (2026-08-22)**, not forgotten.
   `tools/savestate_sweep.py` is checked in and working; rdft ran 48/48 clean and
   rdft2's differences were all measurement artefacts, both fixed. rfjet is

@@ -61,20 +61,55 @@ def norm(x):
 def align(hw_env, ref_env):
     """Offset into ref_env that best matches hw_env, by correlation.
 
-    Coarse then fine: a full search at every window is O(n*m) and slow enough
-    to discourage running this, which is worse than it being approximate.
+    EVERY offset, via FFT, and not a coarse-then-fine grid. The grid version
+    this replaces stepped 25 windows -- half a second -- in its coarse pass and
+    then refined only within 25 windows of whatever that found. That is wider
+    than the peak: PLAN.md 19.4 measured this music's envelope autocorrelation
+    falling from 1.000 to 0.187 across ONE 20 ms window, so the true optimum is
+    one bin wide and a half-second grid steps straight over it. It then locked
+    onto a broad lower plateau elsewhere in the reference -- on a looping
+    attract track there are many -- and reported a weak figure at a wrong
+    offset with nothing to say it had. Measured on rdft2: the grid returned
+    r = 0.436 at 126.00 s where the true optimum is r = 0.977 at 6.38 s.
+
+    So: the same per-offset statistic, computed at every offset. The numerator
+    is one cross-correlation; the reference slice's own mean and standard
+    deviation come from prefix sums, which is what keeps each offset normalised
+    against ITS OWN window rather than against the whole reference. O(n log n),
+    which is faster than the grid it replaces as well as exact.
     """
     n = len(hw_env)
-    hwn = norm(hw_env)
-    best, best_off = -2.0, 0
-    for step, lo, hi in ((25, 0, len(ref_env) - n), (1, None, None)):
-        if lo is None:
-            lo, hi = max(0, best_off - 25), min(len(ref_env) - n, best_off + 25)
-        for off in range(lo, hi + 1, step):
-            r = float(np.dot(hwn, norm(ref_env[off : off + n]))) / n
-            if r > best:
-                best, best_off = r, off
-    return best_off, best
+    m = len(ref_env)
+    offs = m - n
+    if offs < 0:
+        return 0, -2.0
+    h = hw_env - hw_env.mean()
+    hs = h.std()
+    if not hs:
+        return 0, -2.0
+
+    # Sum over each window of the reference, and of its squares, for the mean
+    # and standard deviation of every candidate slice.
+    c1 = np.concatenate(([0.0], np.cumsum(ref_env)))
+    c2 = np.concatenate(([0.0], np.cumsum(ref_env * ref_env)))
+    s1 = c1[n:] - c1[:-n]                     # offs+1 windows
+    s2 = c2[n:] - c2[:-n]
+    mean = s1 / n
+    var = np.maximum(s2 / n - mean * mean, 0.0)
+    sd = np.sqrt(var)
+
+    # Cross-correlation of the zero-mean capture against the reference. Since
+    # h sums to zero, sum(h * ref_slice) already has the slice's own mean
+    # subtracted out and no correction term is needed.
+    size = 1 << int(np.ceil(np.log2(m + n)))
+    corr = np.fft.irfft(np.fft.rfft(ref_env, size) *
+                        np.conj(np.fft.rfft(h, size)), size)[: offs + 1]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = corr / (n * hs * sd)
+    r[sd == 0] = -2.0
+    best_off = int(np.argmax(r))
+    return best_off, float(r[best_off])
 
 
 def spectrum(mono, sr):

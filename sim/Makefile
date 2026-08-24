@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sdram
+.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sound run-sdram
 
 SLOP_BIAS ?= 1
 
@@ -319,6 +319,54 @@ lint-top:
 STEPS ?= 40000000
 run-boot: obj_dir/Vtb_boot_top
 	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS) $(GAME)
+
+
+# The sound path against MAME, in simulation, end to end (PLAN.md 51).
+#
+#   make run-sound GAME=rdft2 SDRAM=/tmp/sdram_rdft2.bin STEPS=3000000000 \
+#       ROMS=~/Downloads/roms REFSECS=220
+#
+# This could not be run at all before the Z80 became tv80: sim/T80s.sv was a
+# Verilator stand-in for a VHDL core and never executed a cycle, so every sound
+# measurement in this repo's history was taken either on hardware -- through a
+# capture chain nobody had calibrated (PLAN.md 19.4) -- or with an inert sound
+# board. The core's audio is written at the YMF271's own 44,100 Hz sample tick,
+# so there is no resampling on this side at all, and MAME is asked for the same
+# rate so there is none on the other.
+#
+# Both machines start from power-on, which is why the alignment lands at 0.00 s
+# and why nothing here trims the boot silence: the silent stretch before the
+# music is itself the strongest thing to align on.
+#
+# STEPS: about 229M per second of audio. Music starts around 4 s on rdft and
+# 6 s on rdft2, so anything under ~1.5G is boot and silence.
+#
+# rdft2 needs two things this cannot do for you: MAME 0.289 requires three PLD
+# dumps that are not in circulation, and its sample flash has to have been
+# programmed once (run it for 500 emulated seconds with a writable
+# -nvram_directory and it does its own ritual). Point ROMS and NVRAM at those.
+SNDOUT  ?= /tmp/spi_sound
+REFSECS ?= 220
+run-sound: obj_dir/Vtb_boot_top
+	@mkdir -p $(SNDOUT)
+	SND_WAV=$(SNDOUT)/core_$(GAME).wav SND_YMF=$(SNDOUT)/core_$(GAME).txt \
+	    ./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS) $(GAME) | \
+	    grep -E "YMF271|audio samples|Z80 clock|wrote .*(wav|txt)" || true
+	$(MAMEBIN) $(GAME) -rompath "$(ROMS)" \
+	    $(if $(NVRAM),-nvram_directory "$(NVRAM)",) \
+	    -video none -sound none -samplerate 44100 -seconds_to_run $(REFSECS) \
+	    -nothrottle -skip_gameinfo -wavwrite $(SNDOUT)/mame_$(GAME).wav >/dev/null
+	SLOP_OUT=$(SNDOUT)/mame_$(GAME).txt SLOP_SECS=$(REFSECS) $(MAMEBIN) $(GAME) \
+	    -rompath "$(ROMS)" $(if $(NVRAM),-nvram_directory "$(NVRAM)",) \
+	    -autoboot_script $(abspath $(TOOLS))/mame_ymf_trace.lua \
+	    -video none -sound none -nothrottle -skip_gameinfo >/dev/null
+	@echo; echo "---- YMF271 register writes ----"
+	@python3 $(TOOLS)/compare_ymf_trace.py \
+	    $(SNDOUT)/core_$(GAME).txt $(SNDOUT)/mame_$(GAME).txt | \
+	    grep -vE "^  (slot group|control|PCM) .* ok$$"
+	@echo; echo "---- audio ----"
+	@python3 $(TOOLS)/compare_audio.py \
+	    $(SNDOUT)/core_$(GAME).wav $(SNDOUT)/mame_$(GAME).wav
 
 obj_dir/Vtb_boot_top: tb_boot_top.sv tb_boot.cpp lint.vlt $(CORE_SRCS) $(Z386_SRCS) \
                       $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \

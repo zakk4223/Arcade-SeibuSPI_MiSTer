@@ -11214,3 +11214,225 @@ recorded so that nobody re-derives 50.7 from the same evidence.
 
 Which finishes the flash work: every mode and every transition has now run on
 hardware.
+
+## 51. The sound path against MAME, redone for tv80 -- in simulation (2026-08-22)
+
+39.5 swapped T80 for tv80 and left one thing owing, which 39.8 wrote down as the
+largest task in the tree: the subsystem had been matched against MAME over two
+minutes of rdft2 attract (14, 10d), a Z80 had been replaced inside it, and that
+correlation had never been redone. For a CPU swap it is the measurement that
+counts.
+
+It is redone, on three sets, and it did not need the board.
+
+### 51.1 The swap is what made this possible, and that is the whole point
+
+The old measurement was a hardware capture off an Elgato against MAME's
+`-wavwrite`. It had to be: `sim/T80s.sv` was a Verilator stand-in for a VHDL
+core and never executed a cycle, so **every sound measurement ever taken in
+simulation here was taken with an inert sound board** (39.5). tv80 is Verilog.
+The simulator runs the real Z80 now, so the correlation can be done with no
+capture chain at all -- which matters more than it sounds, because 19.4 spent
+three separate experiments establishing that its own weak figure was the chain
+and not the core, and never did settle it.
+
+`make -C sim run-sound GAME=<set> SDRAM=<image> STEPS=<n> ROMS=<dir>` is the
+whole thing: the core's audio and its YMF271 register writes, MAME's own beside
+them, and both comparisons. About 229M steps per second of audio.
+
+### 51.2 The bench was tying off ch5, and with a live Z80 that wedged the board
+
+`tb_boot_top.sv` had `sdr_pcm_dout(64'd0)` and `sdr_pcm_ack(1'b0)`. Harmless for
+as long as the Z80 was a stub and the chip never asked for a sample. With tv80
+executing, the YMF271's first PCM fetch never completed, the sound board stopped,
+the Z80 stopped draining the 386's command FIFO, and the 386 stalled behind it --
+which looked exactly like a 386 hang and is not one. Wiring ch5 into the same
+single-server arbiter as the other channels (ch2, ch1, ch4, **ch5**, ch3, which
+is `sdram.sv`'s own IDLE order) took rdft2's busiest frame from **845 non-black
+pixels to 58,880**.
+
+Anything that reads a sound number out of this bench from before today is reading
+a starved chip.
+
+### 51.3 Two instruments, and the sharper one is not the audio
+
+`SND_WAV=<f>` writes 16-bit stereo sampled on the YMF271's own `sample_tick`, so
+the file is 44,100 Hz by construction and nothing resamples on this side. MAME is
+asked for `-samplerate 44100`, so nothing resamples on that side either. Both
+machines start from power-on, which is why the alignment lands at 0.00 s and why
+nothing trims the boot silence -- the silent stretch before the music is the
+strongest thing to align on.
+
+`SND_YMF=<f>` logs every write the Z80 makes to 0x6000-0x600F with the sample it
+landed on; `tools/mame_ymf_trace.lua` taps the same range on MAME's `:audiocpu`,
+which is the same point in the same map. `tools/compare_ymf_trace.py` compares
+them.
+
+**The write stream is the measurement a CPU swap actually wants.** The YMF271's
+synthesis is verified against MAME on its own (`make -C sim run-ymf271`), so what
+a new Z80 can change is only what reaches the chip and when. A difference names
+the register; an audio correlation can only say a number got worse.
+
+**And the ports are not the registers.** 0x6000-0x600F is eight address/data
+pairs onto five independent banks -- an even port latches an address, the odd one
+beside it writes the register that address selects. Read as one sequence the
+stream reads as 0.54% agreement on rdft, which is meaningless: it is five
+interleaved conversations and any change in the interleave looks like a wrong
+value. Decoded per (bank, register) it reads as below. Same trap as 40's,
+recorded there for the savestate sweep and earned again here.
+
+### 51.4 The register streams
+
+    set     span     decoded register writes    registers differing
+    rdfts   13.10 s  8,980 each side            control 0x13 only
+    rdft2   13.10 s  6,844 each side            control 0x13 only
+    rdft    52.38 s  47,165 each side           control 0x13 only for 47.95 s
+
+Control 0x13 is the timer / IRQ-acknowledge register, and it is the one the two
+machines legitimately reorder: the Z80 writes it from the YMF's own interrupt,
+and Timer A and Timer B services swap order when the two arrive at the handler at
+slightly different offsets. The values are the same small set on both sides.
+**Every register that carries a note -- key-on, frequency, envelope, volume, PCM
+address -- got the same values in the same order.**
+
+On rdft, at **47.95 s of 52.38**, sound-effect registers across all four slot
+groups pick up a handful of extra writes at once (47 against 43, 16 against 17,
+the same shape on 73 registers). Everything before that instant is identical.
+That is the attract DEMO diverging -- it is real gameplay, so a small timing
+difference changes which enemies die when and therefore which effects fire, which
+is what 1043 already described for rfjet. The 13 s runs stop before their sets
+reach it.
+
+### 51.5 The audio
+
+Against a 220 s MAME reference, through `tools/compare_audio.py`:
+
+    set     span      envelope r   spectrum r   per-second r         silence
+    rdfts   13.10 s   0.9856       0.9998       median 0.9998, 100%  100.0%
+    rdft2   13.10 s   0.9852       0.9999       median 0.9998, 100%   99.7%
+    rdft    52.38 s   0.9417       0.9996       median 0.9978, 100%  100.0%
+
+"100%" is the fraction of one-second windows above 0.8; rdft has 45 of them.
+Nothing is silent on one side while the other plays, anywhere, except two 20 ms
+windows on rdft2.
+
+For contrast, the hardware figures these replace: rdft2 0.951 / 0.9927 (10d),
+rfjet 0.9025 / 0.9855 (1048), rdft 0.8030 / 0.9967 (19.4).
+
+**The sample memory is the same memory on both sides, and that was checked
+rather than assumed.** rdft's derived flash is byte-identical to
+`~/.mame/nvram/rdft/soundflash1`+`2` in all 2,097,152 bytes. rdft2's is
+byte-identical to the file MAME's OWN updater produced when it was given a
+writable nvram directory and 500 emulated seconds -- 0 bytes differ. So this
+re-confirms 23 and 24's derivation against MAME 0.289 for free, and it means an
+audio difference could not have come from the samples.
+
+### 51.6 `compare_audio.py`'s aligner was broken, and it had been depressing the
+### numbers it reported
+
+Its coarse pass stepped 25 windows -- half a second -- and its fine pass then
+searched only within 25 windows of whatever that found. **That is wider than the
+peak.** 19.4 measured this material's envelope autocorrelation falling from 1.000
+to 0.187 across ONE 20 ms window and drew the right conclusion about the music
+without noticing it had just described a peak its own aligner steps over.
+
+Measured, on rdft2: the grid returned **r = 0.436 at 126.00 s** where the true
+optimum is **r = 0.977 at 6.38 s**. It had locked onto a broad lower plateau
+elsewhere in a looping attract track and reported a weak figure at a wrong offset
+with nothing to say it had.
+
+It is an exact search over every offset now, by FFT, with each candidate window's
+own mean and standard deviation from prefix sums so the statistic is unchanged.
+O(n log n) -- faster than the grid it replaces as well as right.
+
+**Every figure in this repo that came out of `align()` before today should be
+read as a lower bound**, including 19.4's and 19.5's.
+
+### 51.7 What the envelope figure is actually measuring
+
+This is the question 19.4 raised and could not close, and the register stream
+closes it.
+
+Over rdft's first 47.95 s the two machines wrote the chip the identical value
+sequence on every register. Split that same span into 10 s blocks:
+
+    window        envelope r   spectrum r   max |skew|
+    0 - 10 s      0.9535       0.9997        18.0 ms
+    10 - 20 s     0.8421       0.9992        11.0 ms
+    20 - 30 s     0.9508       0.9997         5.5 ms
+    30 - 40 s     0.9880       0.9991         6.6 ms
+    40 - 48 s     0.6765       0.9920       118.5 ms
+
+The envelope figure moves between 0.68 and 0.99 across blocks **in which the
+register writes are provably identical.** So it is not measuring the sound
+program. What it is measuring is sub-window phase, plus how noise-like this
+material is at 20 ms -- 19.4's third experiment was right and is now demonstrated
+rather than inferred.
+
+The skew itself is BOUNDED, not accumulating: over 18,225 matched writes in
+0-47.95 s it is +4.8 ms mean, drifting from +12.7 ms in the first ten seconds
+through zero at about 31 s, with one excursion to 118 ms in the 40-48 s passage.
+The YMF's timer keeps re-synchronising both machines, which is why 52 s of
+running does not turn into 52 s of drift.
+
+**So quote the spectral figures.** They are the ones with a mechanism behind
+them, and they read 0.9996 or better on all three sets.
+
+### 51.8 Two open questions closed, and neither was a bug
+
+**The 4.1 dB stereo gap (6612) was the innocent explanation it proposed.** That
+note recorded rdft2 reading 4.1 dB narrower than MAME on hardware, called it
+undiagnosed, and guessed that side/mid depends on which sounds are playing and
+the attract demo diverges. Compared on the SAME passage rather than against a
+whole reference, over rdft's identical 47.95 s:
+
+    core -16.8 dB     MAME -16.8 dB      L/R rms within 0.5%
+
+and on the 13 s runs, rdft2 -45.5 against -45.3, rdft -20.4 against -20.1. The
+core's stereo is MAME's. Reading a 13 s capture's side/mid against a 220 s
+reference's is what produced the gap, here and on hardware.
+
+**The unexplained 2.58x level offset (10d, 19.4) is not in the core either.**
+Aligned, per channel: core L 1647 / R 1638 against MAME's 1655 / 1644. Both of
+those were the capture chain.
+
+### 51.9 The Z80's SDRAM stall, measured -- and what it is not
+
+The core's sound CPU runs at MAME's clock exactly: `ce_div` divides clk_sys by 8,
+57.272727 / 8 = 7.1590909 MHz, and MAME is `28.636363_MHz_XTAL / 4`. But it
+fetches its program out of SDRAM through a line buffer and stalls on a miss,
+which MAME does not model and the real board does not do.
+
+    rdfts   3.710% of clock enables stalled
+    rdft    4.175%
+
+**That is headroom being spent, not a tempo change**, and the difference between
+those two things was worth measuring rather than reasoning about -- the first
+draft of this section asserted the stall WAS the rate difference and was wrong.
+The music is paced by the YMF271's timer, not by the Z80's throughput: the CPU
+only has to arrive before the next tick, and it does. Elapsed time over the same
+span came out at core/MAME 1.00047 on rdfts, 0.99975 on rdft2 and 1.00147 on
+rdft -- a twentieth to a seventh of a percent, against a CPU losing four percent
+of its cycles.
+
+Where the stall does show is in how often the Z80 arrives late enough to find
+both timer flags set and acknowledge them together (0x13 = 0x3F): 121 times
+against MAME's 31 over rdft's 52 s. Rare, and it changes no note.
+
+### 51.10 What this does not cover
+
+* **rfjet and viprp1 have not been run**, only rdfts, rdft and rdft2.
+* **Nothing here ran on hardware.** It is a simulation of the same RTL, with the
+  same SDRAM arbiter and the same sample memory, and it is a stronger measurement
+  than the hardware one it replaces in every respect except that it is not the
+  board. The two are complementary: this catches what the chain hid, and only the
+  board catches what the framework does to the audio downstream of the core.
+* **MAME 0.289 cannot run rdft2 out of the box**: it wants three PLD dumps
+  (`rm81.u0529.bin`, `rm82`, `rm83`, 279 bytes each) that are not in circulation.
+  They are documentation -- nothing in the driver reads them -- so placeholders of
+  the right size get MAME past the check with a wrong-checksum warning. rdft2's
+  sample flash also has to have been programmed once; give MAME a writable
+  `-nvram_directory` and 500 emulated seconds and it runs its own ritual.
+* **The 47.95 s divergence on rdft is asserted to be the attract demo, not
+  proved.** The proof would be a second run reaching it at a different moment.
+  What is proved is that everything before it is identical.
