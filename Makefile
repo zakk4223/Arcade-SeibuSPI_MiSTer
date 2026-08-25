@@ -4,7 +4,7 @@ QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
 .PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 \
-        check-derive check-tb check-timing mras check-clones release verify
+        check-derive check-tb check-timing mras check-clones release release-zip verify
 
 all: build
 
@@ -120,6 +120,17 @@ release: check-timing check-mra
 	@cp mra/*.mra releases/
 	@cp -r mra/_alternatives releases/
 	@echo "releases/: $$(ls releases/*.mra | wc -l) parent MRAs, $$(find releases/_alternatives -name '*.mra' | wc -l) under _alternatives, $(PROJECT).rbf $$(md5sum releases/$(PROJECT).rbf | cut -c1-8)"
+
+# One zip for TESTERS. releases/ is laid out for MiSTer's distribution system,
+# which is not the layout an SD card wants -- this rewrites it on the way in, so
+# unzipping the result at /media/fat drops the MRAs in _Arcade/, the clones in
+# _Arcade/_alternatives/ and the bitstream in _Arcade/cores/, overwriting the
+# core already there.
+# Depends on `release`, so a zip can never carry a bitstream that failed timing.
+#   make release-zip
+#   make release-zip ZIPFLAGS="--suffix rc1"
+release-zip: release
+	@python3 tools/make_release_zip.py $(ZIPFLAGS)
 
 # Everything that can be checked without a Quartus run or a MiSTer.
 verify: lint check-mra check-tb test
