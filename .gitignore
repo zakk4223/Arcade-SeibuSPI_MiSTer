@@ -22,6 +22,10 @@ hc_output/
 *.done
 sim/obj_dir/
 
+# `make release-zip` output. The zip is rebuildable from releases/, which IS
+# checked in, so only the directory it lands in is ignored.
+dist/
+
 # Debugging debris, not sources.
 # compile*.log: ~14 MB of Quartus transcripts from the hardware sessions.
 # sim/*.ppm:    ~22 MB of rendered frames from tb_video / tb_boot.
