@@ -2515,7 +2515,8 @@ Crossings that needed care:
   a 25 MHz clock enable will therefore run the game *faster* than real hardware in
   CPU-bound sections. Plan: expose a CPU speed option in the OSD, default to a
   value calibrated against MAME, and record the calibration here once measured.
-  **Open item — but see section 16, which measures it.** The 386 is idle 80-85%
+  **Open item — but see section 16, which measures it, and 16.9, which decides
+  it: a 7/8 gated clk_cpu at 25.0568 MHz.** The 386 is idle 80-85%
   of a frame in rdft attract, so 25 MHz is cosmetic: the same work is 17-24% of a
   frame there too. Exact 25.000 MHz also needs a second PLL and an asynchronous
   `clk_cpu`. What is still unmeasured is z386x's throughput against a real
@@ -5588,6 +5589,77 @@ What it unblocks: 16.5's missing number needs a MAME-side figure that MAME will
 not give up, but the OUR-side half is now exact rather than sampled, and it can
 run during PLAY -- which is what T-N still owes and where the peak load lives.
 Attract's 36% peak (16.4) is an attract number.
+
+### 16.9 Decided: a 7/8 gated `clk_cpu`, and why the gate is the point (2026-08-24)
+
+16.1-16.8 stand -- at the measured loads the frequency is cosmetic. The decision
+is to do it anyway, by the cheapest route that does not disturb timing closure,
+and to build it as a TUNABLE THROTTLE rather than a fixed frequency, because the
+number that matters is throughput and nobody has measured it yet.
+
+**The ratio.** 28.636364 x 7/8 = **25.0568 MHz**, +0.23% against 25.000. Better
+than /50's +0.8%, and it needs no second PLL, no asynchronous clock group and no
+CDC rework. Kill one `clk_cpu` edge in eight.
+
+**Why gate the clock instead of adding a clock enable to z386.** z386 has no CE
+port -- `rtl/z386/z386.sv:30` is `clk`, `reset_n`, and nothing else. Threading one
+through means touching ~90 `always_ff` blocks across 16 files (226 KB in `z386.sv`
+alone), plus the read enables on the inferred M10K microcode ROM and the two L1
+cache RAMs, in a vendored core we re-sync through `patches/`. That is a large
+silent-breakage surface for no gain. Gating the domain at the top costs one
+`altclkctrl`.
+
+**`cpu_en` is not a throttle and cannot be made into one.** `spi_cpu.sv:84` calls
+it "0 = stall the CPU (pause, throttle)", but it only gates `mem_accept`
+(`spi_cpu.sv:1019`). With L1 I and D caches the core keeps executing out of cache
+while the bus is stalled -- the same mechanism as section 46, the cache hit that
+skipped the savestate freeze. Do not reach for `cpu_en` here.
+
+**What the gate does to STA: nothing.** An `altclkctrl` enable is glitch-free, and
+TimeQuest still sees 28.636364 MHz on the output because two live edges can still
+be adjacent. That is the correct and conservative constraint -- no path gets
+easier, no SDC changes, `derive_pll_clocks` keeps working.
+
+**What it does to the crossings.** The surviving edges are a SUBSET of the current
+ones, so every `clk_cpu` edge still coincides with a `clk_sys` edge and the two
+stay in one clock group. This is NOT the asynchronous case 16.1 priced. What
+changes is pulse WIDTH: the places that assume "one clk_cpu cycle = two clk_sys
+cycles" -- the coin latch (`spi_top.sv:603`), `sndfifo_wr` (`spi_top.sv:399`), the
+DMA triggers -- become two OR four. Every one of them edge-detects on the clk_sys
+side, so wider is safe. Narrower would not have been.
+
+**The clk_ram side.** `sdr_req`/`sdr_ack` (`spi_top.sv:344`) is a level handshake
+and clk_ram already tolerates 4:1, so a stretched request is fine. Gating the
+whole clk_cpu domain -- spi_cpu, spi_io, the dpram write ports -- keeps it
+internally coherent: nothing in it advances while the edge is dead.
+
+**Second order.** The savestate watchdog at 2^23 clk_cpu cycles (`spi_cpu.sv:839`,
+~293 ms) becomes ~335 ms. Harmless, but that comment's number goes stale.
+
+**Build it as a ratio, not as 7/8.** The whole advantage of the gate over a PLL is
+that it generalises -- an N/M enable or a fractional accumulator throttles to any
+rate, which is exactly what section 6 wanted from an OSD "CPU speed" option. Ship
+7/8 as the default and leave the divider parameterised. A second PLL would give
+one fixed frequency that is still probably wrong.
+
+**Why this is not finished when it builds.** 16.7's open item is unchanged: z386x's
+IPC against a real 386DX-25 is still unmeasured, and it has L1 caches and hardwired
+fast paths a real 386 does not have. At 1.5x the IPC, a 25 MHz clock is still 50%
+fast. The gate is the MECHANISM for matching hardware throughput; the NUMBER still
+has to be measured, and 16.8's EIP profiler is the instrument for our half of it.
+
+**Order of work:**
+
+1. `altclkctrl` on `clk_cpu` with a parameterised N/M enable, default 7/8,
+   instantiated in `SeibuSPI.sv` beside the PLL (`SeibuSPI.sv:369`).
+2. `make && make timing`. Expect clk_cpu's slack to be **unchanged** -- the
+   constraint has not moved. If it moves, the gate is not where it should be.
+3. Boot rdft and rfjet on hardware. Watch for anything that depended on a pulse
+   being exactly two clk_sys cycles wide.
+4. Re-run the EIP profiler (16.8) on rfjet attract. The busy fraction should scale
+   by 8/7 -- 35.1% peak becomes ~40%. That is the confirmation the gate is really
+   slowing the CPU rather than having been optimised away.
+5. Only then, the throughput calibration 16.7 owes.
 
 ---
 
@@ -11142,3 +11214,694 @@ recorded so that nobody re-derives 50.7 from the same evidence.
 
 Which finishes the flash work: every mode and every transition has now run on
 hardware.
+
+## 51. The sound path against MAME, redone for tv80 -- in simulation (2026-08-22)
+
+39.5 swapped T80 for tv80 and left one thing owing, which 39.8 wrote down as the
+largest task in the tree: the subsystem had been matched against MAME over two
+minutes of rdft2 attract (14, 10d), a Z80 had been replaced inside it, and that
+correlation had never been redone. For a CPU swap it is the measurement that
+counts.
+
+It is redone, on three sets, and it did not need the board.
+
+### 51.1 The swap is what made this possible, and that is the whole point
+
+The old measurement was a hardware capture off an Elgato against MAME's
+`-wavwrite`. It had to be: `sim/T80s.sv` was a Verilator stand-in for a VHDL
+core and never executed a cycle, so **every sound measurement ever taken in
+simulation here was taken with an inert sound board** (39.5). tv80 is Verilog.
+The simulator runs the real Z80 now, so the correlation can be done with no
+capture chain at all -- which matters more than it sounds, because 19.4 spent
+three separate experiments establishing that its own weak figure was the chain
+and not the core, and never did settle it.
+
+`make -C sim run-sound GAME=<set> SDRAM=<image> STEPS=<n> ROMS=<dir>` is the
+whole thing: the core's audio and its YMF271 register writes, MAME's own beside
+them, and both comparisons. About 229M steps per second of audio.
+
+### 51.2 The bench was tying off ch5, and with a live Z80 that wedged the board
+
+`tb_boot_top.sv` had `sdr_pcm_dout(64'd0)` and `sdr_pcm_ack(1'b0)`. Harmless for
+as long as the Z80 was a stub and the chip never asked for a sample. With tv80
+executing, the YMF271's first PCM fetch never completed, the sound board stopped,
+the Z80 stopped draining the 386's command FIFO, and the 386 stalled behind it --
+which looked exactly like a 386 hang and is not one. Wiring ch5 into the same
+single-server arbiter as the other channels (ch2, ch1, ch4, **ch5**, ch3, which
+is `sdram.sv`'s own IDLE order) took rdft2's busiest frame from **845 non-black
+pixels to 58,880**.
+
+Anything that reads a sound number out of this bench from before today is reading
+a starved chip.
+
+### 51.3 Two instruments, and the sharper one is not the audio
+
+`SND_WAV=<f>` writes 16-bit stereo sampled on the YMF271's own `sample_tick`, so
+the file is 44,100 Hz by construction and nothing resamples on this side. MAME is
+asked for `-samplerate 44100`, so nothing resamples on that side either. Both
+machines start from power-on, which is why the alignment lands at 0.00 s and why
+nothing trims the boot silence -- the silent stretch before the music is the
+strongest thing to align on.
+
+`SND_YMF=<f>` logs every write the Z80 makes to 0x6000-0x600F with the sample it
+landed on; `tools/mame_ymf_trace.lua` taps the same range on MAME's `:audiocpu`,
+which is the same point in the same map. `tools/compare_ymf_trace.py` compares
+them.
+
+**The write stream is the measurement a CPU swap actually wants.** The YMF271's
+synthesis is verified against MAME on its own (`make -C sim run-ymf271`), so what
+a new Z80 can change is only what reaches the chip and when. A difference names
+the register; an audio correlation can only say a number got worse.
+
+**And the ports are not the registers.** 0x6000-0x600F is eight address/data
+pairs onto five independent banks -- an even port latches an address, the odd one
+beside it writes the register that address selects. Read as one sequence the
+stream reads as 0.54% agreement on rdft, which is meaningless: it is five
+interleaved conversations and any change in the interleave looks like a wrong
+value. Decoded per (bank, register) it reads as below. Same trap as 40's,
+recorded there for the savestate sweep and earned again here.
+
+### 51.4 The register streams
+
+    set     span     decoded register writes    registers differing
+    rdfts   13.10 s  8,980 each side            control 0x13 only
+    rdft2   13.10 s  6,844 each side            control 0x13 only
+    rdft    52.38 s  47,165 each side           control 0x13 only for 47.95 s
+
+Control 0x13 is the timer / IRQ-acknowledge register, and it is the one the two
+machines legitimately reorder: the Z80 writes it from the YMF's own interrupt,
+and Timer A and Timer B services swap order when the two arrive at the handler at
+slightly different offsets. The values are the same small set on both sides.
+**Every register that carries a note -- key-on, frequency, envelope, volume, PCM
+address -- got the same values in the same order.**
+
+On rdft, at **47.95 s of 52.38**, sound-effect registers across all four slot
+groups pick up a handful of extra writes at once (47 against 43, 16 against 17,
+the same shape on 73 registers). Everything before that instant is identical.
+That is the attract DEMO diverging -- it is real gameplay, so a small timing
+difference changes which enemies die when and therefore which effects fire, which
+is what 1043 already described for rfjet. The 13 s runs stop before their sets
+reach it.
+
+### 51.5 The audio
+
+Against a 220 s MAME reference, through `tools/compare_audio.py`:
+
+    set     span      envelope r   spectrum r   per-second r         silence
+    rdfts   13.10 s   0.9856       0.9998       median 0.9998, 100%  100.0%
+    rdft2   13.10 s   0.9852       0.9999       median 0.9998, 100%   99.7%
+    rdft    52.38 s   0.9417       0.9996       median 0.9978, 100%  100.0%
+
+"100%" is the fraction of one-second windows above 0.8; rdft has 45 of them.
+Nothing is silent on one side while the other plays, anywhere, except two 20 ms
+windows on rdft2.
+
+For contrast, the hardware figures these replace: rdft2 0.951 / 0.9927 (10d),
+rfjet 0.9025 / 0.9855 (1048), rdft 0.8030 / 0.9967 (19.4).
+
+**The sample memory is the same memory on both sides, and that was checked
+rather than assumed.** rdft's derived flash is byte-identical to
+`~/.mame/nvram/rdft/soundflash1`+`2` in all 2,097,152 bytes. rdft2's is
+byte-identical to the file MAME's OWN updater produced when it was given a
+writable nvram directory and 500 emulated seconds -- 0 bytes differ. So this
+re-confirms 23 and 24's derivation against MAME 0.289 for free, and it means an
+audio difference could not have come from the samples.
+
+### 51.6 `compare_audio.py`'s aligner was broken, and it had been depressing the
+### numbers it reported
+
+Its coarse pass stepped 25 windows -- half a second -- and its fine pass then
+searched only within 25 windows of whatever that found. **That is wider than the
+peak.** 19.4 measured this material's envelope autocorrelation falling from 1.000
+to 0.187 across ONE 20 ms window and drew the right conclusion about the music
+without noticing it had just described a peak its own aligner steps over.
+
+Measured, on rdft2: the grid returned **r = 0.436 at 126.00 s** where the true
+optimum is **r = 0.977 at 6.38 s**. It had locked onto a broad lower plateau
+elsewhere in a looping attract track and reported a weak figure at a wrong offset
+with nothing to say it had.
+
+It is an exact search over every offset now, by FFT, with each candidate window's
+own mean and standard deviation from prefix sums so the statistic is unchanged.
+O(n log n) -- faster than the grid it replaces as well as right.
+
+**Every figure in this repo that came out of `align()` before today should be
+read as a lower bound**, including 19.4's and 19.5's.
+
+### 51.7 What the envelope figure is actually measuring
+
+This is the question 19.4 raised and could not close, and the register stream
+closes it.
+
+Over rdft's first 47.95 s the two machines wrote the chip the identical value
+sequence on every register. Split that same span into 10 s blocks:
+
+    window        envelope r   spectrum r   max |skew|
+    0 - 10 s      0.9535       0.9997        18.0 ms
+    10 - 20 s     0.8421       0.9992        11.0 ms
+    20 - 30 s     0.9508       0.9997         5.5 ms
+    30 - 40 s     0.9880       0.9991         6.6 ms
+    40 - 48 s     0.6765       0.9920       118.5 ms
+
+The envelope figure moves between 0.68 and 0.99 across blocks **in which the
+register writes are provably identical.** So it is not measuring the sound
+program. What it is measuring is sub-window phase, plus how noise-like this
+material is at 20 ms -- 19.4's third experiment was right and is now demonstrated
+rather than inferred.
+
+The skew itself is BOUNDED, not accumulating: over 18,225 matched writes in
+0-47.95 s it is +4.8 ms mean, drifting from +12.7 ms in the first ten seconds
+through zero at about 31 s, with one excursion to 118 ms in the 40-48 s passage.
+The YMF's timer keeps re-synchronising both machines, which is why 52 s of
+running does not turn into 52 s of drift.
+
+**So quote the spectral figures.** They are the ones with a mechanism behind
+them, and they read 0.9996 or better on all three sets.
+
+### 51.8 Two open questions closed, and neither was a bug
+
+**The 4.1 dB stereo gap (6612) was the innocent explanation it proposed.** That
+note recorded rdft2 reading 4.1 dB narrower than MAME on hardware, called it
+undiagnosed, and guessed that side/mid depends on which sounds are playing and
+the attract demo diverges. Compared on the SAME passage rather than against a
+whole reference, over rdft's identical 47.95 s:
+
+    core -16.8 dB     MAME -16.8 dB      L/R rms within 0.5%
+
+and on the 13 s runs, rdft2 -45.5 against -45.3, rdft -20.4 against -20.1. The
+core's stereo is MAME's. Reading a 13 s capture's side/mid against a 220 s
+reference's is what produced the gap, here and on hardware.
+
+**The unexplained 2.58x level offset (10d, 19.4) is not in the core either.**
+Aligned, per channel: core L 1647 / R 1638 against MAME's 1655 / 1644. Both of
+those were the capture chain.
+
+### 51.9 The Z80's SDRAM stall, measured -- and what it is not
+
+The core's sound CPU runs at MAME's clock exactly: `ce_div` divides clk_sys by 8,
+57.272727 / 8 = 7.1590909 MHz, and MAME is `28.636363_MHz_XTAL / 4`. But it
+fetches its program out of SDRAM through a line buffer and stalls on a miss,
+which MAME does not model and the real board does not do.
+
+    rdfts   3.710% of clock enables stalled
+    rdft    4.175%
+
+**That is headroom being spent, not a tempo change**, and the difference between
+those two things was worth measuring rather than reasoning about -- the first
+draft of this section asserted the stall WAS the rate difference and was wrong.
+The music is paced by the YMF271's timer, not by the Z80's throughput: the CPU
+only has to arrive before the next tick, and it does. Elapsed time over the same
+span came out at core/MAME 1.00047 on rdfts, 0.99975 on rdft2 and 1.00147 on
+rdft -- a twentieth to a seventh of a percent, against a CPU losing four percent
+of its cycles.
+
+Where the stall does show is in how often the Z80 arrives late enough to find
+both timer flags set and acknowledge them together (0x13 = 0x3F): 121 times
+against MAME's 31 over rdft's 52 s. Rare, and it changes no note.
+
+### 51.10 What this does not cover
+
+* **rfjet and viprp1 have not been run**, only rdfts, rdft and rdft2.
+* **Nothing here ran on hardware.** It is a simulation of the same RTL, with the
+  same SDRAM arbiter and the same sample memory, and it is a stronger measurement
+  than the hardware one it replaces in every respect except that it is not the
+  board. The two are complementary: this catches what the chain hid, and only the
+  board catches what the framework does to the audio downstream of the core.
+* **MAME 0.289 cannot run rdft2 out of the box**: it wants three PLD dumps
+  (`rm81.u0529.bin`, `rm82`, `rm83`, 279 bytes each) that are not in circulation.
+  They are documentation -- nothing in the driver reads them -- so placeholders of
+  the right size get MAME past the check with a wrong-checksum warning. rdft2's
+  sample flash also has to have been programmed once; give MAME a writable
+  `-nvram_directory` and 500 emulated seconds and it runs its own ritual.
+* **The 47.95 s divergence on rdft is asserted to be the attract demo, not
+  proved.** The proof would be a second run reaching it at a different moment.
+  What is proved is that everything before it is identical.
+
+## 52. The nvram save is not firing spuriously -- except once per core load (2026-08-24)
+
+### 52.1 The suspicion, and why it was wrong
+
+The nvram file appeared to be written on every OSD open, and the obvious reading
+was that `ioctl_upload_req` is ungated -- that the core asks Main for a save
+whenever it is asked, and Main obliges. That reading is wrong twice over, and it
+is written down here because `spi_nvram.sv` is long enough that the next reader
+will arrive at it too.
+
+**The gate exists.** `spi_nvram.sv:413-430` raises `want_save` only when
+`sram_dirty` or `flash_dirty` MOVES, and then only after ~0.15 s of quiet. The
+request is a level that clears when Main starts the transfer, and it is
+deliberately never re-presented (the reasoning is at `:399-407`, and it is about
+an `-update` MRA with no `<nvram>` element turning a renewed request into an OSD
+stuck in a "Saving..." loop).
+
+**The dirty flag is honest.** `spi_ds2404.sv:379` toggles `nv_dirty` only inside
+the copy loop -- the game's own store into the bookkeeping SRAM. A LOAD writing
+all 512 bytes does not toggle it (`spi_ds2404.sv:122-124` says so, and
+`tb_ds2404` checks it), and neither does a savestate restore through `ss_ram_we`.
+
+**So the saves are real.** What writes the DS2404's SRAM during normal play is
+exactly what you would expect to: credits, game starts, the audit page behind the
+test menu's INCOME. Insert a coin and the file genuinely changes; asking Main to
+write it on the next OSD open is the mechanism working. **Nothing about the
+gating was changed, and nothing should be.**
+
+If this is ever revisited, the measurement that settles it is the file's mtime,
+not the RTL: open the OSD twice without touching the controls and it does not
+move; put a credit in between and it does.
+
+### 52.2 What WAS wrong: a reset that invented an edge
+
+Reading that path turned up one genuine defect, and it is an asymmetry between
+two modules that each reasoned correctly on its own.
+
+`spi_ds2404` does not clear `nv_dirty` on reset, ON PURPOSE -- the 512 bytes it
+tracks are battery-backed and survive one, so the flag that tracks them must too
+(`spi_ds2404.sv:510`). But `spi_nvram`'s reset block forced its own delayed copy
+`sdirty_d` to 0, and `dirty_d` with it. The two then disagreed across a reset:
+
+    reset high     sdirty_d forced to 0, while nv_dirty holds at 1
+    reset release  (sram_dirty != sdirty_d) is (1 != 0) -- an EDGE
+                   dirty_seen latches, the quiet timer runs out, want_save rises
+
+**One spurious save per core load, on the parity of a flag nobody controls.** An
+even number of SRAM bytes written since power-on and it does not happen; an odd
+number and it does.
+
+The effect was small enough that it had never been noticed: the file is written
+with correct contents, and the game rewrites its bookkeeping during boot anyway
+(50.9), so a legitimate request usually followed close behind. It is fixed
+because a phantom edge has no business in the one part of this design that
+reasons hardest about edges.
+
+**The fix is a deletion.** `dirty_d <= flash_dirty` and `sdirty_d <= sram_dirty`
+already run unconditionally at `:288-289`; the reset block was overriding them.
+Removing the override lets both delay flops track their inputs straight THROUGH
+reset, so at its release they agree with the current values and only a real
+change reads as one. What they feed -- `dirty_seen`, `quiet`, `want_save` -- stays
+reset, which is the part that actually matters: no stale request survives either.
+
+The two lines are replaced by a comment saying why they are absent, because
+putting them back is precisely the tidy-up a future reader would make.
+
+`tb_nvram` grew the case: hold both dirty flags high across a reset and require
+that no request appears in the 4,000 cycles after it. It fails on the old RTL
+with 3,743 cycles of request and passes on the new. It also caught a second
+thing on the way, which is the tell that the ordering is right -- the pending
+phantom was still latched when the `enable`-low block ran, and `ioctl_upload_req`
+is not gated on `enable`, so that test failed too. Both cleared together.
+
+### 52.3 The fit, and a baseline that was worth the ten minutes
+
+Cold at canonical SEED 3, `db/` deleted first, with the full stage list -- Shell,
+Shell, **Analysis & Synthesis**, Fitter, Assembler, TimeQuest -- so synthesis
+genuinely ran (37's rule).
+
+    setup  +0.033   sdram|ch4_rq~DUPLICATE -> SDRAM_A[8]
+    hold   +0.114   ds2404's SRAM block PORT_B_WRITE_ENABLE_REG -> ss_bridge data_out
+    TNS 0.000 on every clock, 0 errors, 1 critical warning (the pre-existing
+    ymf271_synth MIF depth one, from synthesis and unrelated)
+
+**Both watched paths are clear.** `spi_ds2404|*->arm[*]` does not appear in the
+worst 25 setup paths at all -- the multicycle constraint from 50 is holding --
+and the YMF ch5 hold path is not in the worst 10.
+
++0.033 is tighter than the +0.111 on record, which is why this got a baseline
+rather than a shrug: **the same tree refitted cold with `spi_nvram.sv` reverted
+to HEAD and nothing else changed.**
+
+                        setup                         hold
+    baseline  +0.079  mod_byte[0] -> part_base_r[24]  +0.132  ch5_arb -> ymf ext_data
+    with fix  +0.033  sdram ch4_rq -> SDRAM_A[8]      +0.114  ds2404 SRAM WE -> ss bridge
+
+**The binding endpoints are different in the two fits**, and neither has any
+logical connection to two deleted reset assignments in spi_nvram. That is the
+signature of placement noise, not of a cost. Both close everywhere. The tightness
+is the TREE's, not this change's -- the baseline sits at +0.079 without a line of
+it, so whatever squeezed clk_ram came from elsewhere in the working tree.
+
+The resource figures said the same thing more sharply, after first appearing to
+say the opposite:
+
+    post-fit   baseline 35,324 registers  36,303 ALMs
+               with fix 35,339 registers  36,457 ALMs   (+15, +154)
+
+Fifteen registers and 154 ALMs ADDED by a change that only deletes is not a
+result you write down without checking, and the plan for this work had claimed
+the edit "can only shrink logic". It cannot be read either way, because
+**Analysis & Synthesis produces the same netlist both ways**:
+
+    make map   baseline 33,421 registers      with fix 33,421 registers
+               0 errors, 271 warnings         0 errors, 271 warnings
+
+Identical before the fitter touches it. The whole delta is the fitter's own
+placement and duplication decisions on a cold build (it created 174 register
+duplicates in one and 156 in the other), which is the same cold-elaboration
+variance 37 recorded. The claim that the edit shrinks logic was unsupported and
+is withdrawn; what is measured is that it changes no logic at all.
+
+`output_files/SeibuSPI.rbf` is the fixed build, md5 `66a85d49`. **Not yet run on
+hardware** -- the observable there is a negative and needs a human: load a core
+with a good save file, open the OSD without touching the controls, and the file's
+mtime should not move; put a credit in and it should.
+
+## 53. Variable refresh: the pixel window moves, the raster does not (2026-08-24)
+
+Arcade-IremM72 has an OSD "Video Timing" option (Normal / 50 / 57 / 60 Hz) and
+an "Analog Video H-Pos / V-Pos" pair. This core had neither. Adding them is not
+a port, because M72 gets its rate change from `jtframe_frac_cen` -- a fractional
+pixel enable -- and that works there only because its whole video pipeline is
+one clock per pixel. Ours is not.
+
+### 53.1 Three routes, and the one the software cannot detect
+
+**Raising `clk_sys` is out**, and `rtl/pll.v:21-31` already said so: breaking the
+2:1 `clk_ram`:`clk_sys` ratio built at **-4.7 ns / TNS -999**, because
+`sys/sys_top.sdc` puts every core PLL output in one clock group. 60 Hz would
+want `clk_ram` at 127 MHz on top of that.
+
+**Changing the raster works, and the game can see it.** VBSTART stays 240, so
+every line added or removed comes out of the vertical blanking interval. 60 Hz
+means VTOTAL 266, which cuts blanking from 56 lines to 26 -- 3.5 ms to 1.6 ms --
+and SPI games run their sprite and tilemap DMA in the vblank handler. VTOTAL
+must also stay EVEN, because `spi_layers.sv:379` flips the display line-buffer
+bank on `vcnt[0]`.
+
+**Scaling the pixel window is invisible.** HTOTAL, VTOTAL, VBSTART, the count of
+blanked lines and the vblank DMA window measured in scanlines are all identical
+in every mode. Only wall-clock time changes. That is the one property worth
+having, so that is what was built.
+
+### 53.2 What made it cheap: the mixer saturates
+
+The render engines are not phase-locked to the /8 at all. `spi_layers` and
+`spi_sprite` take `clk`, `vcnt` and `line_start` and nothing else
+(`spi_layers.sv:47-52`, `spi_sprite.sv:50-54`) -- free-running state machines
+with a per-line *cycle* budget. Only `spi_mixer` counts cycles inside a pixel.
+
+And `spi_mixer.sv:270` is `else if (step != 3'd7) step <= step + 3'd1`. The step
+counter **saturates rather than wrapping**, and every stage held at step 7 is
+idempotent: `q_spr2 <= m6` re-evaluates on inputs that are stable, and
+`rgb_text <= pal_pen` re-reads the same `pen_text` because `pen_sel`'s default
+arm is `pen_text`. So a pixel LONGER than eight cycles already worked, untouched,
+and had done since the pipeline was built. Nothing slower than 53.99 Hz costs
+anything.
+
+A pixel SHORTER than eight truncates the schedule -- `rgb_fore` latches at step
+6 and `rgb_text` at step 7 -- and drops a layer. That is the whole reason 57 and
+60 Hz are not in the table yet; they need the schedule retimed to seven steps,
+which is a shift rather than a redesign (the palette read port is the real
+bottleneck at five cycles a pixel, and a 7-step schedule still puts at most two
+exact blends in series, so `spi_mixer.sv:213`'s 6 ns setup failure does not come
+back). Until then `pix_n_of` maps modes 2 and 3 to Normal, so a stale `.CFG`
+cannot corrupt the picture.
+
+### 53.3 The generator
+
+A Bresenham accumulator, `rtl/spi_video_timing.sv`: add `PIX_N` to a 12-bit
+register every `clk_sys` cycle and take the carry out as the pixel tick. The
+modulus is 4096 by construction, so "subtract m on overflow" is the natural wrap
+and the whole thing is one 12-bit adder with no comparator and no subtract.
+
+    mode      PIX_N   avg window   refresh    error
+    Normal      512     8.0000     53.9869    exact
+    50 Hz       474     8.6414     49.9800    -0.040%
+    (57 Hz)     541     7.5712     57.0447    +0.078%   needs the retime
+    (60 Hz)     569     7.1986     59.9971    -0.005%   needs the retime
+
+512/4096 is exactly 1/8, which is the point: the default path is bit-identical
+to the fixed `div` it replaced. The accumulator reaches 3584 on the eighth cycle
+and carries on the same edge `div == 3'd7` used to fire.
+
+Mode and offsets are latched at the frame wrap and nowhere else. Section 42 is
+what that rule is for.
+
+### 53.4 Analog H/V position
+
+`hoffset`/`voffset` move the sync pulses only; `hblank`/`vblank`, and therefore
+DE, are untouched. So they reposition the picture on an analog CRT or direct
+video and do nothing over HDMI, where the scaler re-locks on sync. That is the
+same behaviour as M72's option of the same name, and it is deliberate rather
+than a limitation.
+
+The pulse is clamped inside blanking. M72's `jtframe_resync` does not clamp,
+because at its geometry ±8 never reaches an edge; the clamp here costs a few
+LUTs and means no combination of mode and offset can push sync into active
+video -- which matters more once 57/60 Hz land and blanking is the same 56 lines
+but the sync sits in a shorter frame in wall-clock terms.
+
+The 4-bit field is two's complement and the OSD label shows the NEGATED value,
+copying M72 (`Arcade-IremM72.sv:246-247`): moving the sync pulse later moves the
+picture left, so the field the RTL sees and the direction the user asked for are
+opposites.
+
+### 53.5 `new_vmode` was tied to 0, and had to stop being
+
+`SeibuSPI.sv` passed `.new_vmode(0)` to `hps_io`. That is fine for a fixed-rate
+core and wrong the moment the rate moves: `sys/hps_io.sv:950-954` re-reports the
+video mode when the ACTIVE pixel counts change **or** when `new_vmode` toggles,
+and the active area here is 320x240 in every mode *by design*. Without the
+toggle Main keeps the stale refresh rate and never re-derives the HDMI PLL. M72
+has exactly this wiring for exactly this reason.
+
+### 53.6 What was measured
+
+`sim/tb_timing.cpp` (`make run-timing`, in `all` -- it needs no capture) drives
+`spi_video_timing` directly and checks the raster rather than the picture. This
+exists because **`make run-video` cannot see the frame rate**: it renders through
+one fixed mode, so an option that silently fell back to Normal would still pass
+it.
+
+    mode        cycles    pixels   refresh    window   sync
+    Normal      1060864   132608   53.9869    8..8     H373..409 V275..282
+    50 Hz       1145912   132608   49.9800    8..9     H373..409 V275..282
+    57 Hz n/i   1060864   132608   53.9869    8..8     (falls back, as intended)
+    60 Hz n/i   1060864   132608   53.9869    8..8     (falls back, as intended)
+
+The two lines that carry the design: **pixels per frame is 132608 in every
+mode** (448 x 296 -- the raster genuinely does not move), and **no window is
+ever shorter than 8** (50 Hz emits only 8s and 9s, never a 7). Normal is exactly
+132608 x 8 = 1060864 cycles, which is the bit-identity claim made good rather
+than asserted. The bench also sweeps all 16 offset codes in both modes and
+checks the pulse never leaves blanking.
+
+`make run-video` passes byte-identical at Normal **and at 50 Hz** -- 0 of 76800
+pixels differ against MAME's frame in both. That is what turns "a stretched
+pixel is safe because the counter saturates" from an argument about source into
+a measurement, per `seibuspi-measure-dont-reason`.
+
+And the bit-identity claim was checked against the tree rather than argued from
+it: `make run-boot` was run on this branch and again with the change stashed.
+
+    Z80 clock enables      : 1249749, of which stalled on SDRAM 43732 (3.499%)
+    main RAM hash          : 3252B42D04B9588C
+    EIP transitions        : 1817691
+    9 frames, 4096 non-black in the last
+
+Identical in both, to the digit. So at Normal the 386 sees the same vblank on the
+same cycle as before -- which is what "the accumulator carries on the same edge
+`div == 3'd7` fired" has to mean if it means anything.
+
+**Not yet run on hardware, and not yet fitted.** The observables there are the
+OSD video-info page reporting ~50 Hz in the 50 Hz mode, and H/V-Pos moving the
+picture on analog or direct video while doing nothing over HDMI.
+
+### 53.7 Phase 2 attempted: the mixer was never the constraint
+
+The plan for 57 and 60 Hz was to retime `spi_mixer` from an eight-step schedule
+to seven, which would let the pixel window drop below eight clk_sys cycles. That
+was done, and it worked exactly as predicted -- and the modes still do not fit,
+because the thing standing in the way was a different module.
+
+**The retime itself was correct.** Issue moved to steps 0-4, the latches to 2-6,
+the composite to steps 4,5,6,0,1, the publish stayed at step 2, and the step
+counter saturated at 6 instead of 7. Measured against `ce_pix` nothing moved at
+all: the last latch and `q_spr2` still land on the `ce_pix` cycle, `q_spr3` one
+after, `q_text` two, the publish three. The two cycles removed were the two that
+issued reads nothing latched. `make run-video` stayed **byte-identical at
+Normal** with the retimed schedule running 8- and 9-cycle windows against a
+7-step counter, which is the idempotent-hold argument made good.
+
+**Then 60 Hz broke the picture: 686 of 76800 pixels, and 57 Hz broke 4.** The
+tell was not in the mixer at all:
+
+    render-bank flips at (vcnt,hcnt): (0,0) (1,2) (2,3) (3,0) ... (9,3) (10,1)
+
+`lb_bank` is `spi_layers`' `render_bank` (`spi_layers.sv:368`), and it flips only
+on the DEFERRED restart at `:451` -- the one that waits for a tile boundary
+because a line's rendering overran. At Normal every flip is at `hcnt` 0. At 57
+and 60 Hz they scatter, which is the layer renderer being cut off mid-line.
+
+**The measurement that settles it, and the estimate it demolishes.** `run-video`
+now reports per-line renderer occupancy directly (rdfts, FRAME=2400):
+
+    line budget: 3584 cycles available, renderer busy 3247, finished=yes
+    renderer occupancy: worst line 45 busy 3584 of 3584 (100.0%), mean 3336 (93.1%)
+    busiest: L45:3584/3584 L49:3584/3584 L53:3584/3584 L41:3582/3584
+
+The renderer is **saturated at the board's own dot clock.** It fits, with
+nothing whatever to spare. `spi_layers.sv`'s budget comment claimed roughly
+2500 of 3584 -- about 30% headroom -- and that estimate is what made this look
+reachable. It missed that the emit side dominates, not SDRAM: 320 pixels x 4
+tile layers is 1280 emit cycles that cannot be compressed at one pixel per
+cycle, the clear takes 320 more, and the sprite engine emits into the same line
+and contends for the same SDRAM. The comment has been corrected in place with
+the measured figures, because it will otherwise mislead the next reader exactly
+as it misled this plan.
+
+A 7-cycle pixel makes the line 3136 cycles and takes 448 the renderer already
+needs. There is no retiming of the mixer that recovers them.
+
+**So the retime was reverted**, along with the `pix_win_min` export and the
+`spr_budget` plumbing that existed only to size the sprite cap for a shorter
+line. They solve a problem that cannot be reached, and `spi_mixer` is the most
+delicate module in the core to carry dead complexity in. Redoing the retime is
+mechanical if the renderer is ever made faster -- the schedule is written out
+above, and the frame diff is the gate.
+
+**What is now known about the ceiling.** Slower than 53.99 Hz is free and needs
+nothing. Faster cannot come out of the LINE. It can only come out of the FRAME
+-- fewer scanlines -- and that has the cost this whole section was written to
+avoid: VBSTART stays at 240, so every line removed comes out of vertical
+blanking, and 60 Hz (VTOTAL 266) cuts the vblank window from 3.5 ms to 1.6 ms
+with the game's sprite and tilemap DMA inside it. That is a real trade rather
+than a free one, and it is not mine to make silently.
+
+One consolation if it is ever taken: the renderer does NOT need the blanked
+lines. `spi_layers.sv:136` points `next_line` at line 0 for the whole of
+vblank, so those 56 lines are spent re-rendering the same line redundantly.
+Removing 30 of them costs the renderer nothing at all -- the cost falls
+entirely on the 386's DMA window.
+
+### 53.8 The tile engine's 56 redundant renders, and the trap in fixing them
+
+A standing code-review note observed that `spi_layers`' `next_line` pins to 0 for
+the whole of vertical blanking, so lines 240..295 each restart and re-render the
+same line 0 -- 104 tiles and ~200 SDRAM reads, 56 times over -- and suggested a
+one-line guard, `restart only if next_line != render_line`. The question was
+whether fixing it would help 57/60 Hz.
+
+**It does not, and the measurement says so twice.** The redundant passes are on
+blanked lines; the saturation that blocks a shorter pixel window is on active
+lines 41-53. The renderer restarts per line, so work skipped during blanking
+hands no cycles to an active line. `run-video`'s occupancy report, split active
+vs blanked, before and after the fix:
+
+    before   active 0-239: 3370/line     blanked 240-295: 3193/line
+    after    active 0-239: 3370/line     blanked 240-295:   57/line
+
+Active occupancy is **identical to the cycle**. The 57/60 Hz ceiling is exactly
+where it was.
+
+The second hope was that it would buy back the vblank DMA window -- the cost of
+the VTOTAL route -- by freeing SDRAM while the 386 is running its transfers. It
+cannot: `spi_mainram.sv` is on-chip M10K and the DMA shares the CPU's port
+there, so **the video DMA never touches SDRAM at all**. There is no contention
+to relieve.
+
+**The suggested guard would have introduced a bug, and it is worth writing down
+because nothing in the test suite catches it.** The pass that matters is the
+LAST one, not the first. The renderer draws line 0 during line 239; the 386's
+vblank handler then DMAs the new tilemap in on line 240 -- measured, every
+frame, by a scanline tap added to `tb_boot`:
+
+    tilemap DMA triggers   : 3
+      landed on lines      : 240(vbl) 240(vbl) 240(vbl)
+
+So `next_line != render_line` alone keeps only the pre-DMA pass and line 0 shows
+the PREVIOUS frame's tilemap: a one-scanline-stale top row, every frame the
+tilemap moves. `make run-video` is blind to it -- it renders from a frozen VRAM
+snapshot, where the early and late passes produce identical pixels.
+
+The guard actually applied keeps the pass on the final blanked line:
+
+    !redundant_pass || last_blank_line
+
+Two passes a frame instead of 56, and the one the display consumes is still the
+last one before the wrap, after the DMA. `restart_req` is deliberately left
+standing on a skipped pass rather than cleared -- `line_start` re-raises it every
+line anyway -- and it stays ONE `if` with the `else case (state)` hanging off it,
+because splitting it lets the state machine advance on a cycle the restart owns.
+
+**It is not cycle-neutral for the CPU, and that is the point of doing it.** Frame
+still byte-exact, every render-bank flip still at `hcnt` 0, but `run-boot`'s
+trace moves: EIP transitions 1817691 -> 1817772 and the main RAM hash with it.
+Roughly 175,000 clk_sys cycles a frame of SDRAM traffic stop being spent on
+redraws nobody sees, and the 386's prefetch and the Z80 get them instead.
+
+### 53.9 Making the reclocking viable: the renderer was waiting, not working
+
+53.7 concluded that 57/60 Hz could not come out of the line because the layer
+renderer was saturated -- 3584 of 3584 cycles on the worst line. That was true
+and it was the wrong conclusion to stop at. Saturated is not the same as busy.
+A state histogram of the sequencer, per active line, says where the cycles went:
+
+    IDLE:213  TM_REQ:103 TM_WT:103 TM_LAT:103
+    GA_REQ:103 GA_WT:747  GB_REQ:83 GB_WT:670
+    EMIT:1335  NEXT:103
+
+**1417 cycles waiting for graphics data, against 1335 actually emitting
+pixels.** And only 29 of those 1417 were bus contention with the sprite engine
+(the bench tracks that separately) -- the rest is raw round-trip latency on two
+blocking reads per tile, taken one after the other with the bus idle through the
+whole emit. The engine was not short of bandwidth. It was short of overlap.
+
+**Change 1: fetch the high half under the emit.** A tile row is 12 bytes out of
+a 128-bit window, so `spi_layers` reads the low 64 bits, then the high 64, then
+emits. But `row_bytes` is `win >> 8*offset` and group *g* is
+`row_bytes[24g+23 : 24g]`, so the high half is not needed until group 2 (offset
+0) or group 1 (offset 4) -- four to eight emit cycles in, against a round trip
+of about eight. So the request is issued the moment the low half lands and the
+emit starts immediately, stalling only at the group that actually needs it
+(`need_gfx_b` / `gfx_b_rdy`). S_GB_REQ and S_GB_WT are gone.
+
+The safety property that makes it sound: the LAST group needs the high half in
+every case that issues the read, so the emit cannot run to completion with the
+request still outstanding and hand the next tile's S_TM_REQ a toggle already in
+flight. (Text at offset <= 2 needs neither group from it, and skips the read
+entirely -- that path was already there.)
+
+    worst line 3584 -> 3249,  mean 3370 -> 2856
+
+**Change 2: read the next tile's tilemap word under the emit too.** The trick
+is that `col` can be advanced at emit entry -- the emit reads it once, to seed
+`emit_x`, and never again -- so `cur_col`/`tile_index` already name the next
+tile and the prefetch needs no duplicate index arithmetic. A three-step counter
+(`pf`) issues the read and captures `tword_n` independently of `emit_i`, so an
+emit stall cannot re-issue or mistime it. S_NEXT then swaps `tword_n` in and
+goes straight to S_GA_REQ; the tilemap chain is walked only for the first tile
+of a layer now.
+
+    worst line 3249 -> 2863,  mean 2856 -> 2558
+    TM_REQ/WT/LAT: 312 cycles a line -> 12
+
+**Then the mixer retime went back in.** 53.7 reverted it as dead complexity, and
+that was right at the time and wrong now: with the renderer fitting, a 7-cycle
+pixel is reachable and the mixer is the floor again. Re-applied exactly as 53.7
+recorded it -- issue at steps 0-4, latch at 2-6, composite at 4,5,6,0,1, publish
+at 2, counter saturating at 6.
+
+**All four modes now render byte-identical frames.**
+
+    mode      cycles    pixels   refresh    window   run-video
+    Normal   1060864    132608   53.9869    8..8     0/76800 differ
+    50 Hz    1145912    132608   49.9800    8..9     0/76800 differ
+    57 Hz    1003997    132608   57.0447    7..8     0/76800 differ
+    60 Hz     954591    132608   59.9971    7..8     0/76800 differ
+
+At 60 Hz a line is 3225 cycles and the worst line finishes in 2863 -- 88.8%,
+about 360 to spare -- with every render-bank flip back at `hcnt` 0 (no deferred
+restarts) and no sprite starvation. The raster is untouched in every mode:
+448x296, 56 blanked lines, 132608 pixel ticks a frame. The game still cannot
+tell which mode it is in.
+
+**What is still on the table.** `GA_WT` is 792 cycles a line and is now the
+biggest non-emit item; hiding it needs a one-tile lookahead on the graphics
+fetch, with shadow copies of `tword`/`gfx_a` and duplicated address arithmetic.
+That is the move if a mode above 60 Hz is ever wanted -- along with
+`spi_sprite`'s `BUDGET`, a fixed 3200 that fits inside a 60 Hz line by only 24
+cycles.
+
+**Not fitted, not on hardware.** The margin above is one capture (rdfts,
+FRAME=2400, the busy title scene). Occupancy is scene-dependent and a heavier
+game could sit closer to the line; the observable is sprites or tile columns
+dropping at 60 Hz that are clean at Normal.

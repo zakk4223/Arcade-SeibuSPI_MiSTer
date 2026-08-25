@@ -398,9 +398,17 @@ module spi_sprite
 	reg [15:0] nz_cnt;    // non-zero codes seen on the line in progress
 	reg [31:0] or_acc;    // OR of every sprite-RAM dword seen on that line
 
-	// A line is 448 * 8 = 3584 cycles. The clear takes 320, and the list walk
-	// now overlaps the drawing instead of preceding it, so essentially all of
-	// this is available for pixel fetches.
+	// A line is 448 * (the pixel window) cycles: 3584 at the board's own dot
+	// clock, and 3224 at the fastest mode the OSD offers (60 Hz, PLAN.md 53).
+	// The clear takes 320, and the list walk now overlaps the drawing instead of
+	// preceding it, so essentially all of this is available for pixel fetches.
+	//
+	// 3200 still fits inside the SHORTEST line the table can produce, but only
+	// by 24 cycles. It is a fixed constant rather than a function of the mode
+	// because it fits; add a faster mode than 60 Hz and it stops fitting, the
+	// cap stops expiring on its own, and line_start starts cutting the drawer
+	// off wherever it happens to be -- which is the uncontrolled overrun this
+	// exists to prevent. tb_timing asserts the window floor that keeps it true.
 	localparam [11:0] BUDGET = 12'd3200;
 
 	// ------------------------------------------------------------------
@@ -593,6 +601,38 @@ module spi_sprite
 
 			// Blank the buffer we are about to draw into.
 			S_CLR: begin
+				// 320 cycles a line, purely to put valid=0 everywhere. It is a
+				// real cost -- 10% of BUDGET -- and the obvious saving does not
+				// work, so here is why before someone tries it again.
+				//
+				// The idea: drop the clear, replace the valid bit with a 1-bit
+				// generation tag that flips each time a bank is reused, and let
+				// the mixer test tag == expected. The buffer is double-banked,
+				// so (the argument runs) a stale entry is always exactly two
+				// lines old and its tag cannot match.
+				//
+				// IT IS NOT ALWAYS TWO LINES OLD. E_RUN below writes only
+				// pixels that are non-transparent AND on screen, so an uncovered
+				// column is not stale-by-two -- on most of the screen it has
+				// NEVER been written. Those entries hold the M10K power-up 0
+				// forever, so on every line whose expected tag is 0 the whole
+				// uncovered screen reads back valid. And it draws OPAQUELY: the
+				// valid bit IS the sprite transparency test in spi_mixer
+				// (v_spr = lb_spr[14]; the != 63 filter already happened here),
+				// so that is a screenful of sprite pen 0 -- white, in the SXX2E
+				// test menu -- on half the scanlines.
+				//
+				// The sound version keeps the valid bit AND adds the tag, at 16
+				// bits: never-written stays valid=0, two-lines-old has valid=1
+				// with the wrong tag, this line matches. The width is free --
+				// spi_dpram is 1024x15 here, which already fills the same two
+				// M10Ks as 1024x16 would. Not done: there is no measured
+				// starvation to fix (run-video reports 0 starved lines since the
+				// scanner/drawer split), and it does nothing for the refresh
+				// ceiling -- the layer engine stalls on SDRAM 29 cycles a line
+				// out of 3370, so it is emit-bound and sprite cycles are not
+				// what it is short of. PLAN.md 53.7.
+				//
 				// render_bank, NOT ~render_bank: spi_layers writes
 				// {render_bank, x} and the mixer reads {~render_bank, x} while a
 				// line is on screen. Writing the inverted bank here meant the

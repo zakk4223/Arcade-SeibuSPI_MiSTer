@@ -11,8 +11,11 @@ reflash is a third of a second, built by the core.
 **The rendered frame is bit-exact against MAME** — every one of 76,800 pixels,
 on two independent captures with different register state, plus ten rdft2
 scenes and eleven rfjet ones. **All seven sets boot and run on real hardware**,
-and **`rdft2`'s sound has been matched against MAME** over two minutes of
-attract (envelope r = 0.951, spectrum r = 0.993, zero dropouts). The hardware
+and **the sound path is matched against MAME in simulation on three sets** —
+`rdfts`, `rdft` and `rdft2` — where the sound CPU writes the YMF271 the same
+values in the same order MAME's does, on every register that carries a note, for
+as long as the attract sequence stays in step (48 s on `rdft`). Long-term
+spectrum r is 0.9996 or better on all three. `PLAN.md` 51. The hardware
 ROM checker verifies all four regions on the board (`ok bits 1111` on rdfts;
 its expected sums are still rdfts-only, so other sets are checked by comparing
 the sums it reports against the reference image instead). See `PLAN.md` for the
@@ -33,19 +36,22 @@ full design notes and the task list.
 | YMF271 PCM synthesis (12 voices) | verified in simulation, music plays on hardware |
 | YMF271 FM (4-op, 2x2-op, 3-op, all 16 algorithms, feedback) | verified in simulation |
 | YMF271 LFO (pitch and amplitude) | verified in simulation |
-| Sound output as a whole | **matched against MAME's own audio on hardware** (`rdft2`, `rfjet`) |
+| Sound output as a whole | **matched against MAME on hardware** (`rdft2`, `rfjet`) and, since the tv80 swap, **in simulation** — same YMF271 register writes, spectrum r ≥ 0.9996 (`make -C sim run-sound`) |
 
 Known gaps, all in the sound chip and none of them silent-failure risks: PCM
 interpolation and a handful of register fields nothing writes. `PLAN.md`
 section 14.5 lists them in order of how likely they are to be heard, and says
 for each one why it is deliberate rather than pending.
 
-One known divergence with a decision behind it: **the SPI cartridge board is
-stereo and this core is mono**. MAME routes YMF output 0 to the left speaker
-and 1 to the right for `rdft`/`rdft2`, while SXX2E sums everything to one
-speaker — so `rdfts` is right as it stands and the two cartridge sets are not.
-Measured, not assumed: hardware side/mid is −73.7 dB against MAME's −14.5 dB.
-The music itself matches; this is fidelity. `PLAN.md` T-K.
+**The cartridge sets are stereo and the single board is mono, the way MAME has
+them.** MAME routes YMF output 0 to the left speaker and 1 to the right for
+`rdft`/`rdft2`, while SXX2E sums everything to one speaker. This used to be a
+recorded divergence — the core summed the cartridge sets to mono, at −73.7 dB
+side/mid against MAME's −14.5 — and it was fixed in `PLAN.md` T-K. Measured
+again on the same passage rather than against a whole reference, the core reads
+**−16.8 dB against MAME's −16.8** on `rdft`, with left and right within 0.5% of
+MAME's levels. That also retires the 4.1 dB gap `PLAN.md` 51.8 inherited as
+undiagnosed: it was two different passages being compared, not a narrower mix.
 
 ## Installing
 

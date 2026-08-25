@@ -190,6 +190,24 @@ wire [2:0] scandoubler_fx  = status[5:3];
 wire [1:0] scale           = status[7:6];
 wire       orientation_vert = ~status[10];   // default 0 => vertical
 wire       rotate_cw       = status[11];
+wire [1:0] video_mode      = status[13:12];
+wire [3:0] hoffset         = status[17:14];
+wire [3:0] voffset         = status[27:24];
+
+// A refresh-rate change has to be reported to the HPS, and nothing else will
+// do it. hps_io's video_calc re-reports when the ACTIVE pixel counts change or
+// when new_vmode toggles (sys/hps_io.sv:950-954) -- and the active area here is
+// 320x240 in every mode by design, since the option scales the pixel window and
+// leaves the raster alone. So without this toggle Main keeps the stale refresh
+// rate and the HDMI PLL is never re-derived.
+reg [1:0] video_mode_r = 0;
+reg       new_vmode = 0;
+always @(posedge clk_sys) begin
+	if (video_mode_r != video_mode) begin
+		video_mode_r <= video_mode;
+		new_vmode    <= ~new_vmode;
+	end
+end
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -214,6 +232,24 @@ localparam CONF_STR = {
 	"P1-;",
 	"P1O[10],Orientation,Vert,Horz;",
 	"P1O[11],Rotation,CCW,CW;",
+	"P1-;",
+	// The refresh option scales the PIXEL WINDOW, not the raster: 448x296 with
+	// 56 blanked lines in every mode, so the game cannot observe which one is
+	// picked -- only wall-clock time changes. rtl/spi_video_timing.sv has the
+	// arithmetic, and the reason the table stops at the board's own rate: the
+	// layer renderer is saturated at 8 cycles a pixel (100% of the worst line),
+	// so a shorter window takes time it already needs. PLAN.md 53.7.
+	"P1O[13:12],Video Timing,Normal(54Hz),50Hz,57Hz,60Hz;",
+	// Sync position only, so these move the picture on an analog CRT or direct
+	// video and deliberately do nothing over HDMI, where the scaler re-locks.
+	// The label list is ordered so the raw 4-bit field is already two's
+	// complement while the label shows the negated value -- moving sync later
+	// moves the picture left/up. Same convention as IremM72.
+	"P1O[17:14],Analog Video H-Pos,0,-1,-2,-3,-4,-5,-6,-7,8,7,6,5,4,3,2,1;",
+	// V-Pos is NOT contiguous with H-Pos: an O[a:b] range has to be one run of
+	// bits, and 18..21 would swallow the two retired bits documented below.
+	// 22 is Sample Flash, so the next free run of four is 24..27.
+	"P1O[27:24],Analog Video V-Pos,0,-1,-2,-3,-4,-5,-6,-7,8,7,6,5,4,3,2,1;",
 	"-;",
 	// O[20] was the Vital Signs Panel and O[21] the Freeze Button switch. Both
 	// are gone -- the panel with the telemetry (PLAN.md 29), the switch because
@@ -320,7 +356,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.direct_video(direct_video),
 
 	.forced_scandoubler(forced_scandoubler),
-	.new_vmode(0),
+	.new_vmode(new_vmode),
 	.video_rotated(video_rotated),
 
 	.buttons(buttons),
@@ -1294,6 +1330,10 @@ spi_top spi_top
 	.inputs       (spi_inputs),
 	.system       (spi_system),
 	.coin         (spi_coin),
+
+	.video_mode   (video_mode),
+	.hoffset      (hoffset),
+	.voffset      (voffset),
 
 	.ce_pix       (ce_pix),
 	.red          (core_r),

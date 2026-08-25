@@ -31,11 +31,23 @@
 //  MAME's own table is an approximation (its TODO says as much); we reproduce
 //  it exactly rather than inventing something different.
 //
-//  The composite is PIPELINED across the eight clk_sys cycles a pixel lasts.
-//  Ten blend steps of exact arithmetic in one combinational chain does not
-//  close timing -- that is why this was a plain average for a long time -- but
-//  the chain only has to produce one result per pixel, so there are seven
-//  spare cycles to spread it over. See "Composite pipeline" below.
+//  The composite is PIPELINED across the clk_sys cycles a pixel lasts. Ten
+//  blend steps of exact arithmetic in one combinational chain does not close
+//  timing -- that is why this was a plain average for a long time -- but the
+//  chain only has to produce one result per pixel, so the spare cycles are
+//  there to spread it over. See "Composite pipeline" below.
+//
+//  A PIXEL IS SEVEN CYCLES, NOT EIGHT. It was eight -- the board's dot clock is
+//  clk_sys/8 -- and the schedule had two cycles in it that issued reads nothing
+//  latched. Those were spent to buy the OSD refresh option (PLAN.md 53): the
+//  pixel window is a fractional cen now, and anything faster than the board's
+//  53.99 Hz needs a window under eight cycles. Seven is the floor this schedule
+//  reaches, set by the palette RAM's single read port -- five reads a pixel,
+//  plus the two-cycle issue-to-data latency the last of them is latched after.
+//
+//  Windows LONGER than seven need no special case: `step` saturates at 6 rather
+//  than wrapping and every stage held there is idempotent, which is what lets
+//  one schedule serve 50 Hz (windows of 8 and 9) and 60 Hz (7 and 8) alike.
 //
 //  Palette entries are BGR555 packed two per RAM word:
 //      bits [14:0] = even pen, [29:15] = odd pen, each R[4:0] G[9:5] B[14:10]
@@ -117,20 +129,26 @@ module spi_mixer
 	// one. (Sprites used to be fetched last, which is why the whole chain had
 	// to be evaluated in a single cycle.)
 	//
-	// Two facts about the step counter, both easy to get wrong:
+	// Three facts about the step counter, all easy to get wrong:
 	//
-	// * `step` lags `div` in spi_video_timing by one cycle, because ce_pix is
-	//   registered there and `step <= 0` is registered here. So step 7 is the
-	//   FIRST clk_sys cycle of an hcnt period and steps 0-6 follow it. lb_* is
-	//   a registered line-buffer read off hcnt, so it settles one cycle after
-	//   hcnt moves -- which lands it exactly on step 0. Every step from 0 to 7
-	//   in sequence therefore sees the same pixel's lb_*, and any of them may
-	//   be used to fetch. Steps 1-5 are used here purely to leave the tail of
-	//   the composite room before the ce_pix that samples the output.
+	// * `step` lags the pixel tick in spi_video_timing by one cycle, because
+	//   ce_pix is registered there and `step <= 0` is registered here. So step 6
+	//   is the FIRST clk_sys cycle of an hcnt period -- the cycle ce_pix is high
+	//   -- and steps 0-5 follow it. hcnt advances on the same edge that raises
+	//   ce_pix and lb_* is a registered line-buffer read off hcnt, so lb_*
+	//   settles one cycle after: it lands on step 0 and holds through step 6.
+	//   During step 6 lb_* is therefore still the pixel being FINISHED, not the
+	//   one hcnt has moved to, which is what makes latching t_text there right.
 	// * A colour written by the case below at "step N" is captured on the edge
 	//   ENDING step N, so it is readable from step N+1, not during step N.
 	//   Reading one step early shifts the whole picture a pixel and is the
 	//   first thing to check if the frame diff comes back with dx=1.
+	// * `step` SATURATES at 6 instead of wrapping, so a window longer than seven
+	//   cycles simply holds there. Every action at step 6 is idempotent:
+	//   pen_sel's default arm is pen_text, so pal_addr keeps naming the same
+	//   entry and rgb_text re-latches the same value, and `q_spr2 <= m6`
+	//   re-evaluates on registers nothing rewrites until the next pixel. Do not
+	//   put anything at step 6 that is not safe to run twice.
 	// ------------------------------------------------------------------
 	reg [2:0] step;
 	reg [14:0] rgb_back, rgb_midl, rgb_fore, rgb_text, rgb_spr;
@@ -138,13 +156,14 @@ module spi_mixer
 	reg [12:0] pen_sel;
 	always @* begin
 		case (step)
-			3'd1: pen_sel = pen_spr;
-			3'd2: pen_sel = pen_back;
-			3'd3: pen_sel = pen_midl;
-			3'd4: pen_sel = pen_fore;
-			3'd5: pen_sel = pen_text;
-			// Steps 0, 6 and 7 issue reads nothing latches. Holding pen_text
-			// through them is a don't care that costs no extra mux input.
+			3'd0: pen_sel = pen_spr;
+			3'd1: pen_sel = pen_back;
+			3'd2: pen_sel = pen_midl;
+			3'd3: pen_sel = pen_fore;
+			3'd4: pen_sel = pen_text;
+			// Steps 5 and 6 issue reads nothing latches. Holding pen_text
+			// through them costs no extra mux input, and it is what makes a
+			// held step 6 idempotent.
 			default: pen_sel = pen_text;
 		endcase
 	end
@@ -257,17 +276,17 @@ module spi_mixer
 			// Issued at step N, latched at the edge ending step N+2, so the
 			// value is readable from step N+3 on.
 			case (step)
-				3'd3: begin rgb_spr  <= pal_pen; a_spr  <= alpha_of(pen_spr);
+				3'd2: begin rgb_spr  <= pal_pen; a_spr  <= alpha_of(pen_spr);
 				            v_spr <= spr_valid; p_spr <= spr_pri; end
-				3'd4: begin rgb_back <= pal_pen; a_back <= alpha_of(pen_back); t_back <= trans_back; end
-				3'd5: begin rgb_midl <= pal_pen; a_midl <= alpha_of(pen_midl); t_midl <= trans_midl; end
-				3'd6: begin rgb_fore <= pal_pen; a_fore <= alpha_of(pen_fore); t_fore <= trans_fore; end
-				3'd7: begin rgb_text <= pal_pen; a_text <= alpha_of(pen_text); t_text <= trans_text; end
+				3'd3: begin rgb_back <= pal_pen; a_back <= alpha_of(pen_back); t_back <= trans_back; end
+				3'd4: begin rgb_midl <= pal_pen; a_midl <= alpha_of(pen_midl); t_midl <= trans_midl; end
+				3'd5: begin rgb_fore <= pal_pen; a_fore <= alpha_of(pen_fore); t_fore <= trans_fore; end
+				3'd6: begin rgb_text <= pal_pen; a_text <= alpha_of(pen_text); t_text <= trans_text; end
 				default: ;
 			endcase
 
 			if (ce_pix) step <= 3'd0;
-			else if (step != 3'd7) step <= step + 3'd1;
+			else if (step != 3'd6) step <= step + 3'd1;
 		end
 	end
 
@@ -275,21 +294,28 @@ module spi_mixer
 	// Composite pipeline
 	//
 	// MAME's ten composite steps, spread over five clk_sys cycles instead of
-	// crammed into one. Only one result per pixel is needed and a pixel is
-	// eight cycles long, so the spare cycles are free; what they buy is the
-	// exact 127/129 blend, which does not fit as a single chain.
+	// crammed into one. Only one result per pixel is needed, so the cycles the
+	// fetch does not want are free; what they buy is the exact 127/129 blend,
+	// which does not fit as a single chain.
 	//
-	//   step 5  q_spr0 = m0, m1, m2   back, sprite pri 0, back again
-	//   step 6  q_midl = m3, m4      sprite pri 1 (fore on), midl
-	//   step 7  q_spr2 = m5, m6      sprite pri 1 (fore off), sprite pri 2
+	// The whole schedule moved down one step when the pixel went from eight
+	// cycles to seven, and MEASURED AGAINST ce_pix nothing moved: the last latch
+	// and q_spr2 still land on the ce_pix cycle, q_spr3 one after it, q_text
+	// two, the publish three. The two cycles that went were the two that did
+	// nothing -- which is why the frame diff is untouched by the retime, and the
+	// first thing to re-derive if it ever is not.
+	//
+	//   step 4  q_spr0 = m0, m1, m2   back, sprite pri 0, back again
+	//   step 5  q_midl = m3, m4      sprite pri 1 (fore on), midl
+	//   step 6  q_spr2 = m5, m6      sprite pri 1 (fore off), sprite pri 2
 	//   step 0  q_spr3 = m7, m8      fore, sprite pri 3      (next pixel's
 	//   step 1  q_text = m9          text                     step numbers)
 	//   step 2  published to red/green/blue
 	//
 	// The tail runs during the next pixel's steps 0 and 1, which is safe
 	// because every source it reads is a register that the next pixel does not
-	// overwrite until later: rgb_fore is rewritten at step 6, rgb_spr at
-	// step 3, rgb_text at step 7. So no stage ever mixes two pixels' data --
+	// overwrite until later: rgb_fore is rewritten at step 5, rgb_spr at
+	// step 2, rgb_text at step 6. So no stage ever mixes two pixels' data --
 	// the fault section 13a is about -- and the published result still lands
 	// well before the ce_pix edge that samples it, leaving the output phase
 	// and the callers' two-pixel lead exactly as they were.
@@ -313,14 +339,14 @@ module spi_mixer
 	// two are only the same when pen 0 happens to be black. In the SXX2E test
 	// menu pen 0 is 0x7FFF, so reading the palette here painted the whole
 	// screen white and left the (correctly rendered) text sitting on white.
-	// stage 1, step 5
+	// stage 1, step 4
 	wire [23:0] m0 = en_back ? cback : 24'h000000;                        // opaque
 	wire [23:0] m1 = draw_spr0                ? blend(m0, cspr,  a_spr)  : m0;
 	wire [23:0] m2 = (back_redraw && !t_back) ? blend(m1, cback, a_back) : m1;
-	// stage 2, step 6
+	// stage 2, step 5
 	wire [23:0] m3 = (en_fore && draw_spr1)   ? blend(q_spr0, cspr, a_spr) : q_spr0;
 	wire [23:0] m4 = (en_midl && !t_midl)     ? blend(m3, cmidl, a_midl) : m3;
-	// stage 3, step 7
+	// stage 3, step 6
 	wire [23:0] m5 = (!en_fore && draw_spr1)  ? blend(q_midl, cspr, a_spr) : q_midl;
 	wire [23:0] m6 = draw_spr2                ? blend(m5, cspr,  a_spr)  : m5;
 	// stage 4, step 0
@@ -333,9 +359,9 @@ module spi_mixer
 	// and are still held. At most two exact blends sit in series in any of them.
 	always @(posedge clk) begin
 		case (step)
-			3'd5: q_spr0 <= m2;
-			3'd6: q_midl <= m4;
-			3'd7: q_spr2 <= m6;
+			3'd4: q_spr0 <= m2;
+			3'd5: q_midl <= m4;
+			3'd6: q_spr2 <= m6;
 			3'd0: q_spr3 <= m8;
 			3'd1: q_text <= m9;
 			default: ;
@@ -345,8 +371,9 @@ module spi_mixer
 	// q_text is complete at the end of step 1 and holds until step 1 of the
 	// pixel after. Publishing at step 2 is one clk_sys cycle later than the
 	// pre-pipeline mixer published, which is a fraction of a pixel: the value
-	// is stable across steps 3-7 either way, so the ce_pix edge that samples it
-	// sees the same colour for the same pixel. Callers still lead lb_x by two.
+	// is stable across steps 3-6 (and any held 6) either way, so the ce_pix edge
+	// that samples it sees the same colour for the same pixel. Callers still
+	// lead lb_x by two.
 	//
 	// No blanking here. `visible` refers to the pixel being *displayed*, but the
 	// pixel being *composited* is two ahead, so gating on it blacked out the

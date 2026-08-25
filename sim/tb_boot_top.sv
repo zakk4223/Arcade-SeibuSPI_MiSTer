@@ -59,10 +59,44 @@ module tb_boot_top
 	output            z80dl_sdr_req,
 	input             z80dl_sdr_ack,
 
+	// ch5, the YMF271's PCM sample fetch. It used to be tied off here, which
+	// was harmless only while sim/T80s.sv was a stub and the sound board never
+	// ran. tv80 executes, so the chip really does fetch samples now and an
+	// unanswered ch5 would measure a synthesiser that is starving rather than
+	// one that is wrong. PLAN.md 51.
+	output     [25:0] sdr_pcm_addr,
+	input      [63:0] sdr_pcm_dout,
+	output            sdr_pcm_req,
+	input             sdr_pcm_ack,
+
+	// The sound board's output, and the Z80's YMF271 register writes. The
+	// audio is sampled on the chip's own 44.1 kHz tick, so a WAV written from
+	// it is the chip's rate exactly. Nothing resamples on this side, which is
+	// one of the two things 19.4's hardware capture could not rule out.
+	output     [15:0] p_audio_l,
+	output     [15:0] p_audio_r,
+	output            p_snd_tick,
+	output            p_ymf_wr,
+	output      [3:0] p_ymf_addr,
+	output      [7:0] p_ymf_din,
+	// The Z80's clock enable and its WAIT. The core's sound CPU runs at the
+	// same 7.159 MHz MAME clocks it at, but it fetches out of SDRAM through a
+	// line buffer and stalls on a miss, which MAME does not model and the real
+	// board does not do. Counting it is what says how much headroom that costs
+	// -- 4.175% of clock enables on rdft, and NOT a tempo change, because the
+	// music is paced by the YMF271's timer rather than by the Z80. PLAN.md 51.
+	output            p_z80_ce,
+	output            p_z80_stall,
+
 	// probes
 	output            p_io_wr,
 	output      [8:0] p_io_addr,
 	output     [31:0] p_io_wdata,
+	output      [3:0] p_io_be,
+	// Where in the frame the DMA lands. The tile engine renders line 0 during
+	// vertical blanking, so whether a tilemap DMA arrives before or after that
+	// render decides whether line 0 shows this frame's data or last frame's.
+	output      [9:0] p_vcnt,
 	output            p_dma_tilemap,
 	output            p_dma_palette,
 	output            p_dma_sprite,
@@ -163,8 +197,6 @@ module tb_boot_top
 );
 
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire [25:0] sdr_pcm_addr;   // 26 bits since the map outgrew 32 MB
-	wire        sdr_pcm_req;
 	wire        flash_sdr_req;
 	/* verilator lint_on UNUSEDSIGNAL */
 
@@ -212,6 +244,13 @@ module tb_boot_top
 		.jumpers      (8'hFC),
 		// The one debug control still in the core: the CPU freeze. Off here.
 		.freeze       (1'b0),
+
+		// Normal video timing and centred sync. This bench checks the 386 boots
+		// and the vblank IRQ arrives on phase, both of which are defined
+		// against the hardware raster.
+		.video_mode   (2'd0),
+		.hoffset      (4'd0),
+		.voffset      (4'd0),
 
 		.ss_save         (ss_save),
 		.ss_load         (ss_load),
@@ -314,9 +353,9 @@ module tb_boot_top
 		.z80dl_sdr_ack  (z80dl_sdr_ack),
 
 		.sdr_pcm_addr (sdr_pcm_addr),
-		.sdr_pcm_dout (64'd0),
+		.sdr_pcm_dout (sdr_pcm_dout),
 		.sdr_pcm_req  (sdr_pcm_req),
-		.sdr_pcm_ack  (1'b0),
+		.sdr_pcm_ack  (sdr_pcm_ack),
 
 		.inputs       (16'hFFFF),
 		.system       (8'hFF),
@@ -330,13 +369,25 @@ module tb_boot_top
 		.vsync        (),
 		.hblank       (v_hb),
 		.vblank       (v_vb),
-		.audio_l      (),
-		.audio_r      ()
+		.audio_l      (p_audio_l),
+		.audio_r      (p_audio_r)
 	);
+
+	// Sampled on sample_tick rather than on a divider of our own: the chip
+	// makes exactly one output pair per tick, so one capture per tick is the
+	// chip's own 44,100 Hz and cannot drift against it.
+	assign p_snd_tick  = dut.sound.ymf.sample_tick;
+	assign p_ymf_wr    = dut.sound.ymf_wr;
+	assign p_ymf_addr  = dut.sound.ymf_addr;
+	assign p_ymf_din   = dut.sound.bus_data;
+	assign p_z80_ce    = dut.sound.ce_z80;
+	assign p_z80_stall = dut.sound.ce_z80 & ~dut.sound.z80_wait_n;
 
 	assign p_io_wr       = dut.io_wr;
 	assign p_io_addr     = dut.io_addr;
 	assign p_io_wdata    = dut.io_wdata;
+	assign p_io_be       = dut.io_be;
+	assign p_vcnt        = dut.vcnt;
 	assign p_dma_tilemap = dut.dma_tilemap;
 	assign p_dma_palette = dut.dma_palette;
 	assign p_dma_sprite  = dut.dma_sprite;

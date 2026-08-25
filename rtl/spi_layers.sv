@@ -98,6 +98,7 @@ module spi_layers
 
 	// Debug taps for the golden-reference testbench.
 	output      [1:0] dbg_layer,
+	output      [3:0] dbg_state,
 	output     [15:0] dbg_tcode,
 	output     [25:0] dbg_gfx_addr,
 	output            dbg_emit,
@@ -123,6 +124,7 @@ module spi_layers
 `include "spi_defs.vh"
 
 	assign dbg_layer = layer;
+	assign dbg_state = state;
 
 	// ------------------------------------------------------------------
 	// Which line is being rendered, and into which buffer
@@ -134,6 +136,27 @@ module spi_layers
 	// the restart because render_bank is derived from it: the two have to agree
 	// by construction, not by both being edited the same way later.
 	wire [8:0] next_line = (vcnt >= VBSTART - 10'd1) ? 9'd0 : (vcnt[8:0] + 9'd1);
+
+	// next_line pins to 0 for the whole of vertical blanking, so lines 240..295
+	// would each restart and re-render the SAME line 0 -- 104 tiles and ~200
+	// SDRAM reads, 56 times over. Measured at 3193 of 3584 cycles busy on every
+	// blanked line: about 17% of everything the tile engine does in a frame,
+	// spent producing the same 320 pixels again and again.
+	//
+	// It cannot simply be guarded with `next_line != render_line`, and this is
+	// the trap. The pass that matters is the LAST one, not the first. The
+	// renderer draws line 0 during line 239, and the 386's vblank handler then
+	// DMAs the new tilemap in on line 240 -- measured, every frame, by tb_boot.
+	// Keeping only the early pass would show line 0 built from the PREVIOUS
+	// frame's tilemap: a one-scanline-stale top row, every frame the tilemap
+	// moves. `make run-video` cannot see it either, because it renders from a
+	// frozen VRAM snapshot where both passes produce the same pixels.
+	//
+	// So: skip the redundant passes, but always take the one on the final
+	// blanked line, after the DMA has landed. Two passes a frame instead of 56,
+	// and the one the display consumes is still the last one before the wrap.
+	wire redundant_pass = (next_line == render_line);
+	wire last_blank_line = (vcnt == VTOTAL - 10'd1);
 
 	// ------------------------------------------------------------------
 	// Per-layer parameters, selected by the phase
@@ -213,6 +236,12 @@ module spi_layers
 	// Tile word -> code / colour
 	// ------------------------------------------------------------------
 	reg [15:0] tword;
+	// The next tile's word, read from the tilemap RAM while the current tile is
+	// still emitting. `col` is advanced at emit entry (the emit only reads it to
+	// seed emit_x), so cur_col/tile_index above already point at the next tile
+	// and the prefetch needs no duplicate index arithmetic.
+	reg [15:0] tword_n;
+	reg  [1:0] pf;          // prefetch: 0 issue, 1 wait, 2 capture, 3 done
 	reg  [3:0] tcolor;
 	reg [15:0] tcode;
 
@@ -267,8 +296,9 @@ module spi_layers
 	                 S_TM_LAT = 4'd5,
 	                 S_GA_REQ = 4'd6,   // gfx low 64 bits
 	                 S_GA_WT  = 4'd7,
-	                 S_GB_REQ = 4'd8,   // gfx high 64 bits
-	                 S_GB_WT  = 4'd9,
+	                 // 8 and 9 were S_GB_REQ / S_GB_WT, a second blocking read
+	                 // for the high 64 bits. The high half is now fetched
+	                 // UNDERNEATH the emit -- see gfx_b_rdy below.
 	                 S_EMIT   = 4'd10,
 	                 S_NEXT   = 4'd11;
 
@@ -287,6 +317,9 @@ module spi_layers
 	reg restart_req;
 	reg [63:0] gfx_a, gfx_b;
 	reg [25:0] gfx_addr_r;
+	// The high half is requested when the low half lands and collected during
+	// S_EMIT, so the emit has to know whether it has arrived yet.
+	reg        gfx_b_rdy;
 
 	wire [127:0] win = {gfx_b, gfx_a};
 
@@ -406,13 +439,42 @@ module spi_layers
 
 	wire emit_last = is_text ? (emit_i == 4'd7) : (emit_i == 4'd15);
 
+	// Does the group being emitted right now reach into the high 64 bits?
+	//
+	// row_bytes is win >> 8*offset and group g is row_bytes[24g+23 : 24g], so
+	// the group needs gfx_b exactly when 8*offset + 24g + 23 >= 64. Written out
+	// rather than computed, to keep it beside the row_bytes case it mirrors:
+	//
+	//   offset 0   g >= 2      offset 4   g >= 1
+	//   offset 2   g >= 2      offset 6   always
+	//
+	// The last group of a tile ALWAYS needs it in every case that issues the
+	// read, which is what guarantees the emit cannot run to completion with the
+	// request still outstanding and hand the next tile's S_TM_REQ a toggle that
+	// is already in flight. (Offset 2 with g capped at 1 is text, and text at
+	// offset <= 2 skips the read entirely.)
+	reg need_gfx_b;
+	always @* begin
+		case (gfx_addr_r[2:0])
+			3'd0:    need_gfx_b = (emit_grp >= 2'd2);
+			3'd2:    need_gfx_b = (emit_grp >= 2'd2);
+			3'd4:    need_gfx_b = (emit_grp >= 2'd1);
+			default: need_gfx_b = 1'b1;             // offset 6
+		endcase
+	end
+
+	// Stalled waiting for the high half rather than emitting a pixel.
+	wire emit_stall = need_gfx_b && !gfx_b_rdy;
+
 	assign dbg_tcode    = tcode;
 	assign dbg_gfx_addr = gfx_base;
 	assign dbg_emit     = (state == S_EMIT);
 	assign dbg_busy     = busy;
 	assign dbg_rowscroll = rowscroll;
 	assign dbg_xstart    = x_start;
-	assign dbg_latch     = (state == S_GB_WT) && (sdr_ack == sdr_req);
+	// The cycle the high half is captured -- was the S_GB_WT ack, now the
+	// collect inside S_EMIT.
+	assign dbg_latch     = (state == S_EMIT) && !gfx_b_rdy && (sdr_ack == sdr_req);
 	assign dbg_finex     = fine_x;
 	assign dbg_col       = col;
 	assign dbg_emitx     = emit_x;
@@ -448,8 +510,17 @@ module spi_layers
 			end
 
 			// A tile boundary is the safe place to abandon the rest of a line.
-			if (restart_req && (state == S_IDLE || state == S_NEXT)) begin
+			//
+			// A skipped redundant pass leaves restart_req standing rather than
+			// clearing it, which is harmless -- line_start re-raises it every
+			// line anyway, and it simply fires on the first line that is not
+			// redundant. Structure matters here: this stays ONE `if` with the
+			// `else case (state)` hanging off it, because splitting it would
+			// let the state machine advance on a cycle the restart owns.
+			if (restart_req && (state == S_IDLE || state == S_NEXT)
+			                && (!redundant_pass || last_blank_line)) begin
 				restart_req <= 1'b0;
+				gfx_b_rdy   <= 1'b1;   // no read in flight across a restart
 				render_line <= next_line;
 				// Derived from the line being rendered, NOT toggled. The mixer
 				// reads line L from ~L[0] (disp_bank above), so the only correct
@@ -545,41 +616,81 @@ module spi_layers
 				// worth having. The 16x16 layers need 12 bytes and always
 				// straddle, so they still take both reads.
 				if (is_text && gfx_base[2:0] <= 3'd2) begin
-					emit_i <= 4'd0;
-					emit_x <= ($signed({5'd0, col}) * 11'sd8)
-					          - $signed({7'd0, fine_x});
-					state  <= S_EMIT;
+					gfx_b_rdy <= 1'b1;      // not needed; nothing to wait for
 				end
-				else state <= S_GB_REQ;
-			end
-
-			S_GB_REQ: begin
-				sdr_addr <= {gfx_addr_r[25:3], 3'b000} + 26'd8;
-				sdr_req  <= ~sdr_req;
-				state    <= S_GB_WT;
-			end
-			S_GB_WT: if (sdr_ack == sdr_req) begin
-				gfx_b  <= sdr_dout;
+				else begin
+					// Issue the high half and START EMITTING. It is not needed
+					// until group 1 or 2, which is four to eight emit cycles
+					// away, and the round trip measured about eight -- so most
+					// of it disappears under work that was already happening.
+					// This was a blocking read (S_GB_REQ/S_GB_WT) and cost 670
+					// cycles a line, against an emit of 1335. PLAN.md 53.9.
+					sdr_addr  <= {gfx_addr_r[25:3], 3'b000} + 26'd8;
+					sdr_req   <= ~sdr_req;
+					gfx_b_rdy <= 1'b0;
+				end
 				emit_i <= 4'd0;
 				emit_x <= is_text ? ($signed({5'd0, col}) * 11'sd8)  - $signed({7'd0, fine_x})
 				                  : ($signed({5'd0, col}) * 11'sd16) - $signed({7'd0, fine_x});
+				// Advance to the tile the prefetch below will fetch. emit_x has
+				// just been seeded from the OLD col by the line above, and the
+				// emit body never reads col again.
+				col    <= col + 6'd1;
+				pf     <= 2'd0;
 				state  <= S_EMIT;
 			end
 
 			// -------- emit pixels ------------------------------------
 			S_EMIT: begin
-				if (emit_x >= 0 && emit_x < 11'sd320) begin
-					lb_wr_addr <= {render_bank, emit_x[8:0]};
-					lb_wr_data <= {tcolor, emit_pix};
-					lb_we      <= (4'b0001 << layer);
+				// Collect the high half the moment it lands. Guarded on
+				// gfx_b_rdy because on the skipped-read path sdr_ack already
+				// equals sdr_req from the LOW half, and an unguarded test would
+				// latch that stale word over a perfectly good gfx_b.
+				if (!gfx_b_rdy && sdr_ack == sdr_req) begin
+					gfx_b     <= sdr_dout;
+					gfx_b_rdy <= 1'b1;
 				end
-				emit_x <= emit_x + 11'sd1;
-				emit_i <= emit_i + 4'd1;
-				if (emit_last) state <= S_NEXT;
+
+				// Read the next tile's word out of the (on-chip, 1-cycle)
+				// tilemap RAM while this tile emits. Driven by its own counter
+				// rather than emit_i so that an emit stall cannot re-issue or
+				// mistime it. Past the last column this reads a column that
+				// does not exist, which is harmless -- S_NEXT ends the layer
+				// without looking at tword_n.
+				case (pf)
+					2'd0: begin
+						tm_addr <= tm_base + {2'd0, tile_index[10:1]};
+						pf      <= 2'd1;
+					end
+					2'd1: pf <= 2'd2;
+					2'd2: begin
+						tword_n <= tile_index[0] ? tm_data[31:16] : tm_data[15:0];
+						pf      <= 2'd3;
+					end
+					default: ;
+				endcase
+
+				// Stalling holds emit_x/emit_i and leaves lb_we at its default
+				// 0, so the pixel is simply not written this cycle.
+				if (!emit_stall) begin
+					if (emit_x >= 0 && emit_x < 11'sd320) begin
+						lb_wr_addr <= {render_bank, emit_x[8:0]};
+						lb_wr_data <= {tcolor, emit_pix};
+						lb_we      <= (4'b0001 << layer);
+					end
+					emit_x <= emit_x + 11'sd1;
+					emit_i <= emit_i + 4'd1;
+					if (emit_last) state <= S_NEXT;
+				end
 			end
 
 			S_NEXT: begin
-				if (col == col_count - 6'd1) begin
+				// col was advanced at emit entry, so it already names the tile
+				// about to be drawn -- reaching col_count means the layer is
+				// done. The tilemap read for it happened under the emit, so
+				// this goes straight to the graphics fetch: S_TM_REQ/WT/LAT are
+				// only walked for the FIRST tile of a layer now.
+				if (col == col_count) begin
 					col <= 6'd0;
 					if (layer == L_TEXT) begin
 						busy  <= 1'b0;
@@ -593,8 +704,8 @@ module spi_layers
 					end
 				end
 				else begin
-					col   <= col + 6'd1;
-					state <= S_TM_REQ;
+					tword <= tword_n;
+					state <= S_GA_REQ;
 				end
 			end
 
@@ -604,12 +715,46 @@ module spi_layers
 	end
 
 	// ------------------------------------------------------------------
-	// Budget
+	// Budget -- MEASURED, and now there is some
 	//
 	// Per line: 3 x 21 + 41 = 104 tiles, each costing 2 SDRAM reads and 16 (or
 	// 8) emit cycles. SDRAM reads are ~8 clk_ram = 4 clk_sys each, so roughly
-	// 104 * (8 + 16) = 2500 clk_sys, against 448 * 8 = 3584 available. Tight
-	// enough to be worth measuring once sprites are sharing the line.
+	// 104 * (8 + 16) = 2500 clk_sys against 448 * 8 = 3584 available.
+	//
+	// THAT ESTIMATE WAS WRONG, in the direction that matters, and believing it
+	// cost a whole implementation (PLAN.md 53.7). `make run-video` reports
+	// per-line renderer occupancy directly now (rdfts, FRAME=2400). As the
+	// sequencer originally stood:
+	//
+	//     worst line  3584 of 3584 cycles  (100.0%)
+	//     mean        3336 of 3584         ( 93.1%)
+	//
+	// Saturated at the board's own dot clock -- it fitted with nothing to
+	// spare, so the OSD refresh option could not be pushed above 53.99 Hz by
+	// shortening the pixel window (a 7-cycle pixel makes the line 3136 and
+	// takes 448 the renderer already needed; 686 of 76800 pixels came out wrong
+	// at 60 Hz). What the estimate missed is that WAITING dominates, not SDRAM
+	// bandwidth: the layer engine stalls on bus contention only ~29 cycles a
+	// line, but it spent 1417 sitting on two blocking round trips per tile.
+	//
+	// Two changes took those waits off the critical path (PLAN.md 53.9), both
+	// by overlapping fetch with work that was happening anyway:
+	//
+	//   * the high 64 bits of the tile row are requested when the low half
+	//     lands and collected DURING the emit -- see gfx_b_rdy / need_gfx_b
+	//   * the next tile's tilemap word is read during the emit too -- see
+	//     tword_n / pf, which is why S_TM_REQ is walked only for the first
+	//     tile of a layer now
+	//
+	//     worst line  2863 of 3584 cycles  ( 79.9%)
+	//     mean        2558 of 3584         ( 71.4%)
+	//
+	// A 60 Hz line is 3225 cycles, so the worst line now finishes with about
+	// 360 to spare. The remaining big item is GA_WT (792 a line): hiding that
+	// too needs a one-tile lookahead on the graphics fetch, which is where to
+	// go if a mode faster than 60 Hz is ever wanted.
+	//
+	// Slower is free, which is why 50 Hz costs nothing here.
 	// ------------------------------------------------------------------
 
 endmodule

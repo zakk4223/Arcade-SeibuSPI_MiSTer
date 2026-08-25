@@ -144,10 +144,56 @@ Still open, and the list is shorter than it was:
   naively: the save now ends ~191 k cycles later, so any restore offset tuned to
   the old timing silently becomes a back-to-back test. Move them out first. A
   bad offset produced a false `restore: FAILED` here and cost a round.
-* The sound path's MAME correlation has still not been redone since T80 was
-  swapped for tv80, and for a CPU swap that is the measurement that counts.
-  This is the largest genuine engineering task left and is independent of
-  everything else.
+* **THE SOUND PATH'S MAME CORRELATION IS REDONE, on three sets, and it did not
+  need the board** (2026-08-22, `PLAN.md` 51). The tv80 swap is what made it
+  possible: `sim/T80s.sv` never executed a cycle, so the simulator can run the
+  real sound board for the first time and the whole measurement is done with no
+  capture chain at all.
+
+  **The load-bearing result is not the audio.** The Z80's YMF271 register-write
+  stream is tapped on both sides at the same point in the same map and compared
+  per register: **the sound CPU wrote every register that carries a note -- key
+  on, frequency, envelope, volume, PCM address -- the same values in the same
+  order MAME's did.** 8,980 register writes on rdfts, 6,844 on rdft2, 47,165 on
+  rdft. The only register that ever differs is control 0x13, the timer/IRQ
+  acknowledge, whose Timer A / Timer B order the two machines swap.
+
+      set     span      envelope r   spectrum r   per-second r         silence
+      rdfts   13.10 s   0.9856       0.9998       median 0.9998, 100%  100.0%
+      rdft2   13.10 s   0.9852       0.9999       median 0.9998, 100%   99.7%
+      rdft    52.38 s   0.9417       0.9996       median 0.9978, 100%  100.0%
+
+  `make -C sim run-sound GAME=<set> SDRAM=<image> STEPS=<n> ROMS=<dir>` is the
+  whole workflow. ~229M steps per second of audio; music starts around 4 s on
+  rdft and 6 s on rdft2, so anything under ~1.5G steps is boot and silence.
+
+  **Three things it found, and two of them were in the measuring kit:**
+
+  - **The bench was tying off ch5** (`sdr_pcm_ack(1'b0)`). Harmless while the
+    Z80 was a stub; with tv80 executing, the chip's first sample fetch never
+    returned, the sound board stopped, and the 386 stalled behind a full FIFO.
+    rdft2's busiest frame went from 845 non-black pixels to 58,880. **Any sound
+    number taken from this bench before today was taken from a starved chip.**
+  - **`compare_audio.py`'s aligner was broken and had been depressing its own
+    results.** Its coarse pass stepped half a second, which is wider than the
+    peak -- 19.4 measured that peak as one 20 ms window wide without noticing it
+    had described something its aligner steps over. On rdft2 it returned r =
+    0.436 at 126.00 s where the true optimum is 0.977 at 6.38 s. It is an exact
+    FFT search now. **Read every pre-2026-08-22 figure out of it as a LOWER
+    BOUND**, 19.4's and 19.5's included.
+  - **Two recorded open questions close, and neither was a bug.** The 4.1 dB
+    stereo gap (6612) was two different passages being compared: on the same
+    passage the core reads -16.8 dB against MAME's -16.8. The unexplained 2.58x
+    level offset was the capture chain too -- aligned, the channels are within
+    0.5%.
+
+  **Do not quote the envelope figure as if it measured the program.** Over
+  rdft's first 47.95 s the register writes are provably identical, and across
+  10 s blocks of exactly that span the envelope figure still moves between 0.68
+  and 0.99 while the spectra sit at 0.999. It measures sub-window phase on
+  noise-like material. The spectral figures are the ones with a mechanism.
+
+  Not covered: rfjet and viprp1, and nothing here ran on hardware.
 * **Simulation sweep work is DEFERRED by decision (2026-08-22)**, not forgotten.
   `tools/savestate_sweep.py` is checked in and working; rdft ran 48/48 clean and
   rdft2's differences were all measurement artefacts, both fixed. rfjet is
@@ -358,6 +404,58 @@ described -- but a fit is still worth CHECKING rather than assuming.
 
 ## Also open
 
+* **Variable refresh: 50 Hz is in, 57/60 Hz wait on the mixer.** `PLAN.md` 53.
+  The OSD refresh option scales the PIXEL WINDOW (a 12-bit Bresenham cen in
+  `spi_video_timing.sv`) and leaves the raster alone, so 448x296 and the 56
+  blanked lines are identical in every mode and the game cannot detect which is
+  picked. Normal is `PIX_N`=512 = exactly 1/8, bit-identical to the divider it
+  replaced. `make run-timing` proves it; `make run-video` passes byte-identical
+  at Normal and at 50 Hz.
+
+  **All four modes are in and render byte-identical frames** -- PLAN.md 53.7
+  and 53.9. Getting 57/60 Hz took two goes. The first (53.7) retimed `spi_mixer`
+  to seven steps, which was correct but not sufficient: the LAYER RENDERER was
+  saturated at the board's own dot clock, 3584 of 3584 cycles on the worst line,
+  and 60 Hz broke 686 of 76800 pixels. Its budget comment had claimed ~30%
+  headroom and was simply wrong.
+
+  **What made it viable (53.9): the renderer was waiting, not working.** A state
+  histogram showed 1417 cycles a line waiting on two blocking SDRAM round trips
+  per tile against 1335 actually emitting -- and only 29 of those were bus
+  contention. Two overlaps fixed it: the tile row's high 64 bits are now fetched
+  DURING the emit (not needed until group 1 or 2), and the next tile's tilemap
+  word is read during the emit too (`col` advances at emit entry, so the
+  existing index arithmetic already names it). Worst line 3584 -> 2863, against
+  the 3225 a 60 Hz line has. The mixer retime then went back in.
+
+  **Still open if a mode above 60 Hz is ever wanted:** `GA_WT` is 792 cycles a
+  line -- hiding it needs a one-tile lookahead with shadow `tword`/`gfx_a` and
+  duplicated address arithmetic. And `spi_sprite`'s `BUDGET` is a fixed 3200
+  that fits inside a 60 Hz line by only 24 cycles.
+
+  **Nothing is fitted or on hardware.** The 88.8% worst-line figure is one
+  capture (rdfts FRAME=2400); occupancy is scene-dependent, so the thing to
+  watch on the board is sprites or tile columns dropping at 60 Hz that are clean
+  at Normal.
+
+  **Neither fitted nor run on hardware yet.** The observables are the OSD
+  video-info page reading ~50 Hz, and H/V-Pos moving the picture on analog or
+  direct video while doing nothing over HDMI (that last one is by design).
+
+* **The 386 clock: decided, not built.** The board is a 386DX-25; `clk_cpu` is
+  28.636364 MHz, 14.5% fast. `PLAN.md` 16.9 settles the approach -- an
+  `altclkctrl` gate on clk_cpu killing one edge in eight, giving 25.0568 MHz
+  (+0.23%), with the divider parameterised so it doubles as the OSD CPU-speed
+  throttle. No second PLL, no asynchronous clock group, and STA is untouched
+  because TimeQuest still sees 28.636 MHz on a gated output. Nothing is written
+  yet; 16.9 has the five-step order of work, and step 4 (the EIP profiler's busy
+  fraction scaling by 8/7) is the check that the gate is real.
+
+  Two traps recorded there: `cpu_en` (`spi_cpu.sv:84`) is NOT a throttle -- it
+  gates the bus only and the L1 caches run straight through it -- and z386 has no
+  CE port, so a hand-threaded clock enable would mean ~90 `always_ff` blocks in a
+  vendored core. What is still unmeasured, and what actually decides accuracy, is
+  z386x's IPC against a real 386DX (`PLAN.md` 16.7).
 * **The OSD toggle itself is unverified.** `/dev/MiSTer_cmd` has no menu
   command, and Main's `.CFG` is not the raw status word (writing byte 2 bit 6 of
   a 16-byte file did nothing). Everything downstream of `derive_sel` was proved
@@ -461,9 +559,24 @@ Building the inputs:
 
 ## Hardware
 
-The MiSTer at 192.168.1.125 is on a **diagnostic build** (timing-failing).
-Reflash something known-good before using it: `/media/fat/_Arcade/cores/` has
-dated `SeibuSPI.rbf.*` backups.
+The MiSTer at 192.168.1.125 is on the **variable-refresh build** as of
+2026-08-24: `SeibuSPI.rbf` md5 `ecaf8174`, timing MET (setup +0.263, hold +0.245,
+TNS 0.000, SEED 3). PLAN.md 53. The diagnostic build it replaced is backed up
+alongside it as `SeibuSPI.rbf.20260824-1058` (md5 `b4fc4f38`), and
+`/media/fat/_Arcade/cores/` keeps every earlier dated `SeibuSPI.rbf.*` too.
+
+**Not yet exercised on the board.** What to look at, in order:
+* Video Settings -> Video Timing. All four rates should show in MiSTer's OSD
+  video-info page as ~54 / ~50 / ~57 / ~60 Hz.
+* 57 and 60 Hz are the ones with something to prove. The layer renderer finishes
+  a worst line in 2863 cycles against the 3225 a 60 Hz line has, but that margin
+  is from ONE capture (rdfts, FRAME=2400) and occupancy is scene-dependent. The
+  symptom to watch for is sprites or tile columns dropping at 60 Hz that are
+  clean at Normal -- a busier game than rdfts is the real test.
+* Analog Video H-Pos / V-Pos move the picture on analog or direct video and do
+  NOTHING over HDMI. That is correct, not a fault.
+* Sound pitch must not change with the refresh rate: the Z80 and YMF271 run off
+  their own dividers, not the pixel clock.
 
 Save files were renamed with the MRAs twice over -- first with the collapse
 (`rdft-update.nvm` -> `rdft.nvm`), then with the descriptive names -- and have now

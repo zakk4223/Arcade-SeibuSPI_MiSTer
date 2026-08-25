@@ -31,6 +31,9 @@
 #include "spi_ref.h"
 
 static const int W = 320, H = 240;
+// Lines in a frame. The raster is fixed at 448x296 in every video mode --
+// only the pixel WINDOW changes -- so this is a constant. PLAN.md 53.
+static const int VTOTAL_MAX = 296;
 
 static std::vector<uint8_t> load(const std::string &p, size_t expect = 0)
 {
@@ -409,6 +412,17 @@ int main(int argc, char **argv)
     std::vector<std::array<int,4>> fore_emits;
     std::vector<std::array<int,8>> spr_emits;   // code,x,pix,sx,sy,tile,ry,px
     long line_cycles = 0, busy_cycles = 0; int max_layer = 0; bool finished = false;
+    // Per-line renderer occupancy across the whole of frame 2, not just the one
+    // probe line. This is what decides whether a shorter pixel window is
+    // survivable: if the renderer needs most of a line at the hardware's 8
+    // cycles a pixel, there is nothing to give back at 7. See PLAN.md 53.
+    long ln_cyc[VTOTAL_MAX] = {0}, ln_busy[VTOTAL_MAX] = {0};
+    // Where the layer sequencer's cycles actually go, over the active lines of
+    // frame 2. The engine is emit-bound rather than SDRAM-bound (layer stall is
+    // ~29 cycles a line), so this histogram is what says which states are worth
+    // attacking if the line has to get shorter. PLAN.md 53.9.
+    long st_hist[16] = {0};
+    int  prev_vcnt_occ = -1;
     long spr_writes = 0, spr_state_hist[16] = {0}; int spr_min_index = 9999;
     bool probed = false;
 
@@ -428,6 +442,15 @@ int main(int argc, char **argv)
             }
             spr_state_hist[dut->dbg_spr_state]++;
             if (dut->dbg_spr_index < spr_min_index) spr_min_index = dut->dbg_spr_index;
+        }
+
+        if (frame == 2 && dut->vcnt < 240) st_hist[dut->dbg_state]++;
+
+        // Renderer occupancy for every line of frame 2.
+        if (frame == 2 && dut->vcnt < VTOTAL_MAX) {
+            ln_cyc[dut->vcnt]++;
+            if (dut->dbg_busy) ln_busy[dut->vcnt]++;
+            prev_vcnt_occ = dut->vcnt;
         }
 
         // How long does the renderer take per line, and does it finish?
@@ -733,6 +756,64 @@ int main(int argc, char **argv)
                    "max layer reached %d, finished=%s\n",
                    line_cycles, busy_cycles, max_layer, finished ? "yes" : "NO");
 
+            {   // The worst line in the frame, which is what actually bounds
+                // how short the pixel window may be made.
+                int worst = 0;
+                for (int y = 0; y < VTOTAL_MAX; y++)
+                    if (ln_busy[y] > ln_busy[worst]) worst = y;
+                long tot = 0; int active = 0;
+                for (int y = 0; y < VTOTAL_MAX; y++)
+                    if (ln_busy[y]) { tot += ln_busy[y]; active++; }
+                printf("  renderer occupancy: worst line %d busy %ld of %ld "
+                       "(%.1f%%), mean %ld over %d lines\n",
+                       worst, ln_busy[worst], ln_cyc[worst],
+                       ln_cyc[worst] ? 100.0 * ln_busy[worst] / ln_cyc[worst] : 0.0,
+                       active ? tot / active : 0, active);
+                {   // Active lines are what bounds the pixel window; blanked
+                    // lines are where the sequencer re-renders line 0 over and
+                    // over. Reporting them apart keeps the two from being
+                    // confused, which is exactly what PLAN.md 53.7 turned on.
+                    long act = 0, blk = 0; int na = 0, nb = 0;
+                    for (int y = 0; y < VTOTAL_MAX; y++) {
+                        if (y < 240) { act += ln_busy[y]; na++; }
+                        else         { blk += ln_busy[y]; nb++; }
+                    }
+                    printf("  active lines 0-239: mean busy %ld/line   "
+                           "blanked 240-295: mean busy %ld/line\n",
+                           na ? act / na : 0, nb ? blk / nb : 0);
+                }
+                {
+                    static const char *sn[16] = {
+                        "IDLE","RS_REQ","RS_WT","TM_REQ","TM_WT","TM_LAT",
+                        "GA_REQ","GA_WT","GB_REQ","GB_WT","EMIT","NEXT",
+                        "RS_LAT","LSTART","?14","?15" };
+                    long tot = 0;
+                    for (int i = 0; i < 16; i++) tot += st_hist[i];
+                    printf("  layer sequencer, per active line (of %ld cycles):\n   ",
+                           tot / 240);
+                    for (int i = 0; i < 16; i++)
+                        if (st_hist[i])
+                            printf(" %s:%ld", sn[i], st_hist[i] / 240);
+                    printf("\n");
+                }
+                printf("  busiest by occupancy:");
+                for (int n = 0; n < 6; n++) {
+                    int b = -1;
+                    for (int y = 0; y < VTOTAL_MAX; y++)
+                        if (ln_busy[y] && (b < 0 || ln_busy[y] > ln_busy[b])) {
+                            bool taken = false;
+                            for (int k = 0; k < n; k++) if (ln_busy[y] > ln_busy[b]) {}
+                            (void)taken; b = y;
+                        }
+                    if (b < 0) break;
+                    printf(" L%d:%ld/%ld", b, ln_busy[b], ln_cyc[b]);
+                    ln_busy[b] = -ln_busy[b] - 1;   // mark consumed
+                }
+                printf("\n");
+                for (int y = 0; y < VTOTAL_MAX; y++)
+                    if (ln_busy[y] < 0) ln_busy[y] = -ln_busy[y] - 1;
+            }
+
             {   // Per-tile mapping: RTL emit vs reference pixel at that screen x
                 std::vector<uint16_t> wf0;
                 uint32_t cor = 0x4000 | (regs["fore_d13"].at(0) ? 0x2000u : 0u);
@@ -884,6 +965,15 @@ int main(int argc, char **argv)
            (unsigned)dut->dbg_spr_starved, (unsigned)dut->dbg_spr_scanned_o,
            (unsigned)dut->dbg_spr_yhit_o);
     printf("diag: sdram reads=%lld  non-black output pixels=%zu\n", sdr_count, nonblack);
+    // How much of the layer engine's time is spent WAITING for the SDRAM the
+    // sprite engine is holding, as against doing its own emit work. This is
+    // what decides whether anything done to the sprite engine can move the
+    // layer engine's per-line occupancy -- i.e. the 57/60 Hz ceiling. Divided
+    // by 3 because the loop above ticks three phases per clk_sys.
+    printf("diag: layer SDRAM stall=%lld cycles, sprite SDRAM stall=%lld "
+           "(over 3 frames; per frame per line: layer %.0f, sprite %.0f)\n",
+           gfx_stall / 3, spr_stall / 3,
+           gfx_stall / 3.0 / 3 / VTOTAL_MAX, spr_stall / 3.0 / 3 / VTOTAL_MAX);
     }
 
     // ---- compare -----------------------------------------------------------

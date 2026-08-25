@@ -70,6 +70,7 @@ module tb_video_top
 	output      [9:0] dbg_fore,
 	output      [9:0] dbg_text,
 	output      [1:0] dbg_layer,
+	output      [3:0] dbg_state,
 	output     [15:0] dbg_tcode,
 	output     [25:0] dbg_gfx_addr,
 	output            dbg_emit,
@@ -108,6 +109,11 @@ module tb_video_top
 		// raster is no longer savestate state at all (PLAN.md 42).
 		.pause      (1'b0),
 		.vbl_next   (),
+		// Normal timing and centred sync: this bench diffs against a MAME
+		// frame, which is only defined for the hardware raster.
+		.video_mode (2'd0),
+		.hoffset    (4'd0),
+		.voffset    (4'd0),
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
 		.hcnt(hcnt), .vcnt(vcnt),
 		.hsync(hsync), .vsync(vsync), .hblank(hblank), .vblank(vblank),
@@ -158,7 +164,7 @@ module tb_video_top
 		.lb_back(lb_back), .lb_midl(lb_midl),
 		.lb_fore(lb_fore), .lb_text(lb_text),
 		.busy(layers_busy),
-		.dbg_layer(dbg_layer), .dbg_tcode(dbg_tcode),
+		.dbg_layer(dbg_layer), .dbg_state(dbg_state), .dbg_tcode(dbg_tcode),
 		.dbg_gfx_addr(dbg_gfx_addr), .dbg_emit(dbg_emit), .dbg_busy(dbg_busy),
 		.dbg_rowscroll(dbg_rowscroll), .dbg_xstart(dbg_xstart),
 		.dbg_latch(dbg_latch), .dbg_finex(dbg_finex),

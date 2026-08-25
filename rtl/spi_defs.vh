@@ -172,18 +172,47 @@ localparam [3:0] CODEC_BPE_DPCM = 4'd1;  // rdft2 sample flash: BPE over DPCM
 // Video timing (seibuspi.cpp:898)
 //   dot clock 28.63636 MHz / 4 = 7.1590909 MHz = clk_sys / 8
 //   448 x 296 total, 320 x 240 visible => 53.99 Hz
+//
+// The totals and both sync widths are now measured, not assumed. All six SPI
+// games with a Seibu CRTC (rdft/rdft2/rfjet/viprp1/senkyu/ejanhs) program
+// byte-identical timing -- MAME never reads these registers, so this was
+// verified by sweeping them (tools/mame_crtc_trace.lua) rather than trusting
+// MAME's "all games the same" note. The decode of the four timing dwords:
+//   0x400 013F007F -> H active 320, blank 128, total 448
+//   0x408 00FC002A -> V "active" 253, blank 43, total 296  (register nominal)
+//   0x404 03DA03B5 -> HSync, width hi-lo = 0x25 = 37 px
+//   0x40C 03F303EB -> VSync, width hi-lo = 0x08 =  8 lines
+// A DSLogic on a real rfjet single-board confirmed HTOTAL 448 (line 62.584us),
+// VTOTAL 296, HSync width 36.4 px (~37), VSync width 8.06 lines. So the totals
+// and widths below are hardware-verified. See memory: seibuspi-crtc-timing-verified.
+//
+// VBSTART: the register nominally says vblank starts at 253, but the real board
+// only DISPLAYS 240 lines -- confirmed on hardware, where reducing monitor
+// height does not reveal lines 240..252, so those are blanked, not overscanned.
+// MAME reaches the same conclusion (SPI_VBSTART 240, "actually 253, but visible
+// area is 240 lines"). Nothing found in any CRTC register programs the 240; it
+// is where the display-enable cuts, mechanism unlocated. So we blank at 240 to
+// match the board and MAME. (A brief experiment set this to 253, which un-blanked
+// two overscan tile-strips the board does not show -- reverted.) Whether the 386
+// vblank IRQ fires at 240 or later at 253 is a separate, still-open question that
+// only an INTR-pin capture (386 PQFP pin 53) can settle; until then the IRQ
+// rides VBSTART=240, matching MAME.
 // --------------------------------------------------------------------------
 localparam [9:0] HTOTAL  = 10'd448;
-localparam [9:0] HBSTART = 10'd320;   // first blanked pixel
+localparam [9:0] HBSTART = 10'd320;   // first blanked pixel (H active 320)
 localparam [9:0] VTOTAL  = 10'd296;
-localparam [9:0] VBSTART = 10'd240;   // first blanked line (real hw 253)
+localparam [9:0] VBSTART = 10'd240;   // first blanked line -- matches the board's 240-line display and MAME
 
-// Sync pulse positions are not documented for the Seibu CRTC; these sit inside
-// the blanking interval and keep the analog output roughly centred.
-localparam [9:0] HSSTART = 10'd344;
-localparam [9:0] HSEND   = 10'd392;
-localparam [9:0] VSSTART = 10'd250;
-localparam [9:0] VSEND   = 10'd253;
+// Sync WIDTHS are measured (37 px H, 8 lines V). Absolute START positions are
+// NOT: a digital LA cannot find active-video edges on analog RGB and the Morph
+// scaler derives its DE from sync, so the front/back porch could not be pinned
+// on hardware. These starts are the inferred-decode positions (0x404/0x40C:
+// position = total - (0x400 - half)) -- HS ~373, VS ~275 -- which sit sensibly
+// inside blanking; the porch is cosmetic anyway (any scaler re-centres on sync).
+localparam [9:0] HSSTART = 10'd373;
+localparam [9:0] HSEND   = 10'd410;   // width 37
+localparam [9:0] VSSTART = 10'd275;
+localparam [9:0] VSEND   = 10'd283;   // width 8, inside the 240..295 blank
 
 // --------------------------------------------------------------------------
 // Layer / palette geometry
