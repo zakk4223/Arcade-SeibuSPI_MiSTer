@@ -529,6 +529,8 @@ static void silence_pcm_group0() {
 static void reset_dut() {
     dut->reset = 1;
     dut->wr = 0; dut->rd = 0; dut->addr = 0; dut->din = 0;
+    dut->ss_pause = 0; dut->ss_wr = 0; dut->ss_rd = 0;
+    dut->ss_addr = 0; dut->ss_din = 0;
     dut->sdr_ack = 0; dut->sdr_dout = 0;
     sdr_req_prev = 0; sdr_busy = false;
     dut->fl_ack = 0;
@@ -2113,6 +2115,118 @@ static void test_fm_pair_b() {
     printf("sync 1 pair B: 300 samples, %d mismatches\n", bad);
 }
 
+
+// ----------------------------------------------------- savestate: REGS ----
+// SSIDX_YMF_REGS is 23 dwords. `setup` clears ack every cycle and the read or
+// write path raises it, so ack is a one-cycle pulse; this section answers a
+// read combinationally, unlike the RAM-backed ones.
+//
+// The bug: the write path used to ack and DISCARD, so loading a state left the
+// register file, the sync modes, both timers, the end flags and the
+// wave-memory port holding whatever they already had. The read side was
+// complete, which is why it looked implemented.
+static const int SS_REGS_ITEMS = 23;
+
+static void ss_begin() { dut->ss_pause = 1; run(4); }
+static void ss_end()   { dut->ss_wr = 0; dut->ss_rd = 0; dut->ss_pause = 0; run(4); }
+
+static uint32_t ss_read(uint32_t idx) {
+    dut->ss_addr = idx; dut->ss_din = 0; dut->ss_rd = 1; dut->ss_wr = 0;
+    uint32_t v = 0;
+    for (int i = 0; i < 8; i++) { tick(); if (dut->ss_ack) { v = dut->ss_dout; break; } }
+    dut->ss_rd = 0; tick();
+    return v;
+}
+
+static void ss_write(uint32_t idx, uint32_t val) {
+    dut->ss_addr = idx; dut->ss_din = val; dut->ss_wr = 1; dut->ss_rd = 0;
+    for (int i = 0; i < 8; i++) { tick(); if (dut->ss_ack) break; }
+    dut->ss_wr = 0; tick();
+}
+
+static void test_savestate_regs() {
+    reset_dut();
+
+    // A distinctive machine state: two timers loaded and running, all twelve
+    // groups on different sync modes, a wave-memory address part-way through a
+    // read, and a slot whose Block/F-Number2 latch has been committed.
+    timer_write(0x10, 0xC0);
+    timer_write(0x11, 0x02);
+    timer_write(0x12, 0x5A);
+    timer_write(0x13, 0x03);
+    for (int g = 0; g < 12; g++)
+        timer_write((uint8_t)(((g / 3) << 2) | (g % 3)), (uint8_t)(g & 3));
+    ext_seek(0x123456, true);
+    fm_write(0, 0, 0xA, 0x5C);
+    fm_write(0, 0, 0x9, 0xA7);
+    run(2000);
+
+    uint32_t snap[SS_REGS_ITEMS];
+    ss_begin();
+    for (int i = 0; i < SS_REGS_ITEMS; i++) snap[i] = ss_read(i);
+    ss_end();
+
+    int nonzero = 0;
+    for (int i = 0; i < SS_REGS_ITEMS; i++) if (snap[i]) nonzero++;
+    if (nonzero < 8) {
+        printf("FAIL: savestate regs: only %d of %d words non-zero, "
+               "the snapshot is empty\n", nonzero, SS_REGS_ITEMS);
+        errors++; return;
+    }
+
+    // Scribble over all of it through the bus.
+    timer_write(0x10, 0x11);
+    timer_write(0x11, 0x01);
+    timer_write(0x12, 0x22);
+    for (int g = 0; g < 12; g++)
+        timer_write((uint8_t)(((g / 3) << 2) | (g % 3)), 0x00);
+    ext_seek(0x000010, false);
+    fm_write(0, 0, 0xA, 0x00);
+    fm_write(0, 0, 0x9, 0x00);
+    run(2000);
+
+    uint32_t dirty[SS_REGS_ITEMS];
+    ss_begin();
+    for (int i = 0; i < SS_REGS_ITEMS; i++) dirty[i] = ss_read(i);
+    ss_end();
+
+    int moved = 0;
+    for (int i = 0; i < SS_REGS_ITEMS; i++) if (dirty[i] != snap[i]) moved++;
+    if (moved == 0) {
+        fail("savestate regs: the scribble changed nothing, so this proves nothing");
+        return;
+    }
+
+    // Restore and verify inside ONE paused window. tick_acc (word 8) is a
+    // free-running fractional accumulator, held only while paused; unpause
+    // between the write and the readback and it has legitimately moved on,
+    // which is not a failed restore.
+    ss_begin();
+    for (int i = 0; i < SS_REGS_ITEMS; i++) ss_write(i, snap[i]);
+    uint32_t back[SS_REGS_ITEMS];
+    for (int i = 0; i < SS_REGS_ITEMS; i++) back[i] = ss_read(i);
+    ss_end();
+
+    int bad = 0, still_dirty = 0;
+    for (int i = 0; i < SS_REGS_ITEMS; i++) {
+        if (back[i] != snap[i]) {
+            if (back[i] == dirty[i]) still_dirty++;
+            if (bad < 6) printf("FAIL: savestate regs word %d: saved %08X, "
+                                "scribbled %08X, restored %08X%s\n",
+                                i, snap[i], dirty[i], back[i],
+                                back[i] == dirty[i] ? "  <-- restore was a no-op" : "");
+            bad++;
+        }
+    }
+    errors += bad;
+    if (bad == 0)
+        printf("savestate regs: %d words round-tripped through a scribble "
+               "(%d of them moved)\n", SS_REGS_ITEMS, moved);
+    else if (still_dirty)
+        printf("  %d of %d bad words still hold the scribbled value\n",
+               still_dirty, bad);
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vtb_ymf_top;
@@ -2145,6 +2259,7 @@ int main(int argc, char **argv) {
     test_loop_and_end_status();
     test_timer_a();
     test_key_off_release();
+    test_savestate_regs();
     test_polyphony();
     test_fm_carrier();
     test_waveforms();

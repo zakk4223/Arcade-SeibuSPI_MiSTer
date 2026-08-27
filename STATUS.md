@@ -56,8 +56,8 @@ any game we run. Two things we inherit rather than verify: waveforms 1–6 are
 upstream guesswork (the rewrite's own header says so), and the EXT1/EXT2 routing
 on the mono boards follows MAME without independent confirmation — no shipping
 MRA uses that path. `PLAN.md` 14.5 has the detail, including a savestate caveat:
-states written by the previous core load as noise, and the `SSIDX_YMF_REGS`
-section has never restored at all.
+states written by the previous core load as noise, since the per-slot state
+changed width and meaning and the stream carries no version field.
 
 **The cartridge sets are stereo and the single board is mono, the way MAME has
 them.** MAME routes YMF output 0 to the left speaker and 1 to the right for

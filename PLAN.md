@@ -4984,14 +4984,27 @@ and the section item counts did not change, so **a state written by the previous
 core loads as noise rather than being rejected**. There is no mechanism here to
 catch that.
 
-Worse, and pre-existing: **`SSIDX_YMF_REGS` does not restore at all.** Its write
-path acks and discards (`ymf271.sv`, the `ss_rg_acc` block), so the register
-file, the group sync modes, both timers, the end flags and the external-memory
-port are captured on save and thrown away on load. `fnum_latch` is new state in
-that same section and inherits the same gap. Fixing it means driving those
-registers from the restore path, and several of them -- `tick_acc` in
-particular -- live in other always blocks, so it is not a one-line change. It is
-unrelated to the OPX port and was left alone.
+**`SSIDX_YMF_REGS` did not restore at all**, which was pre-existing and is now
+fixed. Its write path acked and DISCARDED, so the register file, the group sync
+modes, both timers, the end flags and the external-memory port were captured on
+save and thrown away on load. The read side was complete, which is why it looked
+implemented.
+
+The section is 23 dwords now: the original eleven, plus twelve holding
+`fnum_latch`, which is new state the F-Number commit needs. Everything but
+`tick_acc` restores in the register block, placed last so it beats whatever the
+normal logic wrote that cycle; `tick_acc` is driven by the sample-tick block and
+restores there. `pause` is asserted throughout a restore so nothing should be
+racing, but none of this depends on that being true.
+
+`tb_ymf271`'s `savestate regs` check is the regression: it snapshots a
+distinctive machine -- two timers running, twelve different sync modes, a
+wave-memory address mid-read, a committed F-Number latch -- scribbles over all
+of it through the bus, restores, and requires every word back. Restore and
+readback happen inside ONE paused window, because `tick_acc` is a free-running
+accumulator and has legitimately moved on if you unpause between them. With the
+restore disabled the check reports 11 words still holding the scribbled value
+and says so in as many words.
 
 ### 14.6 What to check first when this is put on hardware
 

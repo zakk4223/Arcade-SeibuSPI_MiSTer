@@ -123,6 +123,9 @@ module ymf271
 			tick_acc    <= tick_next[26:0];
 			sample_tick <= 1'b0;
 		end
+		// The sample tick's phase is part of the state, and it is the one item
+		// of this section that is not driven by the register block below.
+		if (ss_rg_wr && (ss_rg_i == 32'd8)) tick_acc <= ss_rg_d[26:0];
 	end
 
 	// ------------------------------------------------------------------
@@ -464,6 +467,61 @@ module ymf271
 			endcase
 		end
 
+		// ---- savestate restore -------------------------------------------
+		// Every item of SSIDX_YMF_REGS except tick_acc, which is driven in the
+		// tick block and restored there. Last in the block so it beats whatever
+		// the normal logic wrote this cycle; `pause` means nothing should be
+		// writing, but this does not depend on that being true.
+		if (ss_rg_wr) begin
+			case (ss_rg_i)
+				32'd0: {regs_main[3],  regs_main[2],
+				        regs_main[1],  regs_main[0]}  <= ss_rg_d;
+				32'd1: {regs_main[7],  regs_main[6],
+				        regs_main[5],  regs_main[4]}  <= ss_rg_d;
+				32'd2: {regs_main[11], regs_main[10],
+				        regs_main[9],  regs_main[8]}  <= ss_rg_d;
+				32'd3: {regs_main[15], regs_main[14],
+				        regs_main[13], regs_main[12]} <= ss_rg_d;
+				32'd4: {grp_sync[11], grp_sync[10], grp_sync[9], grp_sync[8],
+				        grp_sync[7],  grp_sync[6],  grp_sync[5], grp_sync[4],
+				        grp_sync[3],  grp_sync[2],  grp_sync[1], grp_sync[0]}
+				           <= ss_rg_d[23:0];
+				32'd5: begin
+					timerA   <= ss_rg_d[9:0];
+					timerB   <= ss_rg_d[17:10];
+					enable   <= ss_rg_d[25:18];
+					status   <= ss_rg_d[27:26];
+					irqstate <= ss_rg_d[29:28];
+				end
+				32'd6: begin
+					end_status <= ss_rg_d[15:0];
+					timA_run   <= ss_rg_d[16];
+					timB_run   <= ss_rg_d[17];
+				end
+				32'd7: begin
+					timA_cnt <= ss_rg_d[10:0];
+					timB_cnt <= ss_rg_d[23:11];
+				end
+				32'd9: begin
+					// ext_req is a toggle against the engine's ext_ack. Restoring
+					// it can leave the two unequal, which costs one refetch of a
+					// byte the port was going to reread anyway.
+					ext_addr <= ss_rg_d[22:0];
+					ext_rw   <= ss_rg_d[23];
+					ext_req  <= ss_rg_d[24];
+					ext_pend <= ss_rg_d[25];
+				end
+				32'd10: ext_latch <= ss_rg_d[7:0];
+				default: ;
+			endcase
+			if (ss_rg_fl) begin
+				fnum_latch[ss_rg_fb]        <= ss_rg_d[7:0];
+				fnum_latch[ss_rg_fb + 6'd1] <= ss_rg_d[15:8];
+				fnum_latch[ss_rg_fb + 6'd2] <= ss_rg_d[23:16];
+				fnum_latch[ss_rg_fb + 6'd3] <= ss_rg_d[31:24];
+			end
+		end
+
 		if (reset) begin
 			seq_banks  <= 4'd0;
 			par_we     <= 1'b0;
@@ -489,6 +547,7 @@ module ymf271
 			ext_wd     <= 8'd0;
 			for (k = 0; k < 16; k = k + 1) regs_main[k] <= 8'd0;
 			for (k = 0; k < 12; k = k + 1) grp_sync[k]  <= 2'd0;
+			for (k = 0; k < 48; k = k + 1) fnum_latch[k] <= 8'd0;
 		end
 	end
 
@@ -527,12 +586,35 @@ module ymf271
 	endgenerate
 
 	// ------------------------------------------------------------------
-	// SSIDX_YMF_REGS -- twelve dwords, laid out here and nowhere else.
+	// SSIDX_YMF_REGS -- 23 dwords, laid out here and nowhere else.
+	//
+	//   0..3   regs_main[0..15]      the sixteen bus registers
+	//   4      grp_sync[0..11]
+	//   5      timerA/B, enable, status, irqstate
+	//   6      end_status, timA_run, timB_run
+	//   7      timA_cnt, timB_cnt
+	//   8      tick_acc              (restored in the tick block, not here)
+	//   9      ext_addr, ext_rw, ext_req, ext_pend
+	//   10     ext_latch
+	//   11..22 fnum_latch[0..47]     Block / F-Number2, four to a word
+	//
+	// This section used to be write-only in the wrong direction: the read path
+	// was complete and the write path did nothing but ack, so a load threw the
+	// whole register file away and the chip came back with whatever it happened
+	// to be holding. It restores now. `pause` is asserted throughout a restore,
+	// so nothing here is racing the bus, the timers or the wave-memory port --
+	// but the restore is placed last in each block anyway, so it wins if it is.
 	// ------------------------------------------------------------------
 	wire ss_rg_acc = ssbus_regs.access(SSIDX_YMF_REGS);
 	wire [31:0] ss_rg_i = ssbus_regs.addr;
+	wire        ss_rg_wr = ss_rg_acc && ssbus_regs.write;
+	wire [31:0] ss_rg_d  = ssbus_regs.data[31:0];
+	// word 11 + k holds fnum_latch[4k .. 4k+3]
+	wire        ss_rg_fl = ss_rg_wr && (ss_rg_i >= 32'd11) && (ss_rg_i < 32'd23);
+	wire  [5:0] ss_rg_fb = 6'((ss_rg_i - 32'd11) << 2);
 
 	function automatic [31:0] ymf_ss_rd(input [31:0] i);
+		reg [5:0] b;
 		case (i)
 			32'd0: ymf_ss_rd = {regs_main[3],  regs_main[2],
 			                    regs_main[1],  regs_main[0]};
@@ -552,12 +634,18 @@ module ymf271
 			32'd8: ymf_ss_rd = {5'd0, tick_acc};
 			32'd9: ymf_ss_rd = {6'd0, ext_pend, ext_req, ext_rw, ext_addr};
 			32'd10: ymf_ss_rd = {24'd0, ext_latch};
-			default: ymf_ss_rd = 32'd0;
+			default: begin
+				b = 6'((i - 32'd11) << 2);
+				ymf_ss_rd = ((i >= 32'd11) && (i < 32'd23))
+				          ? {fnum_latch[b+3], fnum_latch[b+2],
+				             fnum_latch[b+1], fnum_latch[b]}
+				          : 32'd0;
+			end
 		endcase
 	endfunction
 
 	always @(posedge clk) begin
-		ssbus_regs.setup(SSIDX_YMF_REGS, 32'd11, 2);
+		ssbus_regs.setup(SSIDX_YMF_REGS, 32'd23, 2);
 		if (ss_rg_acc) begin
 			if (ssbus_regs.read)
 				ssbus_regs.read_response(SSIDX_YMF_REGS,
