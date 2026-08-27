@@ -146,6 +146,16 @@ int main(int argc, char **argv)
 
     Vtb_video_top *dut = new Vtb_video_top;
 
+    // Screen flip. Gate 1 (see the flip plan) renders this same frozen capture
+    // with SPI_FLIP=0 and SPI_FLIP=1 and asserts the two are an exact 180
+    // rotation of each other. That is an IMPLEMENTATION check: both sides are
+    // the same RTL over identical state, so any mismatch is a bug in the mirror
+    // arithmetic, not a disagreement with a reference image. It also needs no
+    // MAME frame at all, which is what makes it usable on any capture.
+    const int flip = getenv("SPI_FLIP") ? atoi(getenv("SPI_FLIP")) : 0;
+    dut->i_flip  = flip ? 1 : 0;
+    dut->i_nospr = getenv("SPI_NOSPR") ? 1 : 0;
+
     // Per-set configuration, and it must match what spi_top.sv derives from
     // set_id -- see rtl/spi_defs.vh. The SEI252 sets have 6 MB of tiles and
     // 4 MB sprite chunks; rdft2 has 12 MB and 6 MB with RISE10; rfjet has 9 MB
@@ -977,6 +987,14 @@ int main(int argc, char **argv)
     }
 
     // ---- compare -----------------------------------------------------------
+    // Gate 1 support: dump the rendered frame verbatim so the flip=0 and flip=1
+    // runs can be compared outside. SPI_GOT names the file.
+    if (const char *gp = getenv("SPI_GOT")) {
+        FILE *f = fopen(gp, "wb");
+        if (f) { fwrite(got.data(), 4, got.size(), f); fclose(f);
+                 printf("wrote %s (flip=%d)\n", gp, flip); }
+    }
+
     std::vector<uint32_t> want((size_t)W * H);
     for (size_t i = 0; i < want.size(); i++)
         want[i] = (ref[i*4] | (ref[i*4+1] << 8) | (ref[i*4+2] << 16)) & 0xFFFFFF;

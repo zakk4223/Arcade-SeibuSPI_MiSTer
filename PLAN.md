@@ -11905,3 +11905,149 @@ cycles.
 FRAME=2400, the busy title scene). Occupancy is scene-dependent and a heavier
 game could sit closer to the line; the observable is sprites or tile columns
 dropping at 60 Hz that are clean at Normal.
+
+## 54. The savestate button is its own button (2026-08-25)
+
+`joySS` was Start (`joystick_p1[7] | joystick_p2[7]`). Every savestate gesture is
+that modifier plus a direction, so Start-plus-a-direction did two things at once:
+`savestate_ui` acted on it AND the board saw a Start press, because bit 7 is wired
+straight into SYSTEM b0/b1. There was no way to bind the two apart.
+
+It is **joystick bit 12** now, the ninth name in the MRA's `<buttons>` list, named
+`Savestate (SS)`. Bit 12 rather than a spare low bit for the same reason 33 gave
+for Pause at bit 11: the names map to bits 4 upwards IN ORDER, so appending to the
+list is what picks the bit. `joyStart` stays tied to 0 -- this module never reads
+it, only `joySS`.
+
+    [4] Shot  [5] Bomb  [6] Button 3  [7] Start  [8] Coin
+    [9] Service Coin  [10] Test  [11] Pause  [12] Savestate
+
+**It has no default binding, and it cannot have one.** Main's `default=` list
+takes only the eight base pad names -- "only base button names must be used
+(ABXYLR Start Select)", `joymapping.cpp:72` -- and the first eight buttons already
+use all eight. A ninth entry would have to name a button Main does not know, so
+the list is left at eight and Savestate is bound by hand in Define Buttons. The
+parenthesised `(SS)` in the name is Main's own idiom: `read_buttons()` truncates
+`joy_nnames` at the `(`, so the suffix shows in the mapping menu and is invisible
+to the default-map parser.
+
+The help text the pad shows shrank from 32 characters to 26, which is a fix and
+not cosmetics: `set_text()` in Main's `menu.cpp` wraps at 28 and wraps mid-word,
+so `Slot=Start+LR|Save/Load=Start+DU` rendered as `Slot=Start+LR|Save/Load=Star` /
+`t+DU`. It is `Slot=SS+LR|Save/Load=SS+DU` now, which fits on one line.
+
+All 49 MRAs and `tools/gen_mras.py` changed together, as 14.4 requires; the
+generator's self-test against the six hand-written parents still passes and
+regenerating the 42 clones produces no diff beyond the added name and comment.
+
+**Not fitted, not on hardware.** This is wiring only -- one bit index and a
+string -- but the bit index is the half that a build has to confirm.
+
+## 55. Screen flip: the DIP the board honours and MAME drops
+
+SW1:1 is a slide switch on the SPI main board (`JP071` on SXX2E, `JP051` on
+SXX2D — `seibuspi.cpp:170,224`) that rotates the picture 180° for an inverted
+cabinet monitor. **It works on the board. It does not work in MAME.** It did
+not work here either, and this section records why and what was measured,
+because the mechanism is not what the core's own comments assumed.
+
+### What the switch actually does
+
+`SeibuSPI.sv` used to say the DIP was something "the GAME reads out of INPUTS
+bit 15 and acts on itself". Half right. Measured with `tb_boot`:
+
+* The game reads `INPUTS` (0x604) **once per frame** — 139 reads over 141
+  vblanks.
+* Toggling the DIP changes exactly **two** things in the whole I/O trace:
+
+      0x418  reg_1a             0x8028 -> 0x8029     (one bit: bit 0)
+      0x42C..0x438  layer_scroll_base  0x01ED01D7 -> 0x03020368
+
+  The real scroll registers (0x420/0x424/0x428) are **identical**.
+
+So the game does not draw itself flipped. It tells the CRTC to flip, via
+`reg_1a` bit 0 — which MAME's own CRTC map documents (`seibu_crtc.cpp:34`,
+`---x Flip Screen`) and which `seibuspi_v.cpp` then never decodes: its
+`layer_bank_w` takes bit 15 and bit 11 only. `spi_io.sv` inherited that
+verbatim, comment included. The bit was already captured, already in the
+savestate, and simply unused.
+
+### Why a pure 180° rotation is right, and where the constants came from
+
+The trap worth naming: if the game pre-compensates its registers and the RTL
+also mirrors, the two double-correct. It *does* compensate — but in
+`layer_scroll_base`, which neither MAME nor this core implements (`seibuspi.cpp`
+never connects `layer_scroll_base_callback`). Since `reg_1a` bit 0 is the only
+register this core honours that moves with the DIP, our render of the DIP-on
+state is identical to our render of the DIP-off state, and a pure rotation is
+exactly right — **because of the gap, not in spite of it.** Honouring
+`layer_scroll_base` later without revisiting this would break flip.
+
+That compensation also pins the mirror centres, which would otherwise be
+guesses. Both tilemaps are 512, so mod 512:
+
+    axis   DIP off  DIP on   sum    mod 512
+    X      0x1D7    0x368    1343   319 = 320-1
+    Y      0x1ED    0x302    1263   239 = 240-1
+
+`base' = (active_dim - 1) - base`. Mirror about 319 and 239, derived.
+
+### The implementation, and the one thing that must not be mirrored
+
+`spi_io` exposes `layer_bank[0]` as a registered `flip_screen`; `spi_top`
+two-flop synchronises it (it is a `clk_cpu` register — the same crossing whose
+raw version once failed setup by 6.4 ns) and latches it **once a frame on
+`line_start && vcnt == VBSTART`**. Not `vbl_rise`: that is gated on `pause` and
+deferred through `vbl_pend`, so after a savestate it fires at an arbitrary
+raster position and would flip part of a frame. The latch is not cosmetic —
+`spi_sprite` decides which sprites are on a line during its scan and recomputes
+the row during the draw, so a mid-line change tears individual sprites.
+
+Both engines then derive **`src_row = flip ? 239 - render_line : render_line`**
+and use it in exactly the places that ask "which source row is on this line":
+`src_y` and `rs_index` in `spi_layers`, `dy` and `sc_dy` in `spi_sprite`.
+Horizontally, only the line-buffer **write address** mirrors, leaving the
+`0 <= emit_x < 320` guards and the visibility tests on the unmirrored
+coordinate.
+
+`next_line`, `render_bank`, `redundant_pass`, `last_blank_line` and `disp_bank`
+are untouched, and that is the whole safety argument: `render_bank` is
+`~next_line[0]` and `disp_bank` is `~vcnt[0]`, and `239 - y` inverts parity on
+**every** line, so a mirrored row reaching the banking swaps the double buffer
+and the mixer reads the line being written. Raiden II hit exactly this class of
+bug. Rowscroll takes the mirrored row because MAME indexes that table by
+*screen* row while the source row is the scrolled one
+(`seibuspi_v.cpp:405-420`), so the two move together.
+
+### How it is checked
+
+`make run-flip CAP=... SDRAM=...` renders one frozen capture twice and requires
+
+    flipped[x, y] == plain[319-x, 239-y]
+
+for all 76,800 pixels. Both sides are the same RTL over identical state, so
+there is no tolerance: 320 and 240 are even and both are multiples of 8 and 16,
+so no centre pixel and no character cell straddles the mirror. It passes
+exactly, tile layers and sprites together, with no sprite/background desync of
+the kind Raiden 1 documents.
+
+`tools/check_flip.py` also **refuses a frame with fewer than 8 distinct
+colours**, and that guard is there because it was earned: the first attempt at
+this test compared two frames of a flat background, reported "identical" and
+looked like a broken mirror for several builds. It was the test that was blind.
+A `src_row != render_line` probe settled it in one run — the lesson in
+`seibuspi-measure-dont-reason`, re-learned.
+
+### Two testbench bugs found on the way
+
+* `tb_boot_top` tied `inputs` to `16'hFFFF`, and INPUTS bit 15 passes through
+  **uninverted** (14.4). So every simulation in the core's history ran with the
+  flip DIP **asserted**. It changed nothing observable, but it means the
+  long-quoted boot hash `B9FDBFA12821F47F` was measuring the wrong thing. The
+  DIP-off baseline is `C4B7FCC4DF301081` / EIP `1817785`.
+* The frame dump used `best_fb`, the *busiest* frame by non-black count. Two
+  runs that differ at all can select different frames, which makes any
+  cross-run picture comparison meaningless. `SPI_PPM_FRAME` pins it by number;
+  anything comparing frames across runs must use it.
+
+**Not fitted, not on hardware.** The sim proof is exact but it is a sim proof.

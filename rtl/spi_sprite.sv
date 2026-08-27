@@ -53,6 +53,9 @@ module spi_sprite
 	input       [9:0] vcnt,
 	input             line_start,
 	input             enable,       // layer_enable[4] inverted
+	// Screen flip (reg_1a bit 0), latched once a frame by spi_top. Mirrors the
+	// CONTENT only, exactly as in spi_layers -- see src_row below.
+	input             flip,
 
 	// Per set. `spr_chunk_size` is the SOURCE size of one plane-pair chunk --
 	// 4 MB for the SEI252 games, 6 MB for rdft2, 8 MB for rfjet. It is no longer
@@ -201,7 +204,21 @@ module spi_sprite
 	// Only the low 7 bits matter: a sprite is at most 8 tiles tall, and the
 	// hit test above has already established the line falls inside it.
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire signed [10:0] dy    = $signed({2'b00, render_line}) - spr_y;
+	// THE MIRRORED CONTENT ROW -- the vertical half of screen flip, and the
+	// same construction spi_layers uses. It must reach ONLY the two places that
+	// ask "which source row is on this line" (dy here, sc_dy in the scanner)
+	// and never next_line, render_bank or disp_bank: those are timing, and
+	// 239-y inverts parity on every line, which would swap the double buffer
+	// against the tile layers and put sprites one line out.
+	//
+	// Both users must see the SAME value within a line, which is why spi_top
+	// latches flip per frame: the scanner decides which sprites are on the line
+	// and the drawer recomputes the row, and a mid-line change would tear
+	// individual sprites rather than just the frame.
+	wire [8:0] src_row = flip ? 9'((VBSTART - 10'd1) - {1'b0, render_line})
+	                          : render_line;
+
+	wire signed [10:0] dy    = $signed({2'b00, src_row}) - spr_y;
 	/* verilator lint_on UNUSEDSIGNAL */
 	wire         [2:0] vcell = dy[6:4];
 	wire         [3:0] yrow  = dy[3:0];
@@ -454,7 +471,7 @@ module spi_sprite
 
 	wire [8:0] sc_sy = spr_data[24:16];
 	wire signed [10:0] sc_spr_y = (sc_sy >= 9'h180) ? {2'b11, sc_sy} : {2'b00, sc_sy};
-	wire signed [10:0] sc_dy    = $signed({2'b00, render_line}) - sc_spr_y;
+	wire signed [10:0] sc_dy    = $signed({2'b00, src_row}) - sc_spr_y;
 	wire sc_yhit = (sc_dy >= 0) && (sc_dy[10:4] <= {4'd0, s_attr[14:12]});
 
 	// ... and the same test on X, which nothing used to do. The y test alone
@@ -731,7 +748,18 @@ module spi_sprite
 				E_RUN: begin
 					if (pix_sel != 6'd63 && emit_x >= 0 && emit_x < 11'sd320) begin
 						dbg_emitted <= dbg_emitted + 16'd1;
-						lb_wr_addr <= {render_bank, emit_x[8:0]};
+						// Only the ADDRESS mirrors. The emit_x >= 0 && < 320
+						// guard above stays on the unmirrored coordinate --
+						// visibility is a property of the source position and
+						// the mirror is a bijection on 0..319, so clipping
+						// before it and after it are the same set. The clear
+						// pass walks 0..319 and is symmetric, so it needs no
+						// change -- but that now DEPENDS on the bijection, so
+						// clearing only the touched columns would break flip
+						// invisibly.
+						lb_wr_addr <= {render_bank,
+						               flip ? (9'd319 - emit_x[8:0])
+						                    : emit_x[8:0]};
 						lb_wr_data <= {1'b1, r_pri[eb], r_colr[eb], pix_sel};
 						lb_we      <= 1'b1;
 					end

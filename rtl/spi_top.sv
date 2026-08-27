@@ -156,8 +156,6 @@ module spi_top
 	// OSD video timing mode and analog sync position; straight through to
 	// spi_video_timing, which documents what they do.
 	input       [1:0] video_mode,
-	input       [3:0] hoffset,
-	input       [3:0] voffset,
 
 	output            ce_pix,
 	output      [7:0] red,
@@ -178,7 +176,7 @@ module spi_top
 	// ------------------------------------------------------------------
 	// Raster
 	// ------------------------------------------------------------------
-	wire [9:0] hcnt, vcnt;
+	wire [9:0] hcnt, vcnt, vlast;
 	wire       line_start, vbl_rise;
 
 	wire sys_reset;
@@ -191,11 +189,10 @@ module spi_top
 		.pause      (ss_pause),
 		.vbl_next   (vbl_next),
 		.video_mode (video_mode),
-		.hoffset    (hoffset),
-		.voffset    (voffset),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
+		.vlast      (vlast),
 		.hsync      (hsync),
 		.vsync      (vsync),
 		.hblank     (hblank),
@@ -436,18 +433,34 @@ module spi_top
 	// flop synchroniser is both correct and enough. Register them once here
 	// rather than at each consumer.
 	reg  [4:0] lay_en_s1, lay_en_s2;
-	reg  [1:0] rs_en_s, fd13_s;
+	reg  [1:0] rs_en_s, fd13_s, flip_s;
 	reg  [2:0] bank_s1, bank_s2;
 	always @(posedge clk_sys) begin
 		lay_en_s1 <= layer_enable;  lay_en_s2 <= lay_en_s1;
 		rs_en_s   <= {rs_en_s[0], rowscroll_enable};
 		fd13_s    <= {fd13_s[0],  fore_layer_d13};
+		flip_s    <= {flip_s[0],  flip_screen};
 		bank_s1   <= rf2_layer_bank; bank_s2 <= bank_s1;
 	end
 	wire       rowscroll_en_s = rs_en_s[1];
 	wire       fore_d13_s     = fd13_s[1];
 
-	wire        rowscroll_enable, fore_layer_d13;
+	// Flip is latched ONCE A FRAME on top of the synchroniser, and the strobe is
+	// the raster's own entry into blanking rather than vbl_rise. vbl_rise is
+	// gated on `pause` and deferred through vbl_pend, so after a savestate --
+	// millions of cycles -- it would fire at an arbitrary raster position and
+	// flip part of a frame. This one cannot.
+	//
+	// The latch is not cosmetic. spi_sprite decides which sprites are on a line
+	// during its SCAN and recomputes the row during the DRAW; a flip that moved
+	// between the two would tear individual sprites, not just the frame.
+	reg flip_lat;
+	always @(posedge clk_sys) begin
+		if (vid_reset)                                flip_lat <= 1'b0;
+		else if (line_start && (vcnt == VBSTART))     flip_lat <= flip_s[1];
+	end
+
+	wire        rowscroll_enable, fore_layer_d13, flip_screen;
 	wire  [2:0] rf2_layer_bank;
 	wire [15:0] scroll_bx, scroll_by, scroll_mx, scroll_my, scroll_fx, scroll_fy;
 	wire [17:0] dma_src;
@@ -497,6 +510,7 @@ module spi_top
 		.layer_enable     (layer_enable),
 		.rowscroll_enable (rowscroll_enable),
 		.fore_layer_d13   (fore_layer_d13),
+		.flip_screen      (flip_screen),
 		.rf2_layer_bank   (rf2_layer_bank),
 		.scroll_bx        (scroll_bx),
 		.scroll_by        (scroll_by),
@@ -992,12 +1006,14 @@ module spi_top
 		.reset            (vid_reset),
 		.dbg_state        (),
 		.vcnt             (vcnt),
+		.vlast            (vlast),
 		.line_start       (line_start),
 
 		.scroll_bx        (scroll_bx), .scroll_by(scroll_by),
 		.scroll_mx        (scroll_mx), .scroll_my(scroll_my),
 		.scroll_fx        (scroll_fx), .scroll_fy(scroll_fy),
 		.rowscroll_enable (rowscroll_en_s),
+		.flip             (flip_lat),
 		.layer_off        (lay_en_s2[3:0]),
 		.fore_layer_d13   (fore_d13_s),
 		.rf2_layer_bank   (bank_s2),
@@ -1079,6 +1095,7 @@ module spi_top
 		.vcnt       (vcnt),
 		.line_start (line_start),
 		.enable     (~lay_en_s2[4]),
+		.flip       (flip_lat),
 		.spr_chunk_size(spr_chunk),
 		.rise10     (spr_rise10),
 		.rise11     (spr_rise11),
@@ -1151,52 +1168,22 @@ module spi_top
 	// ------------------------------------------------------------------
 	wire [7:0] mix_r, mix_g, mix_b;
 
-	// ------------------------------------------------------------------
-	// WEDGE OVERLAY -- diagnostic, PLAN.md 45.
-	//
-	// The rapid-reload lockup only happens on hardware, four candidate fixes
-	// have missed, and there is no probe on the board since 35 deleted the JTAG
-	// modules. So the wedge reports itself: if a savestate stays busy far longer
-	// than any real operation, paint its state across the top of the picture as
-	// a row of blocks, white for 1. A screenshot then says exactly what is
-	// stuck, which is what solved the same class of bug in simulation (43.1).
-	//
-	// A save is ~2.1 M clk_sys cycles and a load ~1.3 M. This trips at 2^23,
-	// 8.4 M, about 146 ms -- four times the longest real operation.
-	// ------------------------------------------------------------------
+	// The savestate sequencer's state, exported for sim/tb_boot_top. It used to
+	// also drive a WEDGE OVERLAY -- a row of blocks painted across the top of
+	// the picture when a savestate stayed busy past 146 ms, so a screenshot
+	// could say what was stuck (PLAN.md 45). That lockup is fixed and confirmed
+	// on hardware, and the overlay was the only diagnostic left in the
+	// synthesised net: it cost a free-running 24-bit counter, an 11:1 mux and a
+	// three-deep mux on each of red/green/blue, the last of those sitting in the
+	// video path this core has the least timing room in. Removed; `git log` has
+	// it if the class of bug ever comes back.
 	wire  [4:0] ss_dbg_st;
 	assign ss_dbg_seq = ss_dbg_st;
 	wire        ss_cpu_idle;
-	reg  [23:0] ss_stuck_cnt;
-	always @(posedge clk_sys) begin
-		if (sys_reset || !ss_busy) ss_stuck_cnt <= 24'd0;
-		else if (!ss_stuck_cnt[23]) ss_stuck_cnt <= ss_stuck_cnt + 24'd1;
-	end
-	wire ss_wedged = ss_stuck_cnt[23];
 
-	// The bits, LSB first across the screen:
-	//   0..3 spi_ss state   4 is_load       5 pause
-	//   6 io_stall          7 z80dl_stall   8 ds_stall
-	//   9 cpu snapshot     10 cpu in stub
-	wire [10:0] ss_dbg_bits = {ss_in_stub, ss_snapshot,
-	                           ss_dbg_stalls[0], ss_dbg_stalls[1],
-	                           ss_dbg_stalls[2], ss_pause, ss_dbg_st};
-
-	// Rows 16..31, one 16-pixel block per bit starting at column 16. A red block
-	// at column 0 says the overlay is live, so a screenshot without it means the
-	// core is not wedged rather than that the probe failed.
-	wire dbg_row  = ss_wedged && (vcnt >= 10'd16) && (vcnt < 10'd32);
-	wire dbg_mark = dbg_row && (hcnt < 10'd16);
-	wire dbg_cell = dbg_row && (hcnt >= 10'd16) && (hcnt < 10'd16 + 11*10'd16);
-	/* verilator lint_off UNUSEDSIGNAL */
-	wire [9:0] dbg_off = hcnt - 10'd16;   // only [7:4] selects the block
-	/* verilator lint_on UNUSEDSIGNAL */
-	wire [3:0] dbg_idx = dbg_off[7:4];
-	wire dbg_bit  = ss_dbg_bits[dbg_idx];
-
-	assign red   = dbg_mark ? 8'hFF : dbg_cell ? (dbg_bit ? 8'hFF : 8'h10) : mix_r;
-	assign green = dbg_mark ? 8'h00 : dbg_cell ? (dbg_bit ? 8'hFF : 8'h10) : mix_g;
-	assign blue  = dbg_mark ? 8'h00 : dbg_cell ? (dbg_bit ? 8'hFF : 8'h40) : mix_b;
+	assign red   = mix_r;
+	assign green = mix_g;
+	assign blue  = mix_b;
 
 	// SXX2E is a mono board: the YMF271's four outputs are summed onto one
 	// speaker, so both sides carry the same sample.

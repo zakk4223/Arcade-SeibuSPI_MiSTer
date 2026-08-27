@@ -18,3 +18,13 @@ lint_off -file "*ddram.sv"
 lint_off -file "*system_consts.sv"
 lint_off -file "*ss_ram.sv"
 lint_off -file "*tv80*"
+
+// rmonic79's CRT geometry modules, imported UNMODIFIED from
+// Arcade-Raiden2_MiSTer so they can be diffed against upstream. Same treatment
+// as z386 and the savestate framework: their lint is upstream's, not ours. The
+// warnings are width-inference noise (WIDTHEXPAND/WIDTHTRUNC on signed vsize
+// arithmetic and on the HTOTAL-wide HSync shift register) and benign -- Quartus
+// infers the same widths. Editing them here would make the next upstream pull a
+// merge instead of a copy.
+lint_off -file "*crt_adjust.sv"
+lint_off -file "*crt_vsize.sv"
