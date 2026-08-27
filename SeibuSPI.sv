@@ -285,13 +285,16 @@ localparam CONF_STR = {
 	// selecting "Sample Flash" opened Video Settings. PLAN.md 49.
 	//
 	// The first entry is the help text the pad shows, and it is written for
-	// THIS core's wiring: `joySS` is Start and `joyStart` is tied to 0, so
-	// every combination is Start plus a direction. The stock string says
-	// "Slot=DPAD", which is right for a core with a dedicated SS button and
-	// wrong here -- it sent someone looking for a slot-switching bug that did
-	// not exist.
+	// THIS core's wiring: `joySS` is the dedicated Savestate button (joystick
+	// bit 12) and `joyStart` is tied to 0, so every combination is that button
+	// plus a direction. It used to be Start, which meant the savestate UI and
+	// a board input shared a press; PLAN.md 54.
+	//
+	// Keep it to 28 characters. set_text() in Main's menu.cpp wraps there, and
+	// it wraps mid-word: the old 32-character string rendered as
+	// "Slot=Start+LR|Save/Load=Star" / "t+DU".
 	"I,",
-	"Slot=Start+LR|Save/Load=Start+DU,",
+	"Slot=SS+LR|Save/Load=SS+DU,",
 	"Active Slot 1,",
 	"Active Slot 2,",
 	"Active Slot 3,",
@@ -1167,6 +1170,13 @@ end
 //   [4]   Shot        [5] Bomb        [6] Button 3
 //   [7]   Start       [8] Coin        [9] Service Coin   [10] Test
 //   [11]  Pause -- not a board input at all, see the block above
+//   [12]  Savestate -- also not a board input; it is savestate_ui's `joySS`,
+//         the modifier that the d-pad combinations are built on
+//
+// Bit 12 has NO default in the MRA's `default=` list and that is not an
+// oversight: Main only accepts the eight base pad names there (A B X Y L R
+// Start Select, joymapping.cpp:72) and the first eight buttons have taken all
+// of them. It has to be mapped by hand in Define Buttons.
 //
 // This used to read [7] as coin and [8] as start, which did not line up with
 // the MRA at all -- the MRA named eight entries with two placeholders in the
@@ -1491,7 +1501,7 @@ savestate_ui #(.INFO_TIMEOUT_BITS(25)) savestate_ui
 	.clk           (clk_sys),
 	.ps2_key       (ps2_key[10:0]),
 	.allow_ss      (rom_ready && !reset),
-	.joySS         (joystick_p1[7] | joystick_p2[7]),   // Start
+	.joySS         (joystick_p1[12] | joystick_p2[12]),  // Savestate button
 	.joyRight      (joystick_p1[0] | joystick_p2[0]),
 	.joyLeft       (joystick_p1[1] | joystick_p2[1]),
 	.joyDown       (joystick_p1[2] | joystick_p2[2]),

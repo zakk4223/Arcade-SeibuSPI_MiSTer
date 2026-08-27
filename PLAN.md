@@ -11905,3 +11905,41 @@ cycles.
 FRAME=2400, the busy title scene). Occupancy is scene-dependent and a heavier
 game could sit closer to the line; the observable is sprites or tile columns
 dropping at 60 Hz that are clean at Normal.
+
+## 54. The savestate button is its own button (2026-08-25)
+
+`joySS` was Start (`joystick_p1[7] | joystick_p2[7]`). Every savestate gesture is
+that modifier plus a direction, so Start-plus-a-direction did two things at once:
+`savestate_ui` acted on it AND the board saw a Start press, because bit 7 is wired
+straight into SYSTEM b0/b1. There was no way to bind the two apart.
+
+It is **joystick bit 12** now, the ninth name in the MRA's `<buttons>` list, named
+`Savestate (SS)`. Bit 12 rather than a spare low bit for the same reason 33 gave
+for Pause at bit 11: the names map to bits 4 upwards IN ORDER, so appending to the
+list is what picks the bit. `joyStart` stays tied to 0 -- this module never reads
+it, only `joySS`.
+
+    [4] Shot  [5] Bomb  [6] Button 3  [7] Start  [8] Coin
+    [9] Service Coin  [10] Test  [11] Pause  [12] Savestate
+
+**It has no default binding, and it cannot have one.** Main's `default=` list
+takes only the eight base pad names -- "only base button names must be used
+(ABXYLR Start Select)", `joymapping.cpp:72` -- and the first eight buttons already
+use all eight. A ninth entry would have to name a button Main does not know, so
+the list is left at eight and Savestate is bound by hand in Define Buttons. The
+parenthesised `(SS)` in the name is Main's own idiom: `read_buttons()` truncates
+`joy_nnames` at the `(`, so the suffix shows in the mapping menu and is invisible
+to the default-map parser.
+
+The help text the pad shows shrank from 32 characters to 26, which is a fix and
+not cosmetics: `set_text()` in Main's `menu.cpp` wraps at 28 and wraps mid-word,
+so `Slot=Start+LR|Save/Load=Start+DU` rendered as `Slot=Start+LR|Save/Load=Star` /
+`t+DU`. It is `Slot=SS+LR|Save/Load=SS+DU` now, which fits on one line.
+
+All 49 MRAs and `tools/gen_mras.py` changed together, as 14.4 requires; the
+generator's self-test against the six hand-written parents still passes and
+regenerating the 42 clones produces no diff beyond the added name and comment.
+
+**Not fitted, not on hardware.** This is wiring only -- one bit index and a
+string -- but the bit index is the half that a build has to confirm.
+

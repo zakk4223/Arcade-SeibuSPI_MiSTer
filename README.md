@@ -49,14 +49,14 @@ current gaps:
 
 Quartus Prime 17.0.0 Lite, Cyclone V `5CSEBA6U23I7` (MiSTer DE10-Nano),
 top-level entity `sys_top`. From `output_files/SeibuSPI.fit.summary`,
-fit dated 2026-08-19.
+fit dated 2026-08-25.
 
 | Resource                | Used      | Available | Utilization |
 |-------------------------|-----------|-----------|-------------|
-| Logic utilization (ALMs)| 33,980    | 41,910    | 81 %        |
-| Total registers         | 32,681    | -         | -           |
-| Block memory bits       | 3,547,869 | 5,662,720 | 63 %        |
-| RAM blocks              | 484       | 553       | 88 %        |
+| Logic utilization (ALMs)| 36,509    | 41,910    | 87 %        |
+| Total registers         | 35,523    | -         | -           |
+| Block memory bits       | 3,563,997 | 5,662,720 | 63 %        |
+| RAM blocks              | 487       | 553       | 88 %        |
 | DSP blocks              | 61        | 112       | 54 %        |
 | PLLs                    | 3         | 6         | 50 %        |
 | Pins                    | 145       | 314       | 46 %        |

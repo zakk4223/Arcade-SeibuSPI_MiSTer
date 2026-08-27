@@ -382,8 +382,10 @@ thing.
 | 9 | Service Coin | R |
 | 10 | Test (held, not latched) | L |
 | 11 | **Pause** | Y |
+| 12 | **Savestate (SS)** | *unmapped* |
 
 Keyboard: `1`/`2` start, `5`/`6` coin, `9` service coin, `F2` test.
+Savestates on the keyboard are `F1`-`F4` to load and `Alt`+`F1`-`F4` to save.
 
 **Pause** is bit 11 and not button 3, because four of the seven sets are MAME's
 `spi_3button` and use button 3 as a game input. It toggles: press to freeze, press
@@ -392,6 +394,15 @@ frame stays on screen and can be studied or captured at leisure, which also make
 it the tool to reach for on a rendering fault. The music carries on, since the Z80
 and the YMF271 are not gated; what you hear is whatever loop the Z80 was in when
 the 386 stopped feeding it.
+
+**Savestate (SS)** is bit 12, and it is the savestate UI's modifier button, not an
+action on its own: hold it and press Left/Right to pick a slot, Down to save, Up to
+load. Holding it alone shows the help text. It used to be **Start**, which meant
+the same press was also a board input -- pressing Start with a direction held did
+both -- so it is a button of its own now (`PLAN.md` 54). It is the ONE control with
+no default binding: the MRA's `default=` list only accepts the eight base pad names
+and the first eight buttons use all of them, so it has to be bound by hand in
+Define Buttons.
 
 ## Debugging aids
 
