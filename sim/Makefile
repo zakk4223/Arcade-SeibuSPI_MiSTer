@@ -230,6 +230,19 @@ obj_dir/Vspi_video_timing: $(RTL)/spi_video_timing.sv $(RTL)/spi_defs.vh tb_timi
 	$(VERILATOR) $(VFLAGS) --top-module spi_video_timing \
 	    $(RTL)/spi_video_timing.sv tb_timing.cpp
 
+# Screen flip: the flipped render must be an EXACT 180 rotation of the plain
+# one, from the SAME frozen capture. There is no reference to check a flipped
+# frame against -- MAME drops reg_1a bit 0 -- so this checks the RTL against
+# itself, which is what actually pins the mirror arithmetic. Needs a capture.
+#   make run-flip CAP=/tmp/slop_cap SDRAM=/tmp/sdram.bin
+run-flip: obj_dir/Vtb_video_top
+	@SPI_FLIP=0 SPI_GOT=$(CAP)/flip_plain.bin ./obj_dir/Vtb_video_top $(CAP) $(SDRAM) >/dev/null
+	@# The flipped pass is EXPECTED to fail the golden check -- it is compared
+	@# against MAME's unflipped reference frame, and MAME does not flip. Only
+	@# its dumped frame is wanted here; run-video is what guards the reference.
+	@SPI_FLIP=1 SPI_GOT=$(CAP)/flip_180.bin ./obj_dir/Vtb_video_top $(CAP) $(SDRAM) >/dev/null || true
+	@python3 $(TOOLS)/check_flip.py $(CAP)/flip_plain.bin $(CAP)/flip_180.bin
+
 run-video: obj_dir/Vtb_video_top
 	@./obj_dir/Vtb_video_top $(CAP) $(SDRAM)
 

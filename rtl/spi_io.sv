@@ -42,6 +42,12 @@ module spi_io
 	output reg  [4:0] layer_enable,     // 0 = on
 	output reg        rowscroll_enable,
 	output reg        fore_layer_d13,
+	// reg_1a bit 0 = Flip Screen. MAME's own CRTC map documents it
+	// (seibu_crtc.cpp:34, "---x Flip Screen") but seibuspi_v.cpp decodes only
+	// bits 15 and 11, so MAME never flips -- the real board does. Registered
+	// here rather than tapped combinationally for the same reason the two
+	// flags above are: see spi_top's synchroniser.
+	output reg        flip_screen,
 	output reg  [2:0] rf2_layer_bank,   // 0x68E; not written on SXX2E
 	output reg [15:0] scroll_bx, scroll_by,
 	output reg [15:0] scroll_mx, scroll_my,
@@ -201,11 +207,19 @@ module spi_io
 	// a partial write can only disturb the byte it actually addresses. MAME does
 	// the same: COMBINE_DATA into m_layer_bank, then BIT(m_layer_bank, 15).
 	/* verilator lint_off UNUSEDSIGNAL */
-	reg [15:0] layer_bank;   // only bits 15 and 11 are decoded
+	reg [15:0] layer_bank;   // only bits 15, 11 and 0 are decoded
 	/* verilator lint_on UNUSEDSIGNAL */
 	always @(posedge clk) begin
 		rowscroll_enable <= layer_bank[15];
 		fore_layer_d13   <= layer_bank[11];
+		// Bit 0 is the cabinet's flip-screen slide switch, arriving here the
+		// long way round: the switch is an INPUTS bit, the game reads it every
+		// frame and writes it back out as this bit. Measured on rdfts -- the
+		// ONLY register bits that move when the DIP is toggled are this one and
+		// layer_scroll_base (0x42C-0x438), which neither MAME nor this core
+		// implements. That gap is what makes a plain 180 rotation correct here;
+		// see spi_layers' src_row.
+		flip_screen      <= layer_bank[0];
 	end
 
 	always @(posedge clk) begin

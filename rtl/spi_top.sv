@@ -433,18 +433,34 @@ module spi_top
 	// flop synchroniser is both correct and enough. Register them once here
 	// rather than at each consumer.
 	reg  [4:0] lay_en_s1, lay_en_s2;
-	reg  [1:0] rs_en_s, fd13_s;
+	reg  [1:0] rs_en_s, fd13_s, flip_s;
 	reg  [2:0] bank_s1, bank_s2;
 	always @(posedge clk_sys) begin
 		lay_en_s1 <= layer_enable;  lay_en_s2 <= lay_en_s1;
 		rs_en_s   <= {rs_en_s[0], rowscroll_enable};
 		fd13_s    <= {fd13_s[0],  fore_layer_d13};
+		flip_s    <= {flip_s[0],  flip_screen};
 		bank_s1   <= rf2_layer_bank; bank_s2 <= bank_s1;
 	end
 	wire       rowscroll_en_s = rs_en_s[1];
 	wire       fore_d13_s     = fd13_s[1];
 
-	wire        rowscroll_enable, fore_layer_d13;
+	// Flip is latched ONCE A FRAME on top of the synchroniser, and the strobe is
+	// the raster's own entry into blanking rather than vbl_rise. vbl_rise is
+	// gated on `pause` and deferred through vbl_pend, so after a savestate --
+	// millions of cycles -- it would fire at an arbitrary raster position and
+	// flip part of a frame. This one cannot.
+	//
+	// The latch is not cosmetic. spi_sprite decides which sprites are on a line
+	// during its SCAN and recomputes the row during the DRAW; a flip that moved
+	// between the two would tear individual sprites, not just the frame.
+	reg flip_lat;
+	always @(posedge clk_sys) begin
+		if (vid_reset)                                flip_lat <= 1'b0;
+		else if (line_start && (vcnt == VBSTART))     flip_lat <= flip_s[1];
+	end
+
+	wire        rowscroll_enable, fore_layer_d13, flip_screen;
 	wire  [2:0] rf2_layer_bank;
 	wire [15:0] scroll_bx, scroll_by, scroll_mx, scroll_my, scroll_fx, scroll_fy;
 	wire [17:0] dma_src;
@@ -494,6 +510,7 @@ module spi_top
 		.layer_enable     (layer_enable),
 		.rowscroll_enable (rowscroll_enable),
 		.fore_layer_d13   (fore_layer_d13),
+		.flip_screen      (flip_screen),
 		.rf2_layer_bank   (rf2_layer_bank),
 		.scroll_bx        (scroll_bx),
 		.scroll_by        (scroll_by),
@@ -996,6 +1013,7 @@ module spi_top
 		.scroll_mx        (scroll_mx), .scroll_my(scroll_my),
 		.scroll_fx        (scroll_fx), .scroll_fy(scroll_fy),
 		.rowscroll_enable (rowscroll_en_s),
+		.flip             (flip_lat),
 		.layer_off        (lay_en_s2[3:0]),
 		.fore_layer_d13   (fore_d13_s),
 		.rf2_layer_bank   (bank_s2),
@@ -1077,6 +1095,7 @@ module spi_top
 		.vcnt       (vcnt),
 		.line_start (line_start),
 		.enable     (~lay_en_s2[4]),
+		.flip       (flip_lat),
 		.spr_chunk_size(spr_chunk),
 		.rise10     (spr_rise10),
 		.rise11     (spr_rise11),

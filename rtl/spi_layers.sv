@@ -60,6 +60,9 @@ module spi_layers
 	input      [15:0] scroll_mx, scroll_my,
 	input      [15:0] scroll_fx, scroll_fy,
 	input             rowscroll_enable,
+	// Screen flip (reg_1a bit 0), latched once a frame by spi_top. Mirrors the
+	// CONTENT only -- see src_row below and the write mirror at the emit.
+	input             flip,
 	input       [3:0] layer_off,      // 1 = layer disabled, skip it entirely
 
 	input             fore_layer_d13,
@@ -206,7 +209,28 @@ module spi_layers
 	// value rather than a true constant, but every SPI game uses the same one.
 	// Entries are 16-bit signed, two per tilemap RAM dword.
 	// ------------------------------------------------------------------
-	wire [8:0] rs_index = render_line + 9'd19;
+	// THE MIRRORED CONTENT ROW, and the whole vertical half of screen flip.
+	//
+	// render_line is DEFINED as the display line whose buffer is being filled,
+	// so src_row is a function of the display line and nothing else: the
+	// one-line lead and the vblank pinning decide WHEN a pass runs, never WHICH
+	// display line it serves. That is why neither needs a compensating term.
+	// Walked: vcnt=238 fills display 239 -> src_row 0; vcnt>=239 pins to
+	// display 0 -> src_row 239. Both are what a 180 rotation wants.
+	//
+	// It must NOT reach next_line, render_bank, redundant_pass or disp_bank.
+	// Those are timing, not content, and 239-y inverts parity on every line
+	// (239 is odd) -- feeding a mirrored row to the banking swaps the double
+	// buffer and the mixer reads the line it is being written. Raiden II hit
+	// exactly this.
+	wire [8:0] src_row = flip ? 9'((VBSTART - 10'd1) - {1'b0, render_line})
+	                          : render_line;
+
+	// Rowscroll follows the MIRRORED row, because MAME indexes this table by
+	// SCREEN row while the tilemap source row is the scrolled one
+	// (seibuspi_v.cpp:405-420: rowscroll[(y+19)] against pix(y+sy)). Both are
+	// functions of the same pre-mirror screen row, so they move together.
+	wire [8:0] rs_index = src_row + 9'd19;
 	/* verilator lint_off UNUSEDSIGNAL */
 	reg [15:0] rowscroll;       // only [8:0] used, as above
 	/* verilator lint_on UNUSEDSIGNAL */
@@ -215,7 +239,7 @@ module spi_layers
 	// Line geometry for the current layer
 	// ------------------------------------------------------------------
 	// The layers wrap at 512, so the adds are taken modulo 512 by truncation.
-	wire [8:0] src_y = is_text ? render_line : 9'(render_line + sy[8:0]);
+	wire [8:0] src_y = is_text ? src_row : 9'(src_row + sy[8:0]);
 
 	wire [4:0] tile_row = is_text ? src_y[7:3] : src_y[8:4];
 	wire [3:0] fine_y   = is_text ? {1'b0, src_y[2:0]} : src_y[3:0];
@@ -678,8 +702,18 @@ module spi_layers
 				// Stalling holds emit_x/emit_i and leaves lb_we at its default
 				// 0, so the pixel is simply not written this cycle.
 				if (!emit_stall) begin
+					// The visibility test stays on the UNMIRRORED coordinate:
+					// visibility is a property of the source position, and the
+					// mirror is a bijection on 0..319, so clipping before it and
+					// clipping after it are the same set. Only the ADDRESS
+					// mirrors -- this is the horizontal half of screen flip, and
+					// doing it here rather than at the shared read index keeps
+					// "buffer index == screen X" true for spi_mixer and for the
+					// sprite engine's clear pass.
 					if (emit_x >= 0 && emit_x < 11'sd320) begin
-						lb_wr_addr <= {render_bank, emit_x[8:0]};
+						lb_wr_addr <= {render_bank,
+						               flip ? (9'd319 - emit_x[8:0])
+						                    : emit_x[8:0]};
 						lb_wr_data <= {tcolor, emit_pix};
 						lb_we      <= (4'b0001 << layer);
 					end

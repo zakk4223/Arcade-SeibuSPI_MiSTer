@@ -8,6 +8,11 @@
 
 module tb_video_top
 (
+	// Screen flip, driven from the C++ side (SPI_FLIP). Gate 1 renders the SAME
+	// frozen capture twice and asserts the second is an exact 180 rotation of the
+	// first -- an implementation check that needs no reference image.
+	input i_flip,
+	input i_nospr,
 
 	input             clk,
 	input             reset,
@@ -148,7 +153,7 @@ module tb_video_top
 	spi_layers layers
 	(
 		.clk(clk), .reset(reset),
-		.vcnt(vcnt), .vlast(vlast), .line_start(line_start),
+		.vcnt(vcnt), .vlast(vlast), .line_start(line_start), .flip(i_flip),
 		.scroll_bx(scroll_bx), .scroll_by(scroll_by),
 		.scroll_mx(scroll_mx), .scroll_my(scroll_my),
 		.scroll_fx(scroll_fx), .scroll_fy(scroll_fy),
@@ -187,7 +192,10 @@ module tb_video_top
 	(
 		.clk(clk), .reset(reset),
 		.vcnt(vcnt), .line_start(line_start),
-		.enable(~layer_enable[4]),
+		// SPI_NOSPR masks sprites so the tile layers can be checked alone --
+		// they flip in step 1, the sprite engine in step 2.
+		.enable(~layer_enable[4] & ~i_nospr),
+		.flip(i_flip),
 		.spr_chunk_size(spr_chunk_size), .rise10(rise10), .rise11(rise11),
 		.spr_addr(spr_ra), .spr_data(spr_rd),
 		.sdr_addr(spr_sdr_addr), .sdr_dout(spr_sdr_dout),
