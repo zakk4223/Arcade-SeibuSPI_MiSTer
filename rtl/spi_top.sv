@@ -156,8 +156,6 @@ module spi_top
 	// OSD video timing mode and analog sync position; straight through to
 	// spi_video_timing, which documents what they do.
 	input       [1:0] video_mode,
-	input       [3:0] hoffset,
-	input       [3:0] voffset,
 
 	output            ce_pix,
 	output      [7:0] red,
@@ -191,8 +189,6 @@ module spi_top
 		.pause      (ss_pause),
 		.vbl_next   (vbl_next),
 		.video_mode (video_mode),
-		.hoffset    (hoffset),
-		.voffset    (voffset),
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),

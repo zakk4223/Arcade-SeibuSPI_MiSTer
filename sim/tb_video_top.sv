@@ -114,8 +114,6 @@ module tb_video_top
 		// Normal timing and centred sync: this bench diffs against a MAME
 		// frame, which is only defined for the hardware raster.
 		.video_mode (2'd0),
-		.hoffset    (4'd0),
-		.voffset    (4'd0),
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
 		.hcnt(hcnt), .vcnt(vcnt), .vlast(vlast),
 		.hsync(hsync), .vsync(vsync), .hblank(hblank), .vblank(vblank),

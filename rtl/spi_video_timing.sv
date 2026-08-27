@@ -107,11 +107,17 @@
 //  select is vcnt[0], which only stays in step across the frame wrap if the
 //  line count is even. 296, 320, 280 and 266 all are. Do not add an odd one.
 //
-//  ANALOG SYNC POSITION. hoffset/voffset move the sync pulses only, leaving
-//  hblank/vblank -- and therefore DE -- alone, so they reposition the picture on
-//  an analog CRT and are deliberately invisible over HDMI. The pulse is clamped
-//  inside blanking, so no combination of mode and offset can push sync into
-//  active video.
+//  SYNC POSITION IS FIXED. This module used to carry an "Analog Video H-Pos /
+//  V-Pos" pair -- a two's complement -8..+7 nudge of the sync pulses, clamped
+//  inside blanking, invisible over HDMI because DE never moved. CRT Adjust
+//  (rtl/crt_adjust.sv, wired up in SeibuSPI.sv) does the same job properly:
+//  H-Position shifts the CONTENT through a line buffer with sync left native,
+//  which survives H-Size shrinking and reaches HDMI too, and V-Shift covers the
+//  vertical half. Keeping both meant two controls that fought each other, so the
+//  offsets were removed and the pulses are back to plain decodes.
+//
+//  HSync is a constant window in every mode. VSync is not: its start follows the
+//  field length, so it stays a pair of registers latched at the frame wrap.
 //
 //  Mode and offsets are latched at the frame wrap, never mid-frame -- see the
 //  raster-never-stops note above for what a mid-frame timing change does to a
@@ -129,9 +135,6 @@ module spi_video_timing
 	// OSD video timing: 0 Normal, 1 = 50 Hz, 2 = 57 Hz, 3 = 60 Hz. See the
 	// VTOTAL table above.
 	input       [1:0] video_mode,
-	// Analog sync position, two's complement, -8 .. +7 pixels / lines.
-	input       [3:0] hoffset,
-	input       [3:0] voffset,
 
 	output reg        ce_pix,     // pixel enable, a uniform 7.1590909 MHz
 
@@ -179,7 +182,6 @@ module spi_video_timing
 	reg  [2:0] div;
 	wire       pix_tick = (div == 3'd7);
 
-	localparam [9:0] HS_WIDTH = HSEND - HSSTART;   // 37 px,   measured
 	localparam [9:0] VS_WIDTH = VSEND - VSSTART;   //  8 lines, measured
 
 	// ------------------------------------------------------------------
@@ -211,25 +213,14 @@ module spi_video_timing
 	endfunction
 
 	// ------------------------------------------------------------------
-	// Analog sync position -- the pulse may sit anywhere inside blanking and
-	// nowhere outside it.
+	// Sync position
+	//
+	// Widths and positions come from spi_defs.vh, which holds the
+	// hardware-measured values; everything here is derived from them so there
+	// is still exactly one place the raster is described. HSync never moves;
+	// VSync follows the field length and is latched at the frame wrap.
 	// ------------------------------------------------------------------
-	function automatic [9:0] clamp_sync(input [9:0] base, input [3:0] off,
-	                                    input [9:0] lo,   input [9:0] hi);
-		reg signed [11:0] want;
-		begin
-			want = $signed({2'b00, base}) + $signed({{8{off[3]}}, off});
-			if      (want < $signed({2'b00, lo})) clamp_sync = lo;
-			else if (want > $signed({2'b00, hi})) clamp_sync = hi;
-			else                                  clamp_sync = want[9:0];
-		end
-	endfunction
-
-	wire [9:0] hs_want = clamp_sync(HSSTART, hoffset, HBSTART, HTOTAL - HS_WIDTH);
-	wire [9:0] vs_want = clamp_sync(vsstart_of(video_mode), voffset,
-	                                VBSTART, vtotal_of(video_mode) - VS_WIDTH);
-
-	reg [9:0] hs_start, hs_end, vs_start, vs_end;
+	reg [9:0] vs_start, vs_end;
 
 	// A vblank that fell while the board was frozen, owed to the 386.
 	reg       vbl_pend;
@@ -249,7 +240,7 @@ module spi_video_timing
 	// fixed; only the sync pulses move.
 	assign hblank = (hcnt >= HBSTART);
 	assign vblank = (vcnt >= VBSTART);
-	assign hsync  = (hcnt >= hs_start) && (hcnt < hs_end);
+	assign hsync  = (hcnt >= HSSTART) && (hcnt < HSEND);
 	assign vsync  = (vcnt >= vs_start) && (vcnt < vs_end);
 
 	always @(posedge clk) begin
@@ -262,8 +253,6 @@ module spi_video_timing
 			line_start <= 1'b0;
 			vbl_rise   <= 1'b0;
 			vbl_pend   <= 1'b0;
-			hs_start   <= HSSTART;
-			hs_end     <= HSEND;
 			vs_start   <= vsstart_of(video_mode);
 			vs_end     <= vsstart_of(video_mode) + VS_WIDTH;
 		end
@@ -299,10 +288,8 @@ module spi_video_timing
 			// Timing changes land here and only here.
 			if (frame_wrap) begin
 				vlast    <= vtotal_of(video_mode) - 10'd1;
-				hs_start <= hs_want;
-				hs_end   <= hs_want + HS_WIDTH;
-				vs_start <= vs_want;
-				vs_end   <= vs_want + VS_WIDTH;
+				vs_start <= vsstart_of(video_mode);
+				vs_end   <= vsstart_of(video_mode) + VS_WIDTH;
 			end
 
 			// The deferred one, handed over the moment the board is let go.

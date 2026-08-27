@@ -9,6 +9,12 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_loader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddr_rom_reader.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_rom_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_top.sv
+# rmonic79's core-side CRT geometry modules, taken unmodified from
+# Arcade-Raiden2_MiSTer (GPL v3). crt_vsize comes FIRST in the chain: it
+# rewrites the vertical window and regenerates its own vb, which feeds
+# crt_adjust. See the CRT ADJUST block in SeibuSPI.sv.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/crt_vsize.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/crt_adjust.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_video_timing.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_cpu.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_snd_window.sv

@@ -191,8 +191,6 @@ wire [1:0] scale           = status[7:6];
 wire       orientation_vert = ~status[10];   // default 0 => vertical
 wire       rotate_cw       = status[11];
 wire [1:0] video_mode      = status[13:12];
-wire [3:0] hoffset         = status[17:14];
-wire [3:0] voffset         = status[27:24];
 
 // A refresh-rate change has to be reported to the HPS, and nothing else will
 // do it. hps_io's video_calc re-reports when the ACTIVE pixel counts change or
@@ -240,16 +238,25 @@ localparam CONF_STR = {
 	// layer renderer is saturated at 8 cycles a pixel (100% of the worst line),
 	// so a shorter window takes time it already needs. PLAN.md 53.7.
 	"P1O[13:12],Video Timing,Normal(54Hz),50Hz,57Hz,60Hz;",
-	// Sync position only, so these move the picture on an analog CRT or direct
-	// video and deliberately do nothing over HDMI, where the scaler re-locks.
-	// The label list is ordered so the raw 4-bit field is already two's
-	// complement while the label shows the negated value -- moving sync later
-	// moves the picture left/up. Same convention as IremM72.
-	"P1O[17:14],Analog Video H-Pos,0,-1,-2,-3,-4,-5,-6,-7,8,7,6,5,4,3,2,1;",
-	// V-Pos is NOT contiguous with H-Pos: an O[a:b] range has to be one run of
-	// bits, and 18..21 would swallow the two retired bits documented below.
-	// 22 is Sample Flash, so the next free run of four is 24..27.
-	"P1O[27:24],Analog Video V-Pos,0,-1,-2,-3,-4,-5,-6,-7,8,7,6,5,4,3,2,1;",
+	// O[17:14] was "Analog Video H-Pos" and O[27:24] "Analog Video V-Pos": a
+	// -8..+7 nudge of the sync pulses inside blanking, which moved the picture
+	// on an analog CRT and did nothing at all over HDMI. CRT Adjust below does
+	// both jobs properly -- H-Position shifts the CONTENT through a line buffer
+	// with sync left native, so it survives H-Size shrinking and reaches HDMI,
+	// and V-Shift is the vertical half. Two overlapping controls for one job is
+	// worse than one, so the old pair is gone. The bits are left UNUSED rather
+	// than reassigned: a saved .CFG from an older build would otherwise turn
+	// something else on by accident.
+	// CRT Adjust (rmonic79's core-side modules). H2 hides the group when the
+	// master switch is Off, so the five controls only appear once they can do
+	// anything. Core-side means HDMI follows the adjustment too, which is why
+	// the default is Off.
+	"P1O[45],CRT Adjust,Off,On;",
+	"H2P1O[50:46],CRT H-Size,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"H2P1O[57:51],CRT H-Position,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,+32,+33,+34,+35,+36,+37,+38,+39,+40,+41,+42,+43,+44,+45,+46,+47,+48,-48,-47,-46,-45,-44,-43,-42,-41,-40,-39,-38,-37,-36,-35,-34,-33,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"H2P1O[63:58],CRT V-Shift,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"H2P1O[67:64],CRT V-Size,0,+1,+2,+3,+4,+5,+6,+7,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"H2P1O[68],CRT V-Size Mode,PVM,Cabinet;",
 	"-;",
 	// O[20] was the Vital Signs Panel and O[21] the Freeze Button switch. Both
 	// are gone -- the panel with the telemetry (PLAN.md 29), the switch because
@@ -364,7 +371,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({~set_sxx2c, direct_video}),
+	.status_menumask({~status[45], ~set_sxx2c, direct_video}),
 	// savestate_ui moves the slot when the pad changes it, and the OSD has to
 	// follow. status_in carries the whole word back with only the slot bits
 	// replaced; status_set is the one-cycle "take it" strobe.
@@ -1372,8 +1379,6 @@ spi_top spi_top
 	.coin         (spi_coin),
 
 	.video_mode   (video_mode),
-	.hoffset      (hoffset),
-	.voffset      (voffset),
 
 	.ce_pix       (ce_pix),
 	.red          (core_r),
@@ -1402,16 +1407,175 @@ assign CLK_VIDEO = clk_sys;
 wire [7:0] rgb_out_r, rgb_out_g, rgb_out_b;
 wire       vga_de_mixer;
 
+//============================================================================
+//  CRT ADJUST + CRT V-SIZE  (rmonic79's core-side modules, GPL v3)
+//
+//  Chain: spi_top -> crt_vsize -> crt_adjust -> arcade_video.
+//  crt_vsize is FIRST because it rewrites the vertical window and regenerates
+//  its own vb, which is what the next stage has to see. Both self-bypass at
+//  value 0, and with `crt_adj_on` low the chain is a registered passthrough.
+//
+//  WHY THIS IS POSSIBLE AT ALL: both modules resample on a MEASURED, UNIFORM
+//  integer pixel-CE period (crt_vsize latches it as `p_nat` and replays on that
+//  grid; crt_adjust's read generator is a fixed number of eighths of a clk).
+//  The Bresenham refresh scheme this core used until now emitted 7- AND 8-cycle
+//  pixels at 57/60 Hz, which neither module can follow -- they would have had to
+//  be gated to Normal. Since the VTOTAL conversion the pixel is exactly 8 clk in
+//  every refresh mode, so these work at every rate. See spi_video_timing.sv.
+//
+//  CORE-SIDE, so HDMI follows the adjustment too -- the known trade-off of not
+//  touching sys/. Leave it Off for an untouched HDMI image.
+//
+//  Gated on the scaler and the scandoubler (both double or retime the pixel CE,
+//  which invalidates the read generator's base), exactly as Raiden II does.
+wire crt_adj_on = status[45] & ~(|status[7:5]) & ~forced_scandoubler;
+
+// H-Size: signed 5-bit, one step = an eighth of a clk out of the 64 the pixel
+// is worth, so 1/64 = 1.56% per step (Raiden II is 1/104 = 0.96%: its pixel is
+// 13 clk, ours is 8, and the step is one eighth of a clk in both).
+reg signed [4:0] hsize_s;
+always @(posedge clk_sys) if (ce_pix) hsize_s <= crt_adj_on ? $signed(status[50:46]) : 5'sd0;
+
+// H-Position: 97 OSD entries (0, +1..+48, -48..-1) and the menu stores the
+// INDEX, so the negative half is decoded rather than sign-extended.
+reg [6:0] hpos_d;
+always @(posedge clk_sys) if (ce_pix) hpos_d <= crt_adj_on ? status[57:51] : 7'd0;
+wire signed [8:0] crt_hoffset = (hpos_d <= 7'd48)
+	? $signed({2'b0, hpos_d})
+	: $signed({2'b0, hpos_d}) - 9'sd97;
+
+// V-Shift, latched once a line. spi_top does not publish hcnt, so the line
+// boundary is taken from the HSync edge rather than a counter compare.
+reg core_hs_d;
+always @(posedge clk_sys) if (ce_pix) core_hs_d <= core_hs;
+wire line_tick_crt = ce_pix && core_hs && ~core_hs_d;
+reg signed [5:0] crt_vshift_d;
+always @(posedge clk_sys) if (line_tick_crt) crt_vshift_d <= crt_adj_on ? $signed(status[63:58]) : 6'sd0;
+
+// V-Size: PVM counts one line per step, Cabinet three -- same split as
+// Raiden II, and it is the module's two mechanisms, not a scale factor.
+wire signed [5:0] vsz_step  = $signed({{2{status[67]}}, status[67:64]});
+wire signed [5:0] vsz_lines = status[68] ? -(vsz_step + (vsz_step <<< 1))
+                                         : -vsz_step;
+reg signed [5:0] crt_vsize_d;
+reg              crt_vsmode_d;
+always @(posedge clk_sys) if (ce_pix) begin
+	crt_vsize_d  <= crt_adj_on ? vsz_lines : 6'sd0;
+	crt_vsmode_d <= status[68];
+end
+
+// Read-rate generator for crt_adjust. Base = clk-per-pixel x 8 = 8 x 8 = 64
+// EIGHTHS. It MUST follow the core's true pixel clock: a read side faster than
+// the write side overruns the line and H-Position and V-Size come apart. It is
+// reset on the module's own hs_ref_out, never on the raw HSync -- in
+// HPOS_SYNCSHIFT those differ, and resetting on the wrong one is what desynced
+// the upstream scheme when shrinking.
+wire crt_hs_ref;
+reg  crt_hs_ref_d;
+always @(posedge clk_sys) crt_hs_ref_d <= crt_hs_ref;
+wire crt_hs_ref_rise = crt_hs_ref & ~crt_hs_ref_d;
+wire [7:0] rd_period = 8'd64 + {{3{hsize_s[4]}}, hsize_s};   // 8 clk/px x 8
+reg  [7:0] rd_acc;
+wire       rd_tick = (rd_acc + 8'd8) >= {1'b0, rd_period};
+always @(posedge clk_sys) begin
+	if      (crt_hs_ref_rise) rd_acc <= 8'd0;
+	// The wrap is the point of a Bresenham accumulator, so the truncation is
+	// explicit rather than left for Verilator to warn about.
+	else if (rd_tick)         rd_acc <= 8'(rd_acc + 8'd8 - rd_period);
+	else                      rd_acc <= rd_acc + 8'd8;
+end
+
+localparam int H_TOTAL_RD = 448;   // this core's whole line, spi_defs.vh
+localparam int V_TOTAL_RD = 296;   // the NATIVE field; see the note below
+
+wire [7:0] vz_r, vz_g, vz_b;
+wire       vz_hs, vz_vs, vz_de, vz_vb, vz_ce;
+
+crt_vsize #(
+	.RING_LINES (46),          // Raiden II's value: covers |vsize| <= 21
+	.LINE_PX    (320),         // ACTIVE width, and the same as Raiden II's
+	// Absolute per-line clk limits, re-derived for THIS core -- they cannot be
+	// copied, because they encode a monitor frequency against a clock.
+	//   57.272727 MHz / 16.20 kHz = 3535 -> shrink stops at 300 lines
+	//   57.272727 MHz / 15.12 kHz = 3788 -> enlarge stops at 280 lines
+	// Frame = 296 x 3584 = 1,060,864 clk, so the usable run is 280..300 against
+	// a native 296: -16 (taller) but only +4 (smaller). The asymmetry is the
+	// opposite of Raiden II's and it is not a defect -- our native line rate is
+	// already 15.98 kHz, near the top of the window, so there is little room to
+	// raise it. The 35-line front porch means the enlarge side is frequency-
+	// limited here rather than porch-limited.
+	.LINE_CLK_MIN (3535),
+	.LINE_CLK_MAX (3788)
+) u_crt_vsize (
+	.clk       (clk_sys),
+	.pxl_cen   (ce_pix),
+	.active    (crt_adj_on),
+	.tube_mode (crt_vsmode_d),
+	.vsize     (crt_vsize_d),
+	.r_in      (core_r), .g_in (core_g), .b_in (core_b),
+	.hs_in     (core_hs),
+	.vs_in     (core_vs),
+	.de_in     (~(core_hb | core_vb)),
+	.vb_in     (core_vb),         // the TRUE vblank, never the combined blank
+	.r_out     (vz_r), .g_out (vz_g), .b_out (vz_b),
+	.hs_out    (vz_hs),
+	.vs_out    (vz_vs),
+	.de_out    (vz_de),
+	.vb_out    (vz_vb),
+	.ce_out    (vz_ce)
+);
+
+wire [7:0] str_r, str_g, str_b;
+wire       str_hs, str_vs, str_hb, str_vb;
+
+crt_adjust #(
+	.VTOTAL    (V_TOTAL_RD),
+	.HTOTAL    (H_TOTAL_RD),
+	// CONTENTSHIFT: 320 active on a 448 line with 37 px of back porch and 53 of
+	// front -- wide enough on both sides that the content cannot fall out of the
+	// window. SYNCSHIFT is for narrow side-anchored games.
+	.HPOS_MODE (1)
+) u_crt_adjust (
+	.clk      (clk_sys),
+	.pxl_cen  (vz_ce),            // from the V-Size stage, not the native CE
+	.pxl2_cen (crt_adj_on ? rd_tick : vz_ce),
+	.active   (crt_adj_on),
+	.hsize    (hsize_s),
+	.hoffset  (crt_hoffset),
+	.voffset  (crt_vshift_d),
+	.r_in     (vz_r), .g_in (vz_g), .b_in (vz_b),
+	.hs_in    (vz_hs),
+	.vs_in    (vz_vs),
+	.hb_in    (~vz_de),
+	.vb_in    (vz_vb),            // the vb the V-Size REGENERATED, not the native
+	.r_out    (str_r), .g_out (str_g), .b_out (str_b),
+	.hs_out   (str_hs), .vs_out (str_vs),
+	.hb_out   (str_hb), .vb_out (str_vb),
+	.hs_ref_out (crt_hs_ref)
+);
+
+// Downstream sees the chain's own outputs and nothing else, so that Off is a
+// true bypass and On never mixes a native blank with an adjusted one.
+wire       crt_ce = crt_adj_on ? rd_tick : ce_pix;
+wire [7:0] crt_r  = crt_adj_on ? str_r  : core_r;
+wire [7:0] crt_g  = crt_adj_on ? str_g  : core_g;
+wire [7:0] crt_b  = crt_adj_on ? str_b  : core_b;
+wire       crt_hs = crt_adj_on ? str_hs : core_hs;
+wire       crt_vs = crt_adj_on ? str_vs : core_vs;
+wire       crt_hb = crt_adj_on ? str_hb : core_hb;
+wire       crt_vb = crt_adj_on ? str_vb : core_vb;
+//============================================================================
+
 arcade_video #(.WIDTH(320), .DW(24)) arcade_video
 (
 	.clk_video (clk_sys),
-	.ce_pix    (ce_pix),
+	.ce_pix    (crt_ce),
 
-	.RGB_in    ({core_r, core_g, core_b}),
-	.HBlank    (core_hb),
-	.VBlank    (core_vb),
-	.HSync     (core_hs),
-	.VSync     (core_vs),
+	.RGB_in    ({crt_r, crt_g, crt_b}),
+	.HBlank    (crt_hb),
+	.VBlank    (crt_vb),
+	.HSync     (crt_hs),
+	.VSync     (crt_vs),
 
 	.CLK_VIDEO (),
 	.CE_PIXEL  (CE_PIXEL),
