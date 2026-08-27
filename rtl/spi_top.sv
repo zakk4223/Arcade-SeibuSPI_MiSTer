@@ -1168,52 +1168,22 @@ module spi_top
 	// ------------------------------------------------------------------
 	wire [7:0] mix_r, mix_g, mix_b;
 
-	// ------------------------------------------------------------------
-	// WEDGE OVERLAY -- diagnostic, PLAN.md 45.
-	//
-	// The rapid-reload lockup only happens on hardware, four candidate fixes
-	// have missed, and there is no probe on the board since 35 deleted the JTAG
-	// modules. So the wedge reports itself: if a savestate stays busy far longer
-	// than any real operation, paint its state across the top of the picture as
-	// a row of blocks, white for 1. A screenshot then says exactly what is
-	// stuck, which is what solved the same class of bug in simulation (43.1).
-	//
-	// A save is ~2.1 M clk_sys cycles and a load ~1.3 M. This trips at 2^23,
-	// 8.4 M, about 146 ms -- four times the longest real operation.
-	// ------------------------------------------------------------------
+	// The savestate sequencer's state, exported for sim/tb_boot_top. It used to
+	// also drive a WEDGE OVERLAY -- a row of blocks painted across the top of
+	// the picture when a savestate stayed busy past 146 ms, so a screenshot
+	// could say what was stuck (PLAN.md 45). That lockup is fixed and confirmed
+	// on hardware, and the overlay was the only diagnostic left in the
+	// synthesised net: it cost a free-running 24-bit counter, an 11:1 mux and a
+	// three-deep mux on each of red/green/blue, the last of those sitting in the
+	// video path this core has the least timing room in. Removed; `git log` has
+	// it if the class of bug ever comes back.
 	wire  [4:0] ss_dbg_st;
 	assign ss_dbg_seq = ss_dbg_st;
 	wire        ss_cpu_idle;
-	reg  [23:0] ss_stuck_cnt;
-	always @(posedge clk_sys) begin
-		if (sys_reset || !ss_busy) ss_stuck_cnt <= 24'd0;
-		else if (!ss_stuck_cnt[23]) ss_stuck_cnt <= ss_stuck_cnt + 24'd1;
-	end
-	wire ss_wedged = ss_stuck_cnt[23];
 
-	// The bits, LSB first across the screen:
-	//   0..3 spi_ss state   4 is_load       5 pause
-	//   6 io_stall          7 z80dl_stall   8 ds_stall
-	//   9 cpu snapshot     10 cpu in stub
-	wire [10:0] ss_dbg_bits = {ss_in_stub, ss_snapshot,
-	                           ss_dbg_stalls[0], ss_dbg_stalls[1],
-	                           ss_dbg_stalls[2], ss_pause, ss_dbg_st};
-
-	// Rows 16..31, one 16-pixel block per bit starting at column 16. A red block
-	// at column 0 says the overlay is live, so a screenshot without it means the
-	// core is not wedged rather than that the probe failed.
-	wire dbg_row  = ss_wedged && (vcnt >= 10'd16) && (vcnt < 10'd32);
-	wire dbg_mark = dbg_row && (hcnt < 10'd16);
-	wire dbg_cell = dbg_row && (hcnt >= 10'd16) && (hcnt < 10'd16 + 11*10'd16);
-	/* verilator lint_off UNUSEDSIGNAL */
-	wire [9:0] dbg_off = hcnt - 10'd16;   // only [7:4] selects the block
-	/* verilator lint_on UNUSEDSIGNAL */
-	wire [3:0] dbg_idx = dbg_off[7:4];
-	wire dbg_bit  = ss_dbg_bits[dbg_idx];
-
-	assign red   = dbg_mark ? 8'hFF : dbg_cell ? (dbg_bit ? 8'hFF : 8'h10) : mix_r;
-	assign green = dbg_mark ? 8'h00 : dbg_cell ? (dbg_bit ? 8'hFF : 8'h10) : mix_g;
-	assign blue  = dbg_mark ? 8'h00 : dbg_cell ? (dbg_bit ? 8'hFF : 8'h40) : mix_b;
+	assign red   = mix_r;
+	assign green = mix_g;
+	assign blue  = mix_b;
 
 	// SXX2E is a mono board: the YMF271's four outputs are summed onto one
 	// speaker, so both sides carry the same sample.
