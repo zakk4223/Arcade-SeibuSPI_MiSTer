@@ -274,9 +274,15 @@ int main(int argc, char **argv)
     // while 14:0 are active low (PLAN.md 14.4), so idle is 0x7FFF, not 0xFFFF.
     // SPI_FLIP=1 raises it.
     uint64_t n_inp_rd = 0, n_flip_raw = 0, n_flip_lat = 0, n_flip_lay = 0;
+    int reg1a_frames[32]; int n_reg1a = 0;
     int max_src_row = -1;
     uint64_t n_row_differs = 0;
     const int flip_dip = envi("SPI_FLIP", 0);
+    // SPI_FLIP_AT reproduces what the OSD does on hardware: the DIP starts
+    // CLEAR and is raised part-way through the run. The game only writes reg_1a
+    // a handful of times in hundreds of frames, so whether it ever notices a
+    // late change is the question that matters.
+    const int flip_at = envi("SPI_FLIP_AT", 0);
     const uint16_t idle_inputs = flip_dip ? 0xFFFF : 0x7FFF;
     dut->i_inputs = idle_inputs; dut->i_system = 0xFF; dut->i_coin = 0xFF;
     dut->i_video_mode = envi("SPI_VIDEO_MODE", 0);
@@ -586,7 +592,9 @@ int main(int argc, char **argv)
             dut->i_coin   = coin  ? 0xFE : 0xFF;   // bit0 = coin1, active low
             dut->i_system = start ? 0xFE : 0xFF;   // bit0 = start1, active low
             // P1 button 1 is bit 4 of the 15-bit button field (see SeibuSPI.sv)
-            dut->i_inputs = fire ? (uint16_t)(idle_inputs & ~0x0010) : idle_inputs;
+            uint16_t inp = idle_inputs;
+            if (flip_at && (int)n_vbl >= flip_at) inp |= 0x8000;
+            dut->i_inputs = fire ? (uint16_t)(inp & ~0x0010) : inp;
         }
 
         dut->eval();
@@ -1118,6 +1126,8 @@ int main(int argc, char **argv)
                                t / 1e6, 0x400 + idx * 4, be, wd, crtc[idx]);
                 }
             }
+            if (dut->p_io_wr && !io_wr_d && dut->p_io_addr * 4 == 0x418
+                && n_reg1a < 32) reg1a_frames[n_reg1a++] = (int)n_vbl;
             io_wr_d = dut->p_io_wr;
 
             if (dut->p_dma_tilemap && !tm_d) {
@@ -1227,6 +1237,9 @@ int main(int argc, char **argv)
            (unsigned long long)n_inp_rd, flip_dip);
     printf("flip decode high cycles: %llu   flip LATCH high cycles: %llu\n",
            (unsigned long long)n_flip_raw, (unsigned long long)n_flip_lat);
+    printf("reg_1a (0x418) writes  : %d at frames:", n_reg1a);
+    for (int i = 0; i < n_reg1a; i++) printf(" %d", reg1a_frames[i]);
+    printf("\n");
     printf("flip AT LAYERS cycles  : %llu   max src_row seen: %d\n",
            (unsigned long long)n_flip_lay, max_src_row);
     printf("cycles src_row != render_line: %llu\n", (unsigned long long)n_row_differs);
