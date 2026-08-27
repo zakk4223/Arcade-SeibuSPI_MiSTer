@@ -178,7 +178,7 @@ module spi_top
 	// ------------------------------------------------------------------
 	// Raster
 	// ------------------------------------------------------------------
-	wire [9:0] hcnt, vcnt;
+	wire [9:0] hcnt, vcnt, vlast;
 	wire       line_start, vbl_rise;
 
 	wire sys_reset;
@@ -196,6 +196,7 @@ module spi_top
 		.ce_pix     (ce_pix),
 		.hcnt       (hcnt),
 		.vcnt       (vcnt),
+		.vlast      (vlast),
 		.hsync      (hsync),
 		.vsync      (vsync),
 		.hblank     (hblank),
@@ -992,6 +993,7 @@ module spi_top
 		.reset            (vid_reset),
 		.dbg_state        (),
 		.vcnt             (vcnt),
+		.vlast            (vlast),
 		.line_start       (line_start),
 
 		.scroll_bx        (scroll_bx), .scroll_by(scroll_by),

@@ -197,9 +197,9 @@ wire [3:0] voffset         = status[27:24];
 // A refresh-rate change has to be reported to the HPS, and nothing else will
 // do it. hps_io's video_calc re-reports when the ACTIVE pixel counts change or
 // when new_vmode toggles (sys/hps_io.sv:950-954) -- and the active area here is
-// 320x240 in every mode by design, since the option scales the pixel window and
-// leaves the raster alone. So without this toggle Main keeps the stale refresh
-// rate and the HDMI PLL is never re-derived.
+// 320x240 in every mode by design: the option changes the number of BLANKED
+// lines, never the active ones. So without this toggle Main keeps the stale
+// refresh rate and the HDMI PLL is never re-derived.
 reg [1:0] video_mode_r = 0;
 reg       new_vmode = 0;
 always @(posedge clk_sys) begin
@@ -577,19 +577,23 @@ always @(posedge clk_ram) begin
 end
 
 wire       set_sxx2c   = mod_byte[0];
-wire [2:0] set_variant = mod_byte[3:1];
-reg  [2:0] set_id;
-always @* begin
-	if (!set_sxx2c)        set_id = SET_RDFTS;
-	else case (set_variant)
-		3'd1:              set_id = SET_RDFT2;
-		3'd2:              set_id = SET_RFJET;
-		3'd3:              set_id = SET_VIPRP1;
-		3'd4:              set_id = SET_SENKYU;
-		3'd5:              set_id = SET_EJANHS;
-		default:           set_id = SET_RDFT;
+
+// One decode, applied to two different copies of the mod byte -- see the
+// clk_ram pair below. Written as a function so the two can never drift apart.
+// Bit 0 is SXX2C, bits 3:1 are the cartridge variant.
+function automatic [2:0] set_id_of(input [7:0] mb);
+	if (!mb[0])            set_id_of = SET_RDFTS;
+	else case (mb[3:1])
+		3'd1:              set_id_of = SET_RDFT2;
+		3'd2:              set_id_of = SET_RFJET;
+		3'd3:              set_id_of = SET_VIPRP1;
+		3'd4:              set_id_of = SET_SENKYU;
+		3'd5:              set_id_of = SET_EJANHS;
+		default:           set_id_of = SET_RDFT;
 	endcase
-end
+endfunction
+
+wire [2:0] set_id = set_id_of(mod_byte);
 
 // Bit 4: the authentic-flash variant of whichever cartridge set bits 3:1 named
 // -- a blank flash plus the cartridge's own sound ROMs, with the game running
@@ -597,6 +601,32 @@ end
 // alone: on SXX2E it would open a source window with nothing behind it, and an
 // MRA that sets it there has made a mistake worth ignoring rather than obeying.
 wire set_upd = mod_byte[0] & mod_byte[4];
+
+// clk_ram copies of the two the LOADER reads.
+//
+// The re-register block above exists because `mod_byte[0] -> rom_loader|
+// part_size_r` closed at -0.175 on a clock with no margin, and it fixed every
+// consumer that reads mod_byte_r. set_id and set_upd are decoded straight off
+// the raw clk_sys mod_byte, so they were never covered -- the long route simply
+// moved, and a SEED 3 fit put `mod_byte[3] -> rom_loader|part_base_r[22]` at
+// -0.111 with the same three bits behind it.
+//
+// Decoded from mod_byte_r rather than from set_id, so the crossing is the one
+// that already closes and the decode stays inside clk_ram; then registered once
+// more so the loader sees a flop output the fitter can place beside it. Two
+// clk_ram cycles of latency on a value that lands with the MRA's index-1
+// element, millions of cycles before the first ROM part -- the same trade the
+// block above already makes.
+//
+// set_sxx2c is NOT duplicated here: its consumers are spi_sound's mono/stereo
+// mux and hps_io's menumask, both clk_sys, and sourcing that one from clk_ram
+// is exactly what the note above records as closing at -2.906 with TNS -409.
+reg  [2:0] set_id_r  = SET_RDFTS;
+reg        set_upd_r = 1'b0;
+always @(posedge clk_ram) begin
+	set_id_r  <= set_id_of(mod_byte_r);
+	set_upd_r <= mod_byte_r[0] & mod_byte_r[4];
+end
 
 wire flip_screen_dip  = dsw[0][0];
 wire service_mode_dip = dsw[0][1];
@@ -763,8 +793,8 @@ rom_loader rom_loader
 	.ioctl_index    (dl_index),
 	.ioctl_dout     (dl_dout),
 	.ioctl_wait     (ldr_wait),
-	.set_id         (set_id),
-	.set_upd        (set_upd),
+	.set_id         (set_id_r),
+	.set_upd        (set_upd_r),
 	.part_codec     (part_codec),
 
 	.sdr_addr       (ldr_addr),

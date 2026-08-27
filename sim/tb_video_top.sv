@@ -8,6 +8,7 @@
 
 module tb_video_top
 (
+
 	input             clk,
 	input             reset,
 
@@ -102,6 +103,7 @@ module tb_video_top
 );
 
 	wire hsync, vsync, line_start, vbl_rise;
+	wire [9:0] vlast;
 
 	spi_video_timing timing
 	(
@@ -115,7 +117,7 @@ module tb_video_top
 		.hoffset    (4'd0),
 		.voffset    (4'd0),
 		.clk(clk), .reset(reset), .ce_pix(ce_pix),
-		.hcnt(hcnt), .vcnt(vcnt),
+		.hcnt(hcnt), .vcnt(vcnt), .vlast(vlast),
 		.hsync(hsync), .vsync(vsync), .hblank(hblank), .vblank(vblank),
 		.line_start(line_start), .vbl_rise(vbl_rise)
 	);
@@ -148,7 +150,7 @@ module tb_video_top
 	spi_layers layers
 	(
 		.clk(clk), .reset(reset),
-		.vcnt(vcnt), .line_start(line_start),
+		.vcnt(vcnt), .vlast(vlast), .line_start(line_start),
 		.scroll_bx(scroll_bx), .scroll_by(scroll_by),
 		.scroll_mx(scroll_mx), .scroll_my(scroll_my),
 		.scroll_fx(scroll_fx), .scroll_fy(scroll_fy),

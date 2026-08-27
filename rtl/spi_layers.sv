@@ -47,8 +47,12 @@ module spi_layers
 	input             clk,          // clk_sys
 	input             reset,
 
-	// Raster
+	// Raster. `vlast` is the last line index of the field (vtotal-1) and follows
+	// the OSD refresh mode; it is needed only to find the last blanked line,
+	// where the pass the display actually consumes is taken. Pre-decremented by
+	// spi_video_timing on purpose -- see the note on its port.
 	input       [9:0] vcnt,
+	input       [9:0] vlast,
 	input             line_start,
 
 	// Layer registers
@@ -156,7 +160,7 @@ module spi_layers
 	// blanked line, after the DMA has landed. Two passes a frame instead of 56,
 	// and the one the display consumes is still the last one before the wrap.
 	wire redundant_pass = (next_line == render_line);
-	wire last_blank_line = (vcnt == VTOTAL - 10'd1);
+	wire last_blank_line = (vcnt == vlast);
 
 	// ------------------------------------------------------------------
 	// Per-layer parameters, selected by the phase
@@ -409,8 +413,9 @@ module spi_layers
 	// source columns 2-5 that section 13c of PLAN.md measures.
 	//
 	// vcnt[0] switches on exactly the right edge, costs nothing, and cannot
-	// drift out of step: VTOTAL is 296, so the parity toggles every line
-	// including across the frame wrap. render_bank still owns the WRITE side,
+	// drift out of step: the field length is EVEN in every refresh mode
+	// (296/320/280/266), so the parity toggles every line including across the
+	// frame wrap. spi_video_timing's header says not to add an odd one. render_bank still owns the WRITE side,
 	// unchanged, so the renderer keeps its safe tile-boundary restart.
 	wire disp_bank = ~vcnt[0];
 	wire [9:0] lb_rd_addr = {lb_wrap ? ~disp_bank : disp_bank, lb_x};
