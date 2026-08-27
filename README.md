@@ -48,15 +48,32 @@ current gaps:
 ## Core utilization
 
 Quartus Prime 17.0.0 Lite, Cyclone V `5CSEBA6U23I7` (MiSTer DE10-Nano),
-top-level entity `sys_top`. From `output_files/SeibuSPI.fit.summary`,
-fit dated 2026-08-19.
+top-level entity `sys_top`, `SEED 3`. From `output_files/SeibuSPI.fit.summary`,
+fit dated 2026-08-27.
 
 | Resource                | Used      | Available | Utilization |
 |-------------------------|-----------|-----------|-------------|
-| Logic utilization (ALMs)| 33,980    | 41,910    | 81 %        |
-| Total registers         | 32,681    | -         | -           |
-| Block memory bits       | 3,547,869 | 5,662,720 | 63 %        |
-| RAM blocks              | 484       | 553       | 88 %        |
-| DSP blocks              | 61        | 112       | 54 %        |
+| Logic utilization (ALMs)| 37,569    | 41,910    | 90 %        |
+| Total registers         | 36,796    | -         | -           |
+| Block memory bits       | 3,942,313 | 5,662,720 | 70 %        |
+| RAM blocks              | 539       | 553       | 97 %        |
+| DSP blocks              | 69        | 112       | 62 %        |
 | PLLs                    | 3         | 6         | 50 %        |
 | Pins                    | 145       | 314       | 46 %        |
+
+Timing: **+0.113 ns setup** (`pll_hdmi`), **+0.102 ns hold** (`emu`), TNS 0.000,
+no critical warnings. `make check-timing` is the gate, and `make release`
+refuses to assemble a distribution without it.
+
+**RAM blocks are the binding resource, not logic.** 539 of 553 leaves 14 free,
+and the split matters: 70 % of the *bits* are used but 97 % of the *blocks*,
+because several arrays are wide and shallow and pack badly. Two figures set the
+budget — `spi_mainram` is 256 blocks on its own, 47 % of the device, for the
+386's 256 KB, and it is already optimally packed (an M10K holds 8,192 usable
+bits, so 2 Mbit needs exactly 256); and CRT V-Size's line ring is 52. The ring
+is sized `RING_LINES=46` for |vsize| <= 21 while the OSD exposes +-8, so
+dropping it to 20 returns roughly 28 blocks if anything else ever needs them.
+
+The growth since the 2026-08-19 fit (81 % ALM / 88 % RAM) is almost entirely
+CRT Adjust and CRT V-Size, at ~1,200 ALM and 52 RAM blocks. The refresh-rate
+conversion and screen flip together cost less than the fit-to-fit noise.
