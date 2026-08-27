@@ -1,38 +1,41 @@
 #!/usr/bin/env python3
 """
-Generate the YMF271 fixed-point lookup tables from MAME's ymf271.cpp.
+Generate the YMF271 fixed-point tables from MAME's rewritten OPX core.
 
-MAME builds these at runtime from doubles (init_tables / calculate_clock_
-correction). Everything here is the same arithmetic evaluated once, ahead of
-time, in the fixed-point form the RTL uses:
+MAME's core changed domain in 03761e46766 ("sound/ymf271: rewrite the YMF271
+(OPX) core"). The old core worked in linear gains -- a 6 x 1024 signed waveform
+ROM multiplied by an envelope volume -- and this script used to evaluate its
+doubles ahead of time. The new core is OPM-shaped: everything is an attenuation
+in 1/256ths of a decade, the operator is a log-sin lookup summed with the
+envelope and resolved through one exponential, and the envelope counts upward
+in attenuation units at fs/2. So the tables are different tables.
 
-  WAVE     [6][1024] the six real operator waveforms, signed 16 bit. Waveform 6
-                    is the constant MAXOUT and waveform 7 is all zeros, so both
-                    are handled in logic and left out of the ROM.
-  LFO_STEP [256]    LFO phase increment per 44100 Hz sample
-  PLFO_W   [4][256] the LFO pitch shape, quantised to q/128 in [-1, +1]
-  PLFO     [7][257] 2^(cents[pms] * q/128 / 1200); pms 0 is exactly 1.0 and is
-                    handled in logic, so only pms 1..7 are stored
-  ALFO_K   [4]      LFO amplitude swing per ams setting (65536 - the gain at
-                    full modulation, which is not what MAME stores)
-  MODLVL   [8]      phase modulation depth
-  FBLVL    [8]      feedback depth
-  RKS      [32][8]  keyscale rate adjustment, verbatim from RKS_Table
-  AR_STEP  [64]     attack   envelope step for a full 0..255 sweep, <<16
-  DC_STEP  [64]     decay2 / release step for a full 0..255 sweep, <<16
-  DC_RECIP [64]     2^24 / decay-time-in-samples; decay1's step is this times
-                    the sweep amount (decay1lvl * 16), which is the one
-                    envelope step that is not a constant sweep
-  ENV_VOL  [256]    envelope volume -> linear gain, 1.0 = 65536
-  TL       [128]    total level -> linear gain
-  ATTEN    [16]     channel attenuation -> linear gain
+Two are computed (MAME builds them in init_tables from doubles):
 
-The sound chip runs at its documented 16.9344 MHz on SXX2E, so MAME's
-clock_correction is exactly 1.0 and drops out.
+  LOGSIN [256]     -log2(sin((i+0.5) * pi/512)) * 256, the quarter-sine
+  EXP    [256]     2^(-(i+1)/256) * 2048, the shared exponential
 
-Quartus rounds the odd-sized tables (WAVE 6144, PLFO 1799) up to a power of two
-and zero-fills the tail, which it reports as Critical Warning 127005. That is
-expected: nothing ever addresses past the real end.
+The rest are literal C arrays and are scraped, so this file stays a derivation
+of MAME rather than a second source of truth:
+
+  EG_INC   [64]     nibble k of entry r = envelope increment for sub-step k
+  RKS      [32][8]  rate key scaling (unchanged from the old core's RKS_Table)
+  DETUNE   [32][4]  OPM DT1, in units of fs/2^20
+  MODLVL   [8]      phase modulation depth, applied as (sum * lvl) >> 8
+  PMS_K    [8]      LFO pitch depth, max deviation = fnum * k / 1024
+
+Gone with the old core, and deliberately not replaced: WAVE (the operator is
+a log-sin lookup now), PLFO / PLFO_W / ALFO_K (pitch and amplitude LFO are
+arithmetic on fnum and on the attenuation, not gain tables), ENV_VOL, TL and
+ATTEN (all three collapse into the attenuation sum and pan()), AR_STEP,
+DC_STEP and DC_RECIP (the envelope is EG_INC now), LFO_STEP (a counter and a
+divider), FBLVL (feedback is OPM's shift law).
+
+That is a saving of about 130 Kbit of block RAM, which matters at 97% full.
+
+The sound chip runs at its documented 16.9344 MHz on SXX2E, so fs is exactly
+44100 and the envelope clock exactly 22050. Neither appears in these tables --
+the new core's arithmetic is integer throughout and carries no rate term.
 
 Usage:
     tools/gen_ymf271_tables.py [path/to/mame] > rtl/ymf271_tables.vh
@@ -45,8 +48,10 @@ import sys
 
 DEFAULT_MAME = os.path.expanduser("~/proj/mame")
 
-SAMPLE_RATE = 44100.0
-INF = -1.0
+# The commit that introduced the core these tables describe. Named in the error
+# path so a future MAME rewrite says which revision this script was written
+# against instead of just failing to find a symbol.
+CORE_COMMIT = "03761e46766"
 
 
 def read_source(mame_root):
@@ -55,43 +60,19 @@ def read_source(mame_root):
         return f.read(), path
 
 
-def parse_double_table(src, decl, count):
-    m = re.search(re.escape(decl) + r"\s*=\s*\{(.*?)\};", src, re.S)
-    if not m:
-        raise SystemExit("could not find %s" % decl)
-    body = m.group(1)
-    vals = []
-    for tok in re.findall(r"(INF|[-+]?[0-9]*\.?[0-9]+)", body):
-        vals.append(INF if tok == "INF" else float(tok))
-    if len(vals) != count:
-        raise SystemExit("%s has %d entries, expected %d" % (decl, len(vals), count))
-    return vals
-
-
 def parse_int_table(src, decl, count):
-    m = re.search(re.escape(decl) + r"\s*=\s*\{(.*?)\};", src, re.S)
+    """Flatten a C integer array initialiser. Handles hex and nested braces."""
+    m = re.search(re.escape(decl) + r"\s*=\s*\{(.*?)\}\s*;", src, re.S)
     if not m:
-        raise SystemExit("could not find %s" % decl)
-    vals = [int(v) for v in re.findall(r"-?\d+", m.group(1))]
+        raise SystemExit(
+            "could not find %s in ymf271.cpp -- these tables are generated from "
+            "the OPX core introduced in MAME %s; if that core has been replaced "
+            "again this script needs rewriting, not repointing."
+            % (decl, CORE_COMMIT))
+    vals = [int(t, 0) for t in re.findall(r"0[xX][0-9a-fA-F]+|-?\d+", m.group(1))]
     if len(vals) != count:
         raise SystemExit("%s has %d entries, expected %d" % (decl, len(vals), count))
     return vals
-
-
-def parse_rks(src):
-    m = re.search(r"static const int RKS_Table\[32\]\[8\]\s*=\s*\{(.*?)\n\};", src, re.S)
-    if not m:
-        raise SystemExit("could not find RKS_Table")
-    rows = re.findall(r"\{([^{}]*?)\}", m.group(1))
-    if len(rows) != 32:
-        raise SystemExit("RKS_Table has %d rows, expected 32" % len(rows))
-    out = []
-    for r in rows:
-        vals = [int(v) for v in re.findall(r"-?\d+", r)]
-        if len(vals) != 8:
-            raise SystemExit("RKS_Table row has %d entries, expected 8" % len(vals))
-        out.append(vals)
-    return out
 
 
 def emit(name, width, values, per_line, fmt):
@@ -109,151 +90,62 @@ def emit(name, width, values, per_line, fmt):
     print()
 
 
+def bits(values):
+    """Narrowest unsigned width that holds every value."""
+    return max(1, max(values).bit_length())
+
+
 def main():
     mame_root = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MAME
     src, path = read_source(mame_root)
 
-    ar_time = parse_double_table(src, "static const double ARTime[64]", 64)
-    dc_time = parse_double_table(src, "static const double DCTime[64]", 64)
-    chan_att = parse_double_table(src, "static const double channel_attenuation_table[16]", 16)
-    rks = parse_rks(src)
+    eg_inc = parse_int_table(src, "const uint32_t eg_inc[64]", 64)
+    rks = parse_int_table(src, "const uint8_t rks_tab[32][8]", 256)
+    detune = parse_int_table(src, "const uint8_t detune_tab[32][4]", 128)
+    modlvl = parse_int_table(src, "const uint16_t modlevel[8]", 8)
+    pms_k = parse_int_table(src, "const uint8_t pms_k[8]", 8)
 
-    # calculate_clock_correction(): rates expressed in samples, correction 1.0
-    lut_ar = [t * SAMPLE_RATE / 1000.0 for t in ar_time]
-    lut_dc = [t * SAMPLE_RATE / 1000.0 for t in dc_time]
-
-    # init_envelope(): a rate below 4 means "instant", which MAME encodes as a
-    # zero step. The INF entries are exactly those rates, so they never divide.
-    VOL_MAX = 255 << 16
-
-    def sweep_step(lut, rate):
-        if rate < 4 or lut[rate] <= 0.0:
-            return 0
-        return min(int((255.0 / lut[rate]) * 65536.0), VOL_MAX)
-
-    ar_step = [sweep_step(lut_ar, r) for r in range(64)]
-    dc_step = [sweep_step(lut_dc, r) for r in range(64)]
-
-    # decay1 sweeps only (255 - decay_level) = decay1lvl * 16, so the RTL scales
-    # this reciprocal by the amount instead of holding 16 more tables.
-    dc_recip = []
-    for r in range(64):
-        if r < 4 or lut_dc[r] <= 0.0:
-            dc_recip.append(0)
-        else:
-            dc_recip.append(min(int(round((1 << 24) / lut_dc[r])), (1 << 20) - 1))
-
-    env_vol = [min(int(65536.0 / math.pow(10.0, (i / (256.0 / 96.0)) / 20.0)), 65536)
-               for i in range(256)]
-    tl = [min(int(65536.0 / math.pow(10.0, (0.75 * i) / 20.0)), 65536) for i in range(128)]
-    atten = [min(int(65536.0 / math.pow(10.0, db / 20.0)), 65536) for db in chan_att]
+    # init_tables(), verbatim.
+    logsin = [int(math.floor(-math.log(math.sin((i + 0.5) * math.pi / 512.0))
+                             / math.log(2.0) * 256.0 + 0.5)) for i in range(256)]
+    exp_t = [int(math.floor(math.pow(2.0, -(i + 1) / 256.0) * 2048.0 + 0.5))
+             for i in range(256)]
 
     print("//==========================================================================")
     print("//  SeibuSPI - YMF271 fixed-point tables")
     print("//")
     print("//  GENERATED by tools/gen_ymf271_tables.py -- do not edit.")
     print("//  Source: %s" % path)
+    print("//  Core:   MAME %s, the OPX rewrite" % CORE_COMMIT)
     print("//==========================================================================")
     print()
 
-    flat_rks = [rks[k][s] for k in range(32) for s in range(8)]
-    print("\t// RKS_Table[keycode][keyscale], flattened to {keycode[4:0], keyscale[2:0]}.")
-    emit("YMF_RKS", 5, flat_rks, 8, "d%d")
+    print("\t// init_tables(): -log2(sin((i+0.5)*pi/512)) * 256, the quarter sine.")
+    print("\t// Indexed by the folded phase; the operator adds the envelope")
+    print("\t// attenuation to this sum and resolves it through YMF_EXP.")
+    emit("YMF_LOGSIN", bits(logsin), logsin, 8, "d%d")
 
-    print("\t// Envelope steps for a full 255-unit sweep, already <<16.")
-    emit("YMF_AR_STEP", 24, ar_step, 4, "d%d")
-    emit("YMF_DC_STEP", 24, dc_step, 4, "d%d")
+    print("\t// init_tables(): 2^(-(i+1)/256) * 2048. One exponential serves both")
+    print("\t// the operator output and env_mul()'s PCM envelope multiply.")
+    emit("YMF_EXP", bits(exp_t), exp_t, 8, "d%d")
 
-    print("\t// 2^24 / decay time in samples; decay1 multiplies this by its sweep.")
-    emit("YMF_DC_RECIP", 20, dc_recip, 4, "d%d")
+    print("\t// eg_inc[rate]: nibble k is the envelope increment for EG sub-step k,")
+    print("\t// k = (eg_cnt >> shift) & 7 below rate 48 and eg_cnt & 7 above it.")
+    emit("YMF_EG_INC", 32, eg_inc, 4, "h%08X")
 
-    print("\t// Linear gains, 65536 = unity.")
-    emit("YMF_ENV_VOL", 17, env_vol, 8, "d%d")
-    emit("YMF_TL", 17, tl, 8, "d%d")
-    emit("YMF_ATTEN", 17, atten, 8, "d%d")
+    print("\t// rks_tab[keycode][KS], flattened to {keycode[4:0], ks[2:0]}.")
+    print("\t// Unchanged from the old core's RKS_Table.")
+    emit("YMF_RKS", bits(rks), rks, 8, "d%d")
 
-    # ---- operator waveforms (init_tables) ---------------------------------
-    MAXOUT, MINOUT = 32767, -32768
-    SIN_LEN = 1024
-    waves = []
-    for wf in range(6):
-        for i in range(SIN_LEN):
-            m1 = math.sin(((i * 2) + 1) * math.pi / SIN_LEN)
-            m2 = math.sin(((i * 4) + 1) * math.pi / SIN_LEN)
-            half = i < (SIN_LEN // 2)
-            if wf == 0:   v = int(m1 * MAXOUT)
-            elif wf == 1: v = int((m1 * m1) * (MAXOUT if half else MINOUT))
-            elif wf == 2: v = int(m1 * MAXOUT) if half else int(-m1 * MAXOUT)
-            elif wf == 3: v = int(m1 * MAXOUT) if half else 0
-            elif wf == 4: v = int(m2 * MAXOUT) if half else 0
-            else:         v = int(abs(m2) * MAXOUT) if half else 0
-            waves.append(v & 0xFFFF)
-    print("\t// Operator waveforms 0..5, {waveform[2:0], phase[9:0]}, two's complement.")
-    print("\t// 6 is the constant %d and 7 is silence; both are done in logic." % MAXOUT)
-    emit("YMF_WAVE", 16, waves, 6, "h%04X")
+    print("\t// detune_tab[keycode][DT&3], flattened to {keycode[4:0], dt[1:0]},")
+    print("\t// in units of fs/2^20 -- one LSB of a 20-bit phase increment.")
+    emit("YMF_DETUNE", bits(detune), detune, 8, "d%d")
 
-    # ---- LFO --------------------------------------------------------------
-    lfo_freq = parse_double_table(src,
-                                  "static const double LFO_frequency_table[256]", 256)
-    # init_lfo() computes (LFO_LENGTH * f / 44100) * 256 and truncates to int,
-    # which is zero for every frequency below 0.673 Hz -- 161 of the 256
-    # settings, where the datasheet's Table 2-6-2 goes down to 0.00066 Hz. A
-    # stalled LFO is not a silent one either: phase 0 is the PEAK of all three
-    # amplitude shapes, so those slots get a constant attenuation instead of a
-    # sweep. Ten more fractional bits -- 18 below the phase index instead of 8
-    # -- is the least that keeps setting 0 above zero (it lands on 1.0044), so
-    # every one of the 256 settings oscillates. The fastest is exactly 2^19.
-    lfo_step = [int(((256.0 * f) / SAMPLE_RATE) * float(1 << 18)) for f in lfo_freq]
-    print("\t// init_lfo(): phase increment per sample, LFO_LENGTH 256 << 18.")
-    emit("YMF_LFO_STEP", 20, lfo_step, 8, "d%d")
+    print("\t// modlevel[FB of a modulated slot]: (14-bit modulator sum * this) >> 8.")
+    emit("YMF_MODLVL", bits(modlvl), modlvl, 8, "d%d")
 
-    # The pitch LFO shape, exactly as init_tables builds plfo[], quantised to
-    # 128ths so the exponential below can be a table of 257 entries per depth
-    # instead of 256 entries per (wave, depth) pair.
-    LFO_LENGTH = 256
-    qs = []
-    for wave in range(4):
-        for i in range(LFO_LENGTH):
-            if wave == 0:
-                x = 0.0
-            elif wave == 1:
-                fsaw = ((i % (LFO_LENGTH // 2)) * 1.0) / float((LFO_LENGTH // 2) - 1)
-                x = fsaw if i < (LFO_LENGTH // 2) else fsaw - 1.0
-            elif wave == 2:
-                x = 1.0 if i < (LFO_LENGTH // 2) else -1.0
-            else:
-                ftri = ((i % (LFO_LENGTH // 4)) * 1.0) / float(LFO_LENGTH // 4)
-                q = i // (LFO_LENGTH // 4)
-                x = [ftri, 1.0 - ftri, -ftri, -(1.0 - ftri)][q]
-            qs.append(int(round(x * 128.0)) & 0x1FF)
-    print("\t// LFO pitch shape per {wave[1:0], phase[7:0]}, signed, unit = 1/128.")
-    emit("YMF_PLFO_W", 9, qs, 8, "h%03X")
-
-    # 2 ^ (cents * x / 1200), 65536 = unity, for pms 1..7 (pms 0 is unity).
-    CENTS = [0.0, 3.378, 5.0646, 6.7495, 10.1143, 20.1699, 40.1076, 79.307]
-    plfo = []
-    for pms in range(1, 8):
-        for q in range(-128, 129):
-            plfo.append(int(round(65536.0 * math.pow(2.0, (CENTS[pms] * (q / 128.0)) / 1200.0))))
-    print("\t// 2^(cents[pms] * q/128 / 1200) for pms 1..7, index {pms-1, q+128}.")
-    emit("YMF_PLFO", 18, plfo, 6, "d%d")
-
-    # calculate_slot_volume(): lfo_volume = 65536 - ((amplitude * K) >> 16),
-    # amplitude peaking at 65536, so K is the SWING and 65536-K is the gain at
-    # full modulation. MAME passes the gains themselves -- 65536/10^(dB/20) for
-    # the datasheet's 5.90625, 11.8125 and 23.625 dB (Table 2-6-3) -- which
-    # lands at 65536-K instead and yields 6.1, 2.6 and 0.6 dB: the deepest
-    # setting comes out the shallowest. The swings are the complements.
-    AMS_DB = [0.0, 5.90625, 11.8125, 23.625]
-    alfo_k = [0] + [65536 - int(65536.0 / math.pow(10.0, db / 20.0)) for db in AMS_DB[1:]]
-    print("\t// Amplitude LFO swing per ams (Table 2-6-3); 0 means no modulation.")
-    emit("YMF_ALFO_K", 16, alfo_k, 4, "d%d")
-
-    # ---- operator modulation depths ---------------------------------------
-    modlvl = parse_int_table(src, "static const int modulation_level[8]", 8)
-    fblvl = parse_int_table(src, "static const int feedback_level[8]", 8)
-    emit("YMF_MODLVL", 8, modlvl, 8, "d%d")
-    emit("YMF_FBLVL", 7, fblvl, 8, "d%d")
+    print("\t// pms_k[PMS]: max LFO pitch deviation = fnum * k / 1024.")
+    emit("YMF_PMS_K", bits(pms_k), pms_k, 8, "d%d")
 
 
 if __name__ == "__main__":

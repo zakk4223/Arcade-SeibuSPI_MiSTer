@@ -8,18 +8,26 @@
 //  The synthesis half lives in ymf271_pcm.sv; this file decodes writes into
 //  its slot parameter RAM and hands it key on/off events.
 //
-//  Slot parameter RAM layout -- three 64 bit words a slot, byte addressed.
-//  Every field either engine reads is stored; the three the chip has that
-//  nothing consumes (accon, detune, srcnote/srcb) are dropped.
+//  Slot parameter RAM layout -- four 64 bit words a slot, byte addressed.
+//  Every field the engine reads is stored. Detune, Acc On, Src Note and Src B
+//  always were: they sit inside bytes other registers own, and it was only the
+//  old synthesis core that never extracted them.
 //
-//    word 0: FM 3  4  5  6  7  8  9  A     (multiple .. fns_hi/block)
-//    word 1: FM B  D  E, PCM 0 1 2 3 4     (waveform/feedback, levels, start)
-//    word 2: PCM 5 6 7 8 9, FM 1  2  C     (end, loop, fs/bits, LFO, algorithm)
+//    word 0: FM 3  4  5  6  7  8  9  A     (multiple/detune .. fns_hi/block)
+//    word 1: FM B  D  E, PCM 0 1 2 3 4     (waveform/fb/accon, levels, start)
+//    word 2: PCM 5 6 7 8 9, FM 1  2  C     (end, loop, fs/bits/src, LFO, alg)
+//    word 3: FM 0                          (EN and EXT Out; KON has no storage)
 //
 //  Which gives the flat byte index used below:
-//    FM reg 3..A -> 0..7,  B -> 8,  D -> 9,  E -> 10
+//    FM reg 3..9 -> 0..6,  B -> 8,  D -> 9,  E -> 10
 //    PCM reg r   -> 11 + r
-//    FM reg 1 -> 21,  2 -> 22,  C -> 23
+//    FM reg 1 -> 21,  2 -> 22,  C -> 23,  0 -> 24
+//
+//  Byte 7 -- Block and F-Number2 -- is NOT written by FM register A. The
+//  manual requires Block and F-Number2 to be written before F-Number1, and the
+//  chip honours that literally: A only latches, and 9 commits both halves at
+//  once. The latch is `fnum_latch` below, and a write to 9 therefore costs two
+//  parameter stores per slot instead of one.
 //============================================================================
 
 module ymf271
@@ -179,19 +187,28 @@ module ymf271
 	// Flat parameter byte index, 31 = "not stored".
 	wire [4:0] pidx = seq_pcm
 	                ? ((seq_reg <= 4'd9) ? (5'd11 + {1'b0, seq_reg}) : 5'd31)
-	                : ((seq_reg >= 4'h3 && seq_reg <= 4'hA) ? ({1'b0, seq_reg} - 5'd3) :
+	                : ((seq_reg >= 4'h3 && seq_reg <= 4'h9) ? ({1'b0, seq_reg} - 5'd3) :
 	                   (seq_reg == 4'hB) ? 5'd8 :
 	                   (seq_reg == 4'hD) ? 5'd9 :
 	                   (seq_reg == 4'hE) ? 5'd10 :
 	                   (seq_reg == 4'h1) ? 5'd21 :
 	                   (seq_reg == 4'h2) ? 5'd22 :
-	                   (seq_reg == 4'hC) ? 5'd23 : 5'd31);
+	                   (seq_reg == 4'hC) ? 5'd23 :
+	                   (seq_reg == 4'h0) ? 5'd24 : 5'd31);
 
 	wire seq_active = |seq_banks;
 	wire seq_store  = seq_active && (pidx != 5'd31);
-	// FM register 0 is the key on/off register and has no storage.
+	// FM register 0 carries EN and EXT Out as well as KON, so it is stored --
+	// but KON itself is an event, not a field. Every KON=1 write retriggers,
+	// edge or not: P-47 Aces writes KON=1 onto already-keyed slots for note
+	// repeats, and edge-triggering would drop those notes.
 	wire seq_keyon  = seq_active && !seq_pcm && (seq_reg == 4'd0) &&  seq_data[0];
 	wire seq_keyoff = seq_active && !seq_pcm && (seq_reg == 4'd0) && !seq_data[0];
+
+	// Block / F-Number2, held until F-Number1 commits both. One byte a slot.
+	reg  [7:0] fnum_latch [0:47];
+	reg        seq_ph;                    // second store of a register-9 write
+	wire       seq_two = seq_active && !seq_pcm && (seq_reg == 4'h9);
 
 	// ------------------------------------------------------------------
 	// Bus write decode
@@ -276,18 +293,48 @@ module ymf271
 
 		// ---- sequencer step ------------------------------------------
 		if (seq_active) begin
-			seq_banks <= seq_banks & ~(4'b0001 << seq_bank);
-			par_addr  <= {seq_slot, pidx[4:3]};
-			par_byte  <= pidx[2:0];
-			par_data  <= seq_data;
-			par_we    <= seq_store;
-			key_slot  <= seq_slot;
-			key_on    <= seq_keyon;
-			key_off   <= seq_keyoff;
-			// Key on clears this slot's end flag straight away; the engine
-			// only ever sets it, so there is one writer per direction.
-			if (seq_keyon && ks_ok) end_status[ks_bit] <= 1'b0;
+			// A write to FM register A only latches; register 9 then stores the
+			// F-Number low byte and the latched Block / F-Number2 together, so
+			// it takes two cycles per slot. Z80 writes are microseconds apart
+			// and this drains in at most eight, so nothing has to queue.
+			if (seq_two && !seq_ph) begin
+				par_addr <= {seq_slot, 2'd0};
+				par_byte <= 3'd6;
+				par_data <= seq_data;
+				par_we   <= 1'b1;
+				seq_ph   <= 1'b1;
+			end
+			else begin
+				if (seq_two) begin
+					par_addr <= {seq_slot, 2'd0};
+					par_byte <= 3'd7;
+					par_data <= fnum_latch[seq_slot];
+					par_we   <= 1'b1;
+				end
+				else begin
+					par_addr <= {seq_slot, pidx[4:3]};
+					par_byte <= pidx[2:0];
+					par_data <= seq_data;
+					par_we   <= seq_store;
+				end
+				if (!seq_pcm && (seq_reg == 4'hA)) fnum_latch[seq_slot] <= seq_data;
+				seq_banks <= seq_banks & ~(4'b0001 << seq_bank);
+				seq_ph    <= 1'b0;
+				key_slot  <= seq_slot;
+				key_on    <= seq_keyon;
+				key_off   <= seq_keyoff;
+				// Key on clears this slot's end flag straight away.
+				if (seq_keyon && ks_ok) end_status[ks_bit] <= 1'b0;
+			end
 		end
+
+		// The End flags are cleared by READING them. Brave Blade copies the
+		// status registers to RAM every ~100 us and frees a PCM channel when it
+		// sees that channel's End bit; a sticky flag kills the next note started
+		// on that slot from the stale copy. Placed before the engine's set below
+		// so an End raised in the same cycle survives the read.
+		if (rd && (addr == 4'h0)) end_status[3:0]  <= 4'd0;
+		if (rd && (addr == 4'h1)) end_status[11:4] <= 8'd0;
 
 		if (end_set && es_ok) end_status[es_bit] <= 1'b1;
 
@@ -428,6 +475,7 @@ module ymf271
 			status     <= 2'd0;
 			irqstate   <= 2'd0;
 			end_status <= 16'd0;
+			seq_ph     <= 1'b0;
 			timA_run   <= 1'b0;
 			timB_run   <= 1'b0;
 			timA_cnt   <= 11'd0;

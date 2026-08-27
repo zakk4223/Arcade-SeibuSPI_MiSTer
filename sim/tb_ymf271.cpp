@@ -207,35 +207,101 @@ struct Phase {
     uint32_t endoff, loopoff, step;
     bool looped = false;
 
+    // Positions run over [0, End): reaching End wraps back by End-Loop, so a
+    // looped sample's period is exactly End-Loop words. The old core compared
+    // against End with a strict >, folded once and clamped; this is the OPX
+    // core's modulo.
     void wrap() {
-        if ((stepptr >> 16) > endoff) {
-            stepptr = stepptr - ((uint64_t)endoff << 16) + ((uint64_t)loopoff << 16);
+        uint64_t pos = stepptr >> 16;
+        if (pos >= endoff) {
+            pos = (endoff > loopoff) ? (loopoff + (pos - endoff) % (endoff - loopoff))
+                                     : loopoff;
+            stepptr = (pos << 16) | (stepptr & 0xffff);
             looped = true;
-            if ((stepptr >> 16) > endoff) {
-                stepptr &= 0xffff;
-                stepptr |= ((uint64_t)loopoff << 16);
-                if ((stepptr >> 16) > endoff) {
-                    stepptr &= 0xffff;
-                    stepptr |= ((uint64_t)endoff << 16);
-                }
-            }
         }
     }
     void advance() { stepptr += step; }
 };
 
-static int16_t expect_8bit(uint32_t start, const Phase &p) {
-    return (int16_t)((uint16_t)rom[start + (uint32_t)(p.stepptr >> 16)] << 8);
+// Both return the chip's 12-bit source WORD, signed. The OPX core reads 8-bit
+// data as the upper byte of one (int8 << 4) and packs 12-bit data three bytes
+// to two words.
+static int32_t expect_8bit(uint32_t start, const Phase &p) {
+    return (int32_t)(int8_t)rom[start + (uint32_t)(p.stepptr >> 16)] << 4;
 }
 
-static int16_t expect_12bit(uint32_t start, const Phase &p) {
+static int32_t expect_12bit(uint32_t start, const Phase &p) {
     uint32_t base = start + (uint32_t)(p.stepptr >> 17) * 3;
-    if (p.stepptr & 0x10000)
-        return (int16_t)(((uint16_t)rom[base + 2] << 8) |
-                         (((uint16_t)rom[base + 1] << 4) & 0xF0));
-    return (int16_t)(((uint16_t)rom[base] << 8) |
-                     ((uint16_t)rom[base + 1] & 0xF0));
+    uint32_t v = (p.stepptr & 0x10000)
+               ? (((uint32_t)rom[base + 2] << 4) | (rom[base + 1] >> 4))
+               : (((uint32_t)rom[base]     << 4) | (rom[base + 1] & 0x0F));
+    return (int32_t)((v & 0xFFF) ^ 0x800) - 0x800;
 }
+
+// ---- the OPX output chain, at zero attenuation --------------------------
+// A source word is interpolated up to 14 bits -- at a step of exactly one word
+// per sample the fraction stays 0, so that is a plain << 2 -- and then
+// multiplied by the envelope. env_mul is (v * exp[(env & 63) << 2]) >> 11 at
+// env 0, and exp[0] is 2042 rather than 2048: the OPM exponential is
+// 2^(-(i+1)/256), so even zero attenuation loses 0.29 %. That is MAME's
+// arithmetic, not slop.
+//
+// The old core normalised each of the four outputs by 32768 << 2 and the RTL
+// shifted the mix down by two at the end. The OPX core does not: one carrier at
+// full level is +/-8192 against a full scale of 32768, so the accumulators are
+// already at output scale and N channels at 0 dB sum to N times this.
+static int16_t chan0(int32_t w12)  { return (int16_t)((((w12 << 2) * 2042) >> 11)); }
+static int16_t monoN(int32_t w12, int n) {
+    return (int16_t)(n * (int32_t)chan0(w12));
+}
+
+static const uint16_t MODLEVEL[8] = { 128, 64, 32, 16, 8, 256, 512, 1024 };
+
+// init_tables(), recomputed from the trig rather than read back out of the
+// generated header, so agreement means something.
+static uint16_t opx_logsin(int i) {
+    return (uint16_t)floor(-log(sin((i + 0.5) * M_PI / 512.0)) / log(2.0) * 256.0 + 0.5);
+}
+static uint16_t opx_exp(int i) {
+    return (uint16_t)floor(pow(2.0, -(i + 1) / 256.0) * 2048.0 + 0.5);
+}
+
+// op(): 10-bit phase, waveform, 10-bit total attenuation -> 14-bit output.
+// Waveforms 1..5 are the manual's plots as ymfm reads them: +/-sin^2, |sin|,
+// half sine, and sin(2wt) / |sin(2wt)| over the first half only.
+static int32_t opx_opw(uint32_t phase, int wave, uint32_t env) {
+    uint32_t p = phase & 1023;
+    uint32_t idx = p & 255, att, neg = 0;
+    if (p & 256) idx ^= 255;
+    switch (wave) {
+    case 0: att = opx_logsin((int)idx);      neg = p & 512; break;
+    case 1: att = opx_logsin((int)idx) << 1; neg = p & 512; break;
+    case 2: att = opx_logsin((int)idx); break;
+    case 3: if (p & 512) return 0; att = opx_logsin((int)idx); break;
+    case 4:
+    case 5:
+        if (p & 512) return 0;
+        idx = (p << 1) & 255;
+        if (p & 128) idx ^= 255;
+        att = opx_logsin((int)idx);
+        if (wave == 4) neg = p & 256;
+        break;
+    default: return 0;
+    }
+    att += env << 2;
+    if (att >= 4096) return 0;
+    int32_t v = (opx_exp((int)(att & 255)) << 2) >> (att >> 8);
+    return neg ? -v : v;
+}
+
+static int32_t opx_op(uint32_t phase, uint32_t env) { return opx_opw(phase, 0, env); }
+
+// env_mul(): the PCM and linear-waveform envelope multiply.
+static int32_t opx_env_mul(int32_t v, uint32_t env) {
+    return (int32_t)(((int64_t)v * opx_exp((int)((env & 63) << 2)))
+                     >> (11 + (env >> 6)));
+}
+
 
 // ---------------------------------------------------------- FM reference ----
 // init_tables()'s waveform 0, recomputed from the trig rather than read back
@@ -265,6 +331,101 @@ static const int64_t ATTACK_STEP = (int64_t)((255.0 / (0.43 * 44.1)) * 65536.0);
 static const double PMS_CENTS[8] = { 0.0, 3.378, 5.0646, 6.7495,
                                      10.1143, 20.1699, 40.1076, 79.307 };
 
+// Every algorithm of every sync mode, against a model of the OPX core's own
+// evaluation.
+//
+// This is the piece most like the sprite decrypt tables in PLAN.md section 5.4:
+// 28 wiring diagrams read by eye into a table, where one wrong bit is a voice
+// that sounds plausible but wrong.
+//
+// It also pins the thing the rewrite changed underneath the wiring. The chip
+// evaluates slots in FLAT order n = 0..47, n = 12*bank + group -- all twelve S1
+// slots, then all S2, then S3, then S4 -- so a modulator with a HIGHER bank
+// than the slot it feeds is read from the previous sample, not this one. In
+// sync 0 the chain is S1->S3->S2->S4 but S2 is reached before S3, so S2's
+// modulation input is one sample stale. The model below keeps `out` across
+// samples and evaluates bank 0,1,2,3 in order, which is the only way that
+// delay shows up; the RTL does the same thing with out_reg. A model that
+// resolved each network within one sample would agree with an RTL that made
+// the same mistake, and neither would match the chip.
+//
+// The envelope is left out on purpose. Every operator here is attack rate 31
+// with no decay and total level 0, so once it has settled eg_att is 0 and
+// stays there, and the comparison window starts after that.
+struct OpxAlg { uint8_t mods[4]; uint8_t car; uint8_t fbsrc; };
+
+static const OpxAlg ALG4[16] = {
+    {{0,0x4,0x1,0x2},0x8,0}, {{0,0x4,0x1,0x2},0x8,2},
+    {{0,0x5,0x0,0x2},0x8,0}, {{0,0x4,0x0,0x3},0x8,0},
+    {{0,0x0,0x1,0x6},0x8,0}, {{0,0x0,0x1,0x6},0x8,2},
+    {{0,0x0,0x1,0x2},0xC,0}, {{0,0x0,0x1,0x2},0xC,2},
+    {{0,0x4,0x0,0x2},0x9,0}, {{0,0x0,0x0,0x6},0x9,0},
+    {{0,0x0,0x1,0x0},0xE,0}, {{0,0x0,0x1,0x0},0xE,2},
+    {{0,0x1,0x1,0x1},0xE,0}, {{0,0x4,0x0,0x0},0xB,0},
+    {{0,0x0,0x1,0x2},0xD,0}, {{0,0x0,0x0,0x0},0xF,0},
+};
+static const OpxAlg ALG3[8] = {
+    {{0,0x4,0x1,0},0x2,0}, {{0,0x4,0x1,0},0x2,2},
+    {{0,0x5,0x0,0},0x2,0}, {{0,0x4,0x0,0},0x3,0},
+    {{0,0x0,0x1,0},0x6,0}, {{0,0x0,0x1,0},0x6,2},
+    {{0,0x0,0x0,0},0x7,0}, {{0,0x0,0x1,0},0x7,0},
+};
+
+struct AlgModel {
+    int32_t out[4]  = {0, 0, 0, 0};      // persists across samples: the delay
+    int32_t fbh[4][2] = {};              // per head: bank 0, and bank 3 in sync 2
+    uint32_t phase[4] = {0, 0, 0, 0};
+    int fbk1 = 0;                        // the head's FB field
+    int mod[4] = {0, 0, 0, 0};           // every slot's FB field, as mod depth
+
+    // block 0, fns 0x800, multiple 1 -> fnum<<7 = 0x40000, sh = block+11 = 11,
+    // so the increment is 0x40000 << 4 = one of 1024 phase steps per sample.
+    static const uint32_t STEP = 0x400000;
+
+    int64_t sample(int sync, int alg) {
+        const OpxAlg &A = (sync == 0) ? ALG4[alg & 15] : ALG3[alg & 7];
+        // sync 2 is a THREE-operator network plus a fourth slot on its own.
+        // That fourth slot is alg_single: no modulator, its own one-slot
+        // feedback loop, and a carrier. It is nominally the PCM voice, but
+        // nothing forces waveform 7 on it -- here it carries waveform 0, so it
+        // sounds as an operator and is mixed like one. Leaving it out of the
+        // model is leaving a carrier out of the sum.
+        int nops = (sync == 0) ? 4 : 3;
+        int32_t acc = 0;
+
+        // sync 2's fourth slot is a voice of its own: is_keyon_slot() makes
+        // banks 0 AND 3 key-on slots, and a broadcast write to bank 0 reaches
+        // only slots g, g+12 and g+24. The test keys bank 0, so slot g+36 is
+        // never keyed and sits in EG_OFF. The old core gated the whole group on
+        // operator 1's `active` flag and so sounded it anyway; the OPX core
+        // gives every slot its own envelope, and an unkeyed one is silent.
+        for (int b = 0; b < nops; b++) {
+            bool single = false;
+            int head = single ? b : 0;
+            int32_t m;
+            if (b == head) {
+                // OPM's feedback law on the average of the last two outputs
+                m = mod[b] ? ((fbh[head][0] + fbh[head][1]) >> (10 - mod[b])) : 0;
+            } else {
+                int32_t sum = 0;
+                for (int q = 0; q < nops; q++)
+                    if (A.mods[b] & (1 << q)) sum += out[q];
+                m = (int32_t)(((int64_t)sum * MODLEVEL[mod[b]]) >> 8);
+            }
+            int32_t o = opx_op((phase[b] >> 22) + (uint32_t)m, 0);
+            out[b] = o;
+            phase[b] += STEP;
+            int fbsrc = single ? b : A.fbsrc;
+            if (b == fbsrc) { fbh[head][1] = fbh[head][0]; fbh[head][0] = o; }
+            bool carrier = single ? true : ((A.car >> b) & 1);
+            if (carrier) acc += 4 * o;   // four channels at 0 dB
+        }
+        if (acc >  32767) acc =  32767;
+        if (acc < -32768) acc = -32768;
+        return acc;
+    }
+};
+
 // ---------------------------------------------------------------- setup ----
 // Slot 0 as a PCM voice at exactly one source sample per output sample, full
 // volume, no decay.
@@ -288,8 +449,12 @@ static void setup_slot0(uint32_t start, uint32_t endoff, uint32_t loopoff, bool 
     fm_write(0, 0, 0x6, 0x00);          // decay1 rate 0 -> no decay
     fm_write(0, 0, 0x7, 0x00);          // decay2 rate 0
     fm_write(0, 0, 0x8, 0x00);          // release 0, decay1 level 0
-    fm_write(0, 0, 0x9, 0x00);          // fns low
-    fm_write(0, 0, 0xA, 0x00);          // block 0, fns high -> step == 1.0
+    // Block and F-Number2 BEFORE F-Number1, which is the order the manual
+    // requires and the chip enforces: register A only latches, and register 9
+    // commits both halves at once. Written the other way round the block and
+    // the F-number's top nibble never take effect at all.
+    fm_write(0, 0, 0xA, 0x00);          // block 0, fns high
+    fm_write(0, 0, 0x9, 0x00);          // fns low -> step == 1.0
     fm_write(0, 0, 0xB, 0x07);          // waveform 7 = external (PCM)
     fm_write(0, 0, 0xD, 0x00);          // ch0/ch1 attenuation 0 dB
     fm_write(0, 0, 0xE, 0x00);          // ch2/ch3 attenuation 0 dB
@@ -304,12 +469,24 @@ static void setup_fm_op(int bank, uint8_t waveform, uint8_t tl, uint8_t feedback
                         uint8_t alg) {
     fm_write(bank, 0, 0x3, 0x01);                       // multiple 1
     fm_write(bank, 0, 0x4, tl);
-    fm_write(bank, 0, 0x5, 0x1F);                       // attack 31, keyscale 0
+    // Attack 31 with KEYSCALE 4, not 0. Block 0 and fns 0x800 give key code 1,
+    // whose rks at ks 4 is 1, so the effective rate is 2*31 + 1 = 63 -- the
+    // maximum, which slot_keyon() answers by setting the attenuation straight
+    // to 0 dB (table 2-6-8: rate 63 is 0.07 ms). The envelope is therefore
+    // settled on the note's very first sample.
+    //
+    // That is not a convenience. With keyscale 0 the rate is 62 and the
+    // envelope takes about twenty samples to climb, and the algorithms whose
+    // feedback runs S1->S3->S1 (1, 5, 7 and 11) are chaotic under it: the
+    // transient perturbs the loop and the waveform never re-converges on one
+    // that started settled, so no offset ever lines up. Starting settled is
+    // the only way to compare those four at all.
+    fm_write(bank, 0, 0x5, 0x9F);                       // attack 31, keyscale 4
     fm_write(bank, 0, 0x6, 0x00);
     fm_write(bank, 0, 0x7, 0x00);
     fm_write(bank, 0, 0x8, 0x00);
-    fm_write(bank, 0, 0x9, 0x00);                       // fns low
-    fm_write(bank, 0, 0xA, 0x08);                       // block 0, fns = 0x800
+    fm_write(bank, 0, 0xA, 0x08);                       // block 0, fns high
+    fm_write(bank, 0, 0x9, 0x00);                       // commits fns = 0x800
     fm_write(bank, 0, 0xB, (uint8_t)((feedback << 4) | waveform));
     fm_write(bank, 0, 0xC, alg);
     fm_write(bank, 0, 0xD, 0x00);                       // ch0/ch1 0 dB
@@ -326,12 +503,27 @@ static void setup_fm_op(int bank, uint8_t waveform, uint8_t tl, uint8_t feedback
 // from address 0 and buries the operator under a constant offset.
 static const uint8_t PCM_SEL_G0_BANK3 = 12;
 
-static void silence_pcm_bank3() {
-    const uint8_t s = PCM_SEL_G0_BANK3;
+static void silence_pcm_sel(uint8_t s) {
     pcm_write(s, 0, 0x00); pcm_write(s, 1, 0x00); pcm_write(s, 2, 0x10);
     pcm_write(s, 3, 0xFF); pcm_write(s, 4, 0x0F); pcm_write(s, 5, 0x00);
     pcm_write(s, 6, 0x00); pcm_write(s, 7, 0x00); pcm_write(s, 8, 0x00);
     pcm_write(s, 9, 0x00);
+}
+
+static void silence_pcm_bank3() { silence_pcm_sel(PCM_SEL_G0_BANK3); }
+
+// Waveform 7 is no longer a way to silence a slot. The OPX core fetches
+// external data for EVERY slot whose number is a multiple of four, whatever
+// the group's sync mode says -- and group 0's four slots are 0, 12, 24 and 36,
+// all of them multiples of four. A wave-7 select on any of them is a PCM voice
+// reading from wherever its start register happens to point, which is address 0
+// until something writes it. The old core only ran PCM on the slot its sync
+// mode nominated, so "waveform 7" really was silence there.
+static void silence_pcm_group0() {
+    silence_pcm_sel(0);    // slot 0
+    silence_pcm_sel(4);    // slot 12
+    silence_pcm_sel(8);    // slot 24
+    silence_pcm_sel(12);   // slot 36
 }
 
 static void reset_dut() {
@@ -357,7 +549,7 @@ static int find_alignment(uint32_t start, bool bits12, int settle) {
     for (int d = 0; d <= 4; d++) {
         Phase p; p.endoff = 0x7FFFF; p.loopoff = 0; p.step = 65536;
         p.stepptr = (uint64_t)(settle - d) * 65536;
-        int16_t want = bits12 ? expect_12bit(start, p) : expect_8bit(start, p);
+        int16_t want = monoN(bits12 ? expect_12bit(start, p) : expect_8bit(start, p), 4);
         if (want == got) return settle - d;
     }
     return -1;
@@ -383,7 +575,7 @@ static void test_8bit_playback() {
     int bad = 0;
     for (int i = 0; i < 300; i++) {
         p.wrap();
-        int16_t want = expect_8bit(start, p);
+        int16_t want = monoN(expect_8bit(start, p), 4);
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: 8-bit sample %d (idx %u): want=%d got=%d\n",
@@ -414,7 +606,7 @@ static void test_12bit_playback() {
     int bad = 0;
     for (int i = 0; i < 200; i++) {
         p.wrap();
-        int16_t want = expect_12bit(start, p);
+        int16_t want = monoN(expect_12bit(start, p), 4);
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: 12-bit sample %d: want=%d got=%d\n", i, want, got);
@@ -442,7 +634,7 @@ static void test_loop_and_end_status() {
     for (int d = 0; d <= (int)endoff; d++) {
         Phase p; p.endoff = endoff; p.loopoff = loopoff; p.step = 65536;
         p.stepptr = (uint64_t)d * 65536;
-        if (expect_8bit(start, p) == first) { idx = d; break; }
+        if (monoN(expect_8bit(start, p), 4) == first) { idx = d; break; }
     }
     if (idx < 0) { fail("loop: no plausible phase matched"); return; }
 
@@ -453,7 +645,7 @@ static void test_loop_and_end_status() {
     int bad = 0;
     for (int i = 0; i < 100; i++) {
         p.wrap();
-        int16_t want = expect_8bit(start, p);
+        int16_t want = monoN(expect_8bit(start, p), 4);
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: loop sample %d (idx %u): want=%d got=%d\n",
@@ -466,11 +658,34 @@ static void test_loop_and_end_status() {
     if (!p.looped) fail("loop: the reference never wrapped, so the test proved nothing");
     printf("loop playback: 100 samples, %d mismatches\n", bad);
 
-    // Status register 1: bits 3..6 are the low four end flags, and slot 0 is
-    // bit 0 of end_status, so it shows up at bit 3.
+    // Status register 0: d3..d6 are the End flags of slots 0, 12, 24 and 36,
+    // so slot 0 shows up at d3.
     dut->addr = 0; dut->eval();
-    if (!(dut->dout & 0x08)) fail("end status for slot 0 never set after looping");
-    else printf("end status: set\n");
+    if (!(dut->dout & 0x08)) { fail("end status for slot 0 never set after looping"); return; }
+
+    // Reading the status register CLEARS the End flags. Brave Blade copies
+    // them to RAM every ~100 us and frees a PCM channel when it sees one; a
+    // sticky flag kills the next note started on that slot from the stale copy.
+    uint8_t st = rd(0);
+    if (!(st & 0x08)) { fail("end status: the read did not return the flag"); return; }
+    dut->addr = 0; dut->eval();
+    if (dut->dout & 0x08) { fail("end status: reading it did not clear it"); return; }
+
+    // ...and it does not come back. End is raised ONCE per key-on, not once per
+    // pass of the loop: drivers play one-shot samples as a short silent loop
+    // and free the channel from a copy of the status register, so re-raising it
+    // would kill a note re-triggered between the copy and the free pass. The
+    // sample above loops every few dozen samples, so 400 is many passes.
+    for (int i = 0; i < 400; i++) next_sample();
+    dut->addr = 0; dut->eval();
+    if (dut->dout & 0x08) { fail("end status: raised again on a later loop pass"); return; }
+
+    // A new key-on re-arms it.
+    key_on();
+    for (int i = 0; i < 400; i++) next_sample();
+    dut->addr = 0; dut->eval();
+    if (!(dut->dout & 0x08)) { fail("end status: a new key-on did not re-arm it"); return; }
+    printf("end status: set, cleared by reading, not re-raised, re-armed by key on\n");
 }
 
 // Timer A fires every 384 * (1024 - n) master clocks, i.e. every (1024 - n)
@@ -532,36 +747,40 @@ static void test_fm_carrier() {
     const int TL = 8;                   // a real attenuation, so the total
     reset_dut();                        // level path is actually exercised
     timer_write(0x00, 0x00);            // group 0 sync = 0, 4-operator FM
-    setup_fm_op(0, 0, TL, 0, 0x0F);     // operator 1: sine, alg 15
-    setup_fm_op(1, 7, 0x00, 0, 0x0F);   // operators 2 and 3: waveform 7 = silent
+    setup_fm_op(0, 0, TL, 0, 0x0F);     // operator 1: sine, alg 15 = all carriers
+    setup_fm_op(1, 7, 0x00, 0, 0x0F);   // the other three read external data
     setup_fm_op(2, 7, 0x00, 0, 0x0F);
-    setup_fm_op(3, 7, 0x00, 0, 0x0F);   // operator 4 falls through to PCM
-    silence_pcm_bank3();
+    setup_fm_op(3, 7, 0x00, 0, 0x0F);
+    silence_pcm_group0();               // ...parked on the ROM's block of zeros
     key_on();
 
     for (int i = 0; i < 40; i++) next_sample();
+
+    // The envelope is settled at 0, so the whole attenuation is total level:
+    // env = eg_att + (TL << 3).
+    const uint32_t env = (uint32_t)TL << 3;
 
     // Phase advances by exactly one table entry a sample. A single sample is
     // not enough to locate it -- the sine takes most values twice a period, so
     // the first match is often the wrong one and everything after it reads as
     // a one-sample lag. Require four in a row.
-    int64_t gain = (env_volume(0) * total_level(TL)) >> 16;
     int16_t seed[4];
     for (int j = 0; j < 4; j++) seed[j] = next_sample();
     int ph = -1;
     for (int p = 0; p < 1024 && ph < 0; p++) {
         bool ok = true;
         for (int j = 0; j < 4; j++)
-            if ((int16_t)((wave0((p + j) & 1023) * gain) >> 16) != seed[j]) ok = false;
+            if ((int16_t)(4 * opx_op((uint32_t)(p + j), env)) != seed[j]) ok = false;
         if (ok) ph = p;
     }
     if (ph < 0) { fail("fm carrier: output matched no point on the waveform"); return; }
     ph += 3;
-    if (gain >= 65536) fail("fm carrier: total level had no effect");
+    if (opx_op(256, env) >= opx_op(256, 0))
+        fail("fm carrier: total level had no effect");
 
     int bad = 0;
     for (int i = 1; i <= 300; i++) {
-        int16_t want = (int16_t)((wave0((ph + i) & 1023) * gain) >> 16);
+        int16_t want = (int16_t)(4 * opx_op((uint32_t)(ph + i), env));
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: fm carrier %d: want=%d got=%d\n", i, want, got);
@@ -569,22 +788,30 @@ static void test_fm_carrier() {
         }
     }
     errors += bad;
-    printf("fm carrier: 300 samples, %d mismatches (total level gain %lld/65536)\n",
-           bad, (long long)gain);
+    printf("fm carrier: 300 samples, %d mismatches (env %u, peak %d)\n",
+           bad, env, 4 * opx_op(256, env));
 }
+
 
 // The heart of FM: operator 1 modulates operator 3's phase. Uses sync 1, whose
 // algorithm 0 is exactly that pair with the modulator kept out of the mix.
 static void test_fm_modulation() {
-    const int FEEDBACK = 3;             // modulation_level[3] = 2
+    const int FEEDBACK = 3;             // modlevel[3] = 16
     reset_dut();
     timer_write(0x00, 0x01);            // group 0 sync = 1, two 2-op pairs
     setup_fm_op(0, 0, 0x00, 0, 0x00);           // pair 0 operator 1: modulator
     setup_fm_op(2, 0, 0x00, FEEDBACK, 0x00);    // pair 0 operator 3: carrier
-    setup_fm_op(1, 7, 0x00, 0, 0x00);           // pair 1: silent
+    setup_fm_op(1, 7, 0x00, 0, 0x00);           // pair 1: never keyed, so silent
     setup_fm_op(3, 7, 0x00, 0, 0x00);
     key_on();
 
+    // The two pairs of a sync-1 group are separate voices: is_keyon_slot()
+    // makes banks 0 and 1 key-on slots, and a broadcast write to bank 0 reaches
+    // slots g and g+24 only. Pair 1 is never keyed and stays in EG_OFF.
+    //
+    // Pair 0 is banks 0 and 2 -- positions 0 and 1 of alg2 -- so the modulator
+    // has the LOWER slot number and its output is read in the same pass. This
+    // is the sync mode the algorithm sweep does not cover.
     for (int i = 0; i < 40; i++) next_sample();
 
     // Both operators step by exactly one entry a sample and started together,
@@ -592,18 +819,18 @@ static void test_fm_modulation() {
     int16_t first = next_sample();
     int ph = -1;
     for (int p = 0; p < 1024; p++) {
-        int64_t mod = ((int64_t)wave0(p) << 8) * MODULATION_LEVEL[FEEDBACK];
-        uint32_t sum = (uint32_t)((int64_t)p * 65536 + mod);
-        if (wave0((sum >> 16) & 1023) == first) { ph = p; break; }
+        int32_t m = opx_op((uint32_t)p, 0);
+        int32_t mod = (int32_t)(((int64_t)m * MODLEVEL[FEEDBACK]) >> 8);
+        if ((int16_t)(4 * opx_op((uint32_t)(p + mod), 0)) == first) { ph = p; break; }
     }
     if (ph < 0) { fail("fm modulation: no phase matched the first sample"); return; }
 
     int bad = 0;
     for (int i = 1; i <= 300; i++) {
         int p = ph + i;
-        int64_t mod = ((int64_t)wave0(p & 1023) << 8) * MODULATION_LEVEL[FEEDBACK];
-        uint32_t sum = (uint32_t)((int64_t)p * 65536 + mod);
-        int16_t want = wave0((sum >> 16) & 1023);
+        int32_t m = opx_op((uint32_t)p, 0);
+        int32_t mod = (int32_t)(((int64_t)m * MODLEVEL[FEEDBACK]) >> 8);
+        int16_t want = (int16_t)(4 * opx_op((uint32_t)(p + mod), 0));
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: fm modulation %d: want=%d got=%d\n", i, want, got);
@@ -614,14 +841,15 @@ static void test_fm_modulation() {
     printf("fm modulation: 300 samples, %d mismatches\n", bad);
 }
 
+
 // The full 4-operator chain, algorithm 0: operator 1 feeds back into itself
 // and then modulates 3, which modulates 2, which modulates 4, and only 4 is
 // heard. This is the only test that exercises the multi-step result chain and
 // the feedback state, so it models both straight out of calculate_op() and
 // set_feedback().
 static void test_fm_chain_feedback() {
-    const int FB1 = 5;                  // feedback_level[5] = 16
-    const int M3 = 3, M2 = 4, M4 = 2;   // modulation_level 2, 1, 4
+    const int FB1 = 5;                  // the head's feedback depth
+    const int M3 = 3, M2 = 4, M4 = 2;   // modlevel 16, 8, 32
     reset_dut();
     timer_write(0x00, 0x00);            // group 0 sync = 0, 4-operator FM
     setup_fm_op(0, 0, 0x00, FB1, 0x00); // operator 1, algorithm 0
@@ -630,33 +858,15 @@ static void test_fm_chain_feedback() {
     setup_fm_op(3, 0, 0x00, M4,  0x00); // operator 4, the only carrier
     key_on();
 
-    // The feedback state depends on every sample that came before it,
-    // including the ones where the envelope had not finished attacking, so
-    // this model has to run from the note's first sample and carry the
-    // envelope too. All four operators share the same envelope settings and
-    // the same phase step of exactly one entry.
+    // Algorithm 0 again, but at depths the sweep does not use, and compared
+    // from the note's FIRST sample rather than from a settled window. The
+    // feedback state depends on every sample before it, so an off-by-one in
+    // when the history is shifted shows up here and nowhere else.
     const int N = 260;
+    AlgModel m;
+    m.mod[0] = FB1; m.mod[1] = M2; m.mod[2] = M3; m.mod[3] = M4;
     std::vector<int16_t> model(N);
-    int64_t fb0 = 0, fb1 = 0;
-    int64_t vol = (int64_t)(255 - 160) << 16;
-
-    for (int n = 0; n < N; n++) {
-        vol += ATTACK_STEP;                       // update_envelope, attack
-        if (vol > ((int64_t)255 << 16)) vol = (int64_t)255 << 16;
-        int64_t gain = env_volume(255 - (int)(vol >> 16));   // tl 0 is unity
-
-        auto op = [&](int64_t modin) {
-            uint32_t sum = (uint32_t)((int64_t)n * 65536 + modin);
-            return (wave0((sum >> 16) & 1023) * gain) >> 16;
-        };
-
-        int64_t r1 = op((fb0 + fb1) / 2);         // C division, toward zero
-        fb0 = fb1;
-        fb1 = ((r1 << 8) * 16) / 16;              // set_feedback, level 16
-        int64_t r3 = op((r1 << 8) * MODULATION_LEVEL[M3]);
-        int64_t r2 = op((r3 << 8) * MODULATION_LEVEL[M2]);
-        model[n]   = (int16_t)op((r2 << 8) * MODULATION_LEVEL[M4]);
-    }
+    for (int n = 0; n < N; n++) model[n] = (int16_t)m.sample(0, 0);
 
     // The device needs a few samples to reach the note, so read a little more
     // than the model and slide it into place. Alignment is checked over a long
@@ -682,88 +892,11 @@ static void test_fm_chain_feedback() {
         }
     }
     errors += bad;
-    if (fb1 == 0) fail("fm chain: feedback never became non-zero");
+    if (m.fbh[0][0] == 0 && m.fbh[0][1] == 0)
+        fail("fm chain: feedback never became non-zero");
     printf("fm chain + feedback: %d samples, %d mismatches (offset %d)\n", N, bad, best);
 }
 
-// Every algorithm of every sync mode, against a transcription of the switch
-// statements in ymf271.cpp's sound_stream_update().
-//
-// This is the piece most like the sprite decrypt tables in PLAN.md section 5.4:
-// 28 wiring diagrams read by eye into a table, where one wrong bit is a voice
-// that sounds plausible but wrong. The RTL encodes them as in_mask/fb/out_mask;
-// the model below follows MAME's control flow instead, so agreeing means the
-// table is right rather than merely self-consistent.
-struct AlgModel {
-    int64_t fb0 = 0, fb1 = 0;
-    int64_t vol = (int64_t)(255 - 160) << 16;
-    int fbk1 = 0;                       // operator 1's feedback field
-    int mod[4] = {0, 0, 0, 0};          // each operator's modulation depth field
-
-    // One sample. `n` is the shared phase, in whole table entries.
-    int64_t sample(int sync, int alg, int n) {
-        vol += ATTACK_STEP;
-        if (vol > ((int64_t)255 << 16)) vol = (int64_t)255 << 16;
-        int64_t gain = env_volume(255 - (int)(vol >> 16));
-
-        auto op = [&](int which, int64_t modin) -> int64_t {
-            uint32_t sum = (uint32_t)((int64_t)n * 65536 + modin);
-            return (wave0((sum >> 16) & 1023) * gain) >> 16;
-        };
-        auto pm = [&](int which, int64_t v) { return (v << 8) * MODULATION_LEVEL[mod[which]]; };
-        auto feedback_in = [&]() { return (fb0 + fb1) / 2; };
-        auto set_fb = [&](int64_t v) {
-            fb0 = fb1;
-            fb1 = ((v << 8) * FEEDBACK_LEVEL[fbk1]) / 16;
-        };
-        // MAME reads the average and shifts the history in the same call, so
-        // the shift happens whether or not set_feedback() runs afterwards.
-        auto op1_feedback = [&]() {
-            int64_t in = feedback_in();
-            return op(0, in);
-        };
-
-        int64_t o1 = 0, o2 = 0, o3 = 0, o4 = 0, p1, p2, p3;
-        if (sync == 0) {
-            p1 = op1_feedback();
-            switch (alg) {
-            case 0: set_fb(p1); p3=op(2,pm(2,p1)); p2=op(1,pm(1,p3)); o4=op(3,pm(3,p2)); break;
-            case 1: p3=op(2,pm(2,p1)); set_fb(p3); p2=op(1,pm(1,p3)); o4=op(3,pm(3,p2)); break;
-            case 2: set_fb(p1); p3=op(2,0); p2=op(1,pm(1,p1+p3)); o4=op(3,pm(3,p2)); break;
-            case 3: set_fb(p1); p3=op(2,0); p2=op(1,pm(1,p3)); o4=op(3,pm(3,p1+p2)); break;
-            case 4: set_fb(p1); p3=op(2,pm(2,p1)); p2=op(1,0); o4=op(3,pm(3,p3+p2)); break;
-            case 5: p3=op(2,pm(2,p1)); set_fb(p3); p2=op(1,0); o4=op(3,pm(3,p3+p2)); break;
-            case 6: set_fb(p1); o3=op(2,pm(2,p1)); p2=op(1,0); o4=op(3,pm(3,p2)); break;
-            case 7: p3=op(2,pm(2,p1)); set_fb(p3); o3=p3; p2=op(1,0); o4=op(3,pm(3,p2)); break;
-            case 8: set_fb(p1); o1=p1; p3=op(2,0); p2=op(1,pm(1,p3)); o4=op(3,pm(3,p2)); break;
-            case 9: set_fb(p1); o1=p1; p3=op(2,0); p2=op(1,0); o4=op(3,pm(3,p3+p2)); break;
-            case 10: set_fb(p1); o3=op(2,pm(2,p1)); o2=op(1,0); o4=op(3,0); break;
-            case 11: p3=op(2,pm(2,p1)); set_fb(p3); o3=p3; o2=op(1,0); o4=op(3,0); break;
-            case 12: set_fb(p1); o3=op(2,pm(2,p1)); o2=op(1,pm(1,p1)); o4=op(3,pm(3,p1)); break;
-            case 13: set_fb(p1); o1=p1; p3=op(2,0); o2=op(1,pm(1,p3)); o4=op(3,0); break;
-            case 14: set_fb(p1); o1=p1; o3=op(2,pm(2,p1)); p2=op(1,0); o4=op(3,pm(3,p2)); break;
-            default: set_fb(p1); o1=p1; o3=op(2,0); o2=op(1,0); o4=op(3,0); break;
-            }
-        } else {                                   // sync 2, three operators
-            p1 = op1_feedback();
-            switch (alg & 7) {
-            case 0: set_fb(p1); p3=op(2,pm(2,p1)); o2=op(1,pm(1,p3)); break;
-            case 1: p3=op(2,pm(2,p1)); set_fb(p3); o2=op(1,pm(1,p3)); break;
-            case 2: set_fb(p1); p3=op(2,0); o2=op(1,pm(1,p1+p3)); break;
-            case 3: set_fb(p1); o1=p1; p3=op(2,0); o2=op(1,pm(1,p3)); break;
-            case 4: set_fb(p1); o3=op(2,pm(2,p1)); o2=op(1,0); break;
-            case 5: p3=op(2,pm(2,p1)); set_fb(p3); o3=p3; o2=op(1,0); break;
-            case 6: set_fb(p1); o1=p1; o3=op(2,0); o2=op(1,0); break;
-            default: set_fb(p1); o1=p1; o3=op(2,pm(2,p1)); o2=op(1,0); break;
-            }
-        }
-        int64_t acc = 4 * (o1 + o2 + o3 + o4);      // four channels at 0 dB
-        int64_t v = acc >> 2;
-        if (v >  32767) v =  32767;
-        if (v < -32768) v = -32768;
-        return v;
-    }
-};
 
 static void test_all_algorithms() {
     const int FBK = 4, M[4] = { 0, 3, 5, 1 };
@@ -786,12 +919,51 @@ static void test_all_algorithms() {
             AlgModel m;
             m.fbk1 = FBK;
             for (int k = 0; k < 4; k++) m.mod[k] = M[k];
+            m.mod[0] = FBK;   // the head's FB field is its feedback depth
             std::vector<int16_t> model(N);
-            for (int n = 0; n < N; n++) model[n] = (int16_t)m.sample(sync, alg, n);
+            for (int n = 0; n < N; n++) model[n] = (int16_t)m.sample(sync, alg);
 
             std::vector<int16_t> dev(N + SLACK);
             for (int i = 0; i < N + SLACK; i++) dev[i] = next_sample();
 
+            if (getenv("YMF_WHICH")) {
+                // Which algorithm's model DOES the device match? If it is a
+                // different entry, the decode is mis-wired rather than the
+                // arithmetic being off.
+                int nalg2 = (sync == 0) ? 16 : 8;
+                for (int cand = 0; cand < nalg2; cand++) {
+                    AlgModel c; c.fbk1 = FBK;
+                    for (int k = 0; k < 4; k++) c.mod[k] = M[k];
+                    c.mod[0] = FBK;
+                    std::vector<int16_t> cm(N);
+                    for (int n = 0; n < N; n++) cm[n] = (int16_t)c.sample(sync, cand);
+                    for (int d = 0; d <= SLACK; d++) {
+                        bool ok = true;
+                        for (int j = 40; j < 120 && ok; j++) if (dev[j+d] != cm[j]) ok = false;
+                        if (ok) printf("WHICH sync%d alg%2d: device matches model of "
+                                       "alg %d (offset %d)\n", sync, alg, cand, d);
+                    }
+                }
+            }
+            if (getenv("YMF_DIAG")) {
+                int bestd = 0, bestn = -1;
+                for (int d = 0; d <= SLACK; d++) {
+                    int n = 40;
+                    while (n < 120 && dev[n + d] == model[n]) n++;
+                    if (n > bestn) { bestn = n; bestd = d; }
+                }
+                printf("DIAG sync%d alg%2d: best offset %d matched to j=%d then "
+                       "dev=%d model=%d\n", sync, alg, bestd, bestn,
+                       dev[bestn + bestd], model[bestn]);
+            }
+            if (getenv("YMF_DEV")) {
+                printf("DEV sync%d alg%2d:", sync, alg);
+                for (int j = 0; j < 12; j++) printf(" %7d", dev[j]);
+                printf("\n");
+                printf("MDL sync%d alg%2d:", sync, alg);
+                for (int j = 0; j < 12; j++) printf(" %7d", model[j]);
+                printf("\n");
+            }
             int best = -1;
             for (int d = 0; d <= SLACK && best < 0; d++) {
                 bool ok = true;
@@ -800,6 +972,11 @@ static void test_all_algorithms() {
             }
             if (best < 0) {
                 printf("FAIL: sync %d algorithm %d: no alignment with the model\n", sync, alg);
+                if (getenv("YMF_DUMP")) {
+                    for (int j = 40; j < 52; j++)
+                        printf("    j=%3d model=%7d dev=%7d %7d %7d\n",
+                               j, model[j], dev[j], dev[j+1], dev[j+2]);
+                }
                 errors++;
                 continue;
             }
@@ -838,27 +1015,31 @@ static void test_lfo_amplitude() {
     setup_fm_op(1, 7, 0x00, 0, 0x0F);
     setup_fm_op(2, 7, 0x00, 0, 0x0F);
     setup_fm_op(3, 7, 0x00, 0, 0x0F);
-    silence_pcm_bank3();
-    fm_write(0, 0, 0x1, 0x00);          // lfoFreq 0 -> the phase stays put
+    silence_pcm_group0();
+    fm_write(0, 0, 0x1, 0x00);          // lfoFreq 0 -> the slowest divider
     fm_write(0, 0, 0x2, 0x42);          // lfowave 2 (square), pms 0, ams 1
     key_on();
 
+    // The LFO is a clock divider now, not a phase accumulator: setting 0 is
+    // (32 - 0) << 14 = 524288 samples per step, so lfo_pos sits at 0 for the
+    // whole test. Every waveform starts at FULL attenuation at key-on -- the
+    // OPM convention -- so the square's value at position 0 is 127, not 0.
+    //
+    // AM is ADDITIVE in the attenuation domain now: ams 1 adds am >> 1 = 63
+    // units of 0.09375 dB. 63 units is 5.90625 dB, which is exactly Table
+    // 2-6-3's figure for ams 1 -- the old core reached it through a gain table
+    // whose entries had to be complemented to get the depths the right way
+    // round (PLAN.md 14.5). The additive form has no such ambiguity.
+    const uint32_t env = 127 >> 1;
     for (int i = 0; i < 40; i++) next_sample();
 
-    // alfo[square][0] = 65536, so lfo_volume = 65536 - ((65536*K)>>16) and the
-    // gain at full modulation is 65536-K. Table 2-6-3 puts ams=1 at 5.90625 dB
-    // down, so K is unity minus that gain -- not the gain itself, which is
-    // what MAME uses; see the note above alfo_scaled in ymf271_synth.sv.
-    int64_t ams1_k  = 65536 - (int64_t)(65536.0 / pow(10.0, 5.90625 / 20.0));
-    int64_t lfo_vol = 65536 - ((65536LL * ams1_k) >> 16);
-    int64_t env = (65536LL * lfo_vol) >> 16;            // ENV_VOL[0] = 65536
     int16_t seed[4];
     for (int j = 0; j < 4; j++) seed[j] = next_sample();
     int ph = -1;
     for (int p = 0; p < 1024 && ph < 0; p++) {
         bool ok = true;
         for (int j = 0; j < 4; j++)
-            if ((int16_t)((wave0((p + j) & 1023) * env) >> 16) != seed[j]) ok = false;
+            if ((int16_t)(4 * opx_op((uint32_t)(p + j), env)) != seed[j]) ok = false;
         if (ok) ph = p;
     }
     if (ph < 0) { fail("lfo amplitude: no phase matched"); return; }
@@ -866,7 +1047,7 @@ static void test_lfo_amplitude() {
 
     int bad = 0;
     for (int i = 1; i <= 200; i++) {
-        int16_t want = (int16_t)((wave0((ph + i) & 1023) * env) >> 16);
+        int16_t want = (int16_t)(4 * opx_op((uint32_t)(ph + i), env));
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: lfo amplitude %d: want=%d got=%d\n", i, want, got);
@@ -874,15 +1055,14 @@ static void test_lfo_amplitude() {
         }
     }
     errors += bad;
-    if (lfo_vol >= 65536) fail("lfo amplitude: the test did not actually attenuate");
-    // The point of the depth correction: full swing has to land on the
-    // datasheet's dB, not somewhere 5 dB away from it.
-    double depth_db = 20.0 * log10(65536.0 / (double)lfo_vol);
-    if (fabs(depth_db - 5.90625) > 0.01)
+    if (env == 0) fail("lfo amplitude: the test did not actually attenuate");
+    double depth_db = env * 0.09375;
+    if (fabs(depth_db - 5.90625) > 0.001)
         fail("lfo amplitude: ams=1 depth is not Table 2-6-3's 5.90625 dB");
-    printf("lfo amplitude: 200 samples, %d mismatches (gain %lld/65536, %.3f dB)\n",
-           bad, (long long)lfo_vol, depth_db);
+    printf("lfo amplitude: 200 samples, %d mismatches (%u units, %.5f dB)\n",
+           bad, env, depth_db);
 }
+
 
 // LFO pitch. Same trick: frequency 0 parks the square wave at +1, so the pitch
 // shift is a fixed 2^(cents/1200) and the phase step is predictable.
@@ -894,16 +1074,23 @@ static void test_lfo_pitch() {
     setup_fm_op(1, 7, 0x00, 0, 0x0F);
     setup_fm_op(2, 7, 0x00, 0, 0x0F);
     setup_fm_op(3, 7, 0x00, 0, 0x0F);
-    silence_pcm_bank3();
+    silence_pcm_group0();
     fm_write(0, 0, 0x1, 0x00);
     fm_write(0, 0, 0x2, (uint8_t)(0x02 | (PMS << 3)));  // square, pms, ams 0
     key_on();
 
     for (int i = 0; i < 40; i++) next_sample();
 
-    uint32_t plfo = (uint32_t)llround(65536.0 * pow(2.0, PMS_CENTS[PMS] / 1200.0));
-    uint32_t step = (uint32_t)(((uint64_t)65536 * plfo) >> 16);
-    if (step == 65536) fail("lfo pitch: the test did not actually shift the pitch");
+    // PM is no longer a gain on the step: the deviation is added to the
+    // F-number itself, fnum * k / 1024 with k from table 2-6-3, and the whole
+    // thing then goes through the ordinary phase_inc. The square LFO sits at
+    // position 0, whose PM value is +127.
+    static const int PMS_K[8] = { 0, 2, 3, 4, 6, 12, 24, 48 };
+    const int64_t fnum = 0x800;         // block 0, fns 0x800
+    int64_t f = (fnum << 7) + ((fnum * PMS_K[PMS] * 127) >> 10);
+    uint32_t step = (uint32_t)(f << (0 + 11 - 7));       // block 0 -> sh = 11
+    const uint32_t base = (uint32_t)((fnum << 7) << 4);
+    if (step == base) fail("lfo pitch: the test did not actually shift the pitch");
 
     // Sweep the starting phase pointer, not just the table index: the step is
     // no longer a whole entry, so the fraction matters. Four consecutive
@@ -914,18 +1101,18 @@ static void test_lfo_pitch() {
     for (int k = 0; k < 4096 && p0 < 0; k++) {
         bool ok = true;
         for (int j = 0; j < 4; j++) {
-            uint64_t sp = (uint64_t)(k + j) * step;
-            if (wave0((sp >> 16) & 1023) != seed[j]) ok = false;
+            uint32_t sp = (uint32_t)((k + j) * (uint64_t)step);
+            if ((int16_t)(4 * opx_op(sp >> 22, 0)) != seed[j]) ok = false;
         }
-        if (ok) p0 = (int64_t)((uint64_t)(k + 3) * step);
+        if (ok) p0 = (int64_t)(uint32_t)((k + 3) * (uint64_t)step);
     }
     if (p0 < 0) { fail("lfo pitch: no phase matched"); return; }
 
     int bad = 0;
-    uint64_t sp = (uint64_t)p0;
+    uint32_t sp = (uint32_t)p0;
     for (int i = 1; i <= 300; i++) {
         sp += step;
-        int16_t want = wave0((sp >> 16) & 1023);
+        int16_t want = (int16_t)(4 * opx_op(sp >> 22, 0));
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 5) printf("FAIL: lfo pitch %d: want=%d got=%d\n", i, want, got);
@@ -933,8 +1120,15 @@ static void test_lfo_pitch() {
         }
     }
     errors += bad;
-    printf("lfo pitch: 300 samples, %d mismatches (step %u, was 65536)\n", bad, step);
+    // The manual quotes pms 7 as 79.307 cents. fnum*48/1024 at full swing is
+    // 1200*log2(1 + 48*127/(1024*128)) = 78.7, within a cent of the book.
+    double cents = 1200.0 * log2((double)step / (double)base);
+    if (fabs(cents - PMS_CENTS[PMS]) > 1.5)
+        fail("lfo pitch: pms 7 is not within a cent of Table 2-6-3");
+    printf("lfo pitch: 300 samples, %d mismatches (step %u vs %u, %.2f cents)\n",
+           bad, step, base, cents);
 }
+
 
 // The wave memory read port (utility registers 0x14-0x17, data at offset 2).
 // Two behaviours matter and both are easy to get backwards:
@@ -1296,7 +1490,7 @@ static void test_flash_write_invalidates_cache() {
     for (int guard = 0; guard < 16; guard++) {
         p.wrap();
         uint32_t i = (uint32_t)(p.stepptr >> 16);
-        int16_t want = expect_8bit(start, p);
+        int16_t want = monoN(expect_8bit(start, p), 4);
         if (next_sample() != want) { fail("cache: playback wrong before the write"); return; }
         p.advance();
         if (((start + i) & 7) == 0) break;
@@ -1328,7 +1522,7 @@ static void test_flash_write_invalidates_cache() {
     while (((start + (uint32_t)(p.stepptr >> 16)) & ~7u) == line0) {
         p.wrap();
         uint32_t off = (start + (uint32_t)(p.stepptr >> 16)) - line0;
-        int16_t want = expect_8bit(start, p);   // rom[] already holds the NEW byte
+        int16_t want = monoN(expect_8bit(start, p), 4);  // rom[] holds the NEW byte
         int16_t got  = next_sample();
         if (got != want) {
             if (bad < 4)
@@ -1372,7 +1566,7 @@ static void test_stereo_split() {
     for (int d = 0; d <= 4; d++) {
         Phase p; p.endoff = 0x7FFFF; p.loopoff = 0; p.step = 65536;
         p.stepptr = (uint64_t)(40 - d) * 65536;
-        if ((int16_t)(expect_8bit(start, p) >> 2) == got) { idx = 40 - d; break; }
+        if (chan0(expect_8bit(start, p)) == got) { idx = 40 - d; break; }
     }
     if (idx < 0) { fail("stereo: no plausible alignment in the first samples"); return; }
 
@@ -1383,19 +1577,18 @@ static void test_stereo_split() {
     int bad_l = 0, bad_r = 0;
     for (int i = 0; i < 200; i++) {
         p.wrap();
-        int16_t want = (int16_t)(expect_8bit(start, p) >> 2);
+        int16_t want = chan0(expect_8bit(start, p));
         int16_t l = next_sample();
         int16_t r = last_right();
         if (l != want) {
             if (bad_l < 5) printf("FAIL: stereo L sample %d: want=%d got=%d\n", i, want, l);
             bad_l++;
         }
-        // "Off" is attenuation level 15, and channel_attenuation_table's last
-        // entry is 1/65536, not 0. A negative sample therefore lands on -1
-        // rather than 0 once the >>16 and the >>2 have both rounded toward
-        // -inf. One LSB is the correct answer here, not a tolerance for slop.
-        if (r < -1 || r > 0) {
-            if (bad_r < 5) printf("FAIL: stereo R sample %d: want 0 or -1, got=%d\n", i, r);
+        // "Off" is attenuation level 15, and the OPX pan() mutes outright at
+        // 13 and above. The old core's 1/65536 last entry, which left one LSB
+        // of residue on a negative sample, is gone with its gain table.
+        if (r != 0) {
+            if (bad_r < 5) printf("FAIL: stereo R sample %d: want 0, got=%d\n", i, r);
             bad_r++;
         }
         p.advance();
@@ -1420,8 +1613,7 @@ static void test_stereo_split() {
     for (int d = 0; d <= 4; d++) {
         Phase q; q.endoff = 0x7FFFF; q.loopoff = 0; q.step = 65536;
         q.stepptr = (uint64_t)(40 - d) * 65536;
-        int16_t w = (int16_t)((3 * (int32_t)expect_8bit(start, q)) >> 2);
-        if (got == w || got == (int16_t)(w - 1)) { idx = 40 - d; break; }
+        if (got == monoN(expect_8bit(start, q), 3)) { idx = 40 - d; break; }
     }
     if (idx < 0) { fail("stereo: no plausible mono alignment"); return; }
 
@@ -1432,12 +1624,10 @@ static void test_stereo_split() {
     int bad_m = 0, bad_eq = 0;
     for (int i = 0; i < 200; i++) {
         q.wrap();
-        int16_t want = (int16_t)((3 * (int32_t)expect_8bit(start, q)) >> 2);
+        int16_t want = monoN(expect_8bit(start, q), 3);
         int16_t l = next_sample();
         int16_t r = last_right();
-        // Same one-LSB residue as above: ch1 is level 15, so it adds -1 to the
-        // sum on a negative sample instead of nothing.
-        if (l != want && l != (int16_t)(want - 1)) {
+        if (l != want) {
             if (bad_m < 5) printf("FAIL: mono sample %d: want=%d got=%d\n", i, want, l);
             bad_m++;
         }
@@ -1601,6 +1791,328 @@ static void test_flash_replay() {
     }
 }
 
+
+// ------------------------------------------------------------ polyphony ----
+// The cycle budget, measured rather than argued.
+//
+// clk_sys / 44100 is 1298 cycles a sample and the pass has to fit in that. The
+// documented worst case is every slot sounding with as many PCM voices as the
+// chip can have: external data is fetched only for slots whose number is a
+// multiple of four, which is groups 0, 4 and 8 -- twelve slots -- so the shape
+// is 12 PCM voices plus 36 FM operators. Nothing else in this file gets past
+// four slots, and the OPX operator costs a stage more than the old core's did
+// (log-sin then exp, two dependent ROM reads), so this is where that shows up.
+//
+// dbg_overrun counts samples the pass could not finish. It must be zero.
+static void test_polyphony() {
+    reset_dut();
+
+    // group -> utility/FM select nibble: group = 3*(sel>>2) + (sel&3).
+    auto gsel = [](int g) { return (uint8_t)(((g / 3) << 2) | (g % 3)); };
+    // the twelve PCM-capable slots, in the PCM bank's own numbering
+    static const uint8_t PSEL[12] = { 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14 };
+
+    for (int g = 0; g < 12; g++) {
+        bool pcm = (g == 0 || g == 4 || g == 8);
+        timer_write(gsel(g), pcm ? 0x03 : 0x00);   // sync 3 (4 PCM) or 0 (4-op)
+    }
+    for (int i = 0; i < 12; i++) {
+        // 8-bit, playing a long stretch of the ramp so every voice keeps
+        // missing the line cache rather than sitting on one line.
+        const uint8_t sl = PSEL[i];
+        uint32_t start = 0x2000 + i * 0x1000;
+        pcm_write(sl, 0, start & 0xFF);
+        pcm_write(sl, 1, (start >> 8) & 0xFF);
+        pcm_write(sl, 2, (start >> 16) & 0x7F);
+        pcm_write(sl, 3, 0xFF); pcm_write(sl, 4, 0x07); pcm_write(sl, 5, 0x00);
+        pcm_write(sl, 6, 0x00); pcm_write(sl, 7, 0x00); pcm_write(sl, 8, 0x00);
+        pcm_write(sl, 9, 0x00);
+    }
+    for (int g = 0; g < 12; g++) {
+        bool pcm = (g == 0 || g == 4 || g == 8);
+        for (int b = 0; b < 4; b++) {
+            // Attenuate hard: 48 slots at 0 dB is nothing but clipping, and a
+            // railed mix would hide a voice that stopped.
+            fm_write(b, gsel(g), 0x3, 0x01);
+            fm_write(b, gsel(g), 0x4, 0x30);
+            fm_write(b, gsel(g), 0x5, 0x9F);
+            fm_write(b, gsel(g), 0x6, 0x00);
+            fm_write(b, gsel(g), 0x7, 0x00);
+            fm_write(b, gsel(g), 0x8, 0x00);
+            fm_write(b, gsel(g), 0xA, 0x08);
+            fm_write(b, gsel(g), 0x9, (uint8_t)(0x11 * b));
+            fm_write(b, gsel(g), 0xB, pcm ? 0x07 : (uint8_t)(0x30 | (b & 3)));
+            fm_write(b, gsel(g), 0xC, 0x00);
+            fm_write(b, gsel(g), 0xD, 0x00);
+            fm_write(b, gsel(g), 0xE, 0x00);
+        }
+    }
+    // Key on every key-on slot: all four banks in sync 3, bank 0 alone in
+    // sync 0 (the broadcast reaches the whole voice).
+    for (int g = 0; g < 12; g++) {
+        bool pcm = (g == 0 || g == 4 || g == 8);
+        for (int b = 0; b < (pcm ? 4 : 1); b++) fm_write(b, gsel(g), 0x0, 0x01);
+    }
+
+    uint16_t over0 = dut->dbg_overrun;
+    int min_active = 999, max_active = 0;
+    for (int i = 0; i < 400; i++) {
+        next_sample();
+        int a = dut->dbg_active;
+        if (a < min_active) min_active = a;
+        if (a > max_active) max_active = a;
+    }
+    uint16_t over = (uint16_t)(dut->dbg_overrun - over0);
+    if (over != 0) {
+        printf("FAIL: polyphony: %u of 400 samples overran the pass\n", over);
+        errors++;
+    }
+    if (max_active != 48) {
+        printf("FAIL: polyphony: only %d slots sounded, expected 48\n", max_active);
+        errors++;
+    }
+    printf("polyphony: 12 PCM + 36 FM, 400 samples, %u overruns, %d..%d slots active\n",
+           over, min_active, max_active);
+}
+
+
+// -------------------------------------------------------- waveforms -------
+// Waveforms 1..5 and the linear waveform 6. Everything else in this file runs
+// on waveform 0, so the folds -- which are five separate transcriptions of the
+// manual's plots -- would otherwise go unchecked. The rewrite's own header
+// says 1..6 are unverified against hardware, so this pins the RTL to MAME and
+// no further.
+static void test_waveforms() {
+    for (int wave = 1; wave <= 5; wave++) {
+        reset_dut();
+        timer_write(0x00, 0x00);                    // sync 0
+        setup_fm_op(0, (uint8_t)wave, 0x00, 0, 0x0F);
+        setup_fm_op(1, 7, 0x00, 0, 0x0F);
+        setup_fm_op(2, 7, 0x00, 0, 0x0F);
+        setup_fm_op(3, 7, 0x00, 0, 0x0F);
+        silence_pcm_group0();
+        key_on();
+        for (int i = 0; i < 40; i++) next_sample();
+
+        int16_t seed[8];
+        for (int j = 0; j < 8; j++) seed[j] = next_sample();
+        int ph = -1;
+        for (int p = 0; p < 1024 && ph < 0; p++) {
+            bool ok = true;
+            for (int j = 0; j < 8; j++)
+                if ((int16_t)(4 * opx_opw((uint32_t)(p + j), wave, 0)) != seed[j]) ok = false;
+            if (ok) ph = p + 7;
+        }
+        if (ph < 0) { printf("FAIL: waveform %d: matched no phase\n", wave); errors++; continue; }
+
+        int bad = 0;
+        for (int i = 1; i <= 300; i++) {
+            int16_t want = (int16_t)(4 * opx_opw((uint32_t)(ph + i), wave, 0));
+            int16_t got  = next_sample();
+            if (got != want) {
+                if (bad < 3) printf("FAIL: waveform %d sample %d: want=%d got=%d\n",
+                                    wave, i, want, got);
+                bad++;
+            }
+        }
+        errors += bad;
+        if (bad == 0) printf("waveform %d: 300 samples, 0 mismatches\n", wave);
+    }
+}
+
+// ------------------------------------------------------- linear wave 6 ----
+// Waveform 6 does not read the phase at all: it is a DC level of half scale
+// plus the modulation input passed through as a ramp, scaled by MUL, wrapped at
+// 9 bits and stretched by 64. A hi-hat carrier emits its own modulator at up to
+// 2.5x the range of every other waveform, which is the whole point of MAME
+// 783e8a2efc2 -- and the reason a slot output is 18 bits here, not 14.
+static void test_wave6() {
+    const int FEEDBACK = 3;             // modlevel[3] = 16
+    reset_dut();
+    timer_write(0x00, 0x01);            // sync 1: banks 0 and 2 are one pair
+    setup_fm_op(0, 0, 0x00, 0, 0x00);           // modulator, sine
+    setup_fm_op(2, 6, 0x00, FEEDBACK, 0x00);    // carrier, linear
+    setup_fm_op(1, 7, 0x00, 0, 0x00);
+    setup_fm_op(3, 7, 0x00, 0, 0x00);
+    // Attenuate the carrier's four channels by 12 dB. This waveform reaches
+    // 2.5x the operator range, so at 0 dB the mix is clipped flat and the test
+    // would be comparing 32767 against 32767. Channel level 6 is a plain >> 3.
+    // These are written to bank 2 directly: reg D broadcasts only from a
+    // key-on slot, and in sync 1 those are banks 0 and 1.
+    fm_write(2, 0, 0xD, 0x66);
+    fm_write(2, 0, 0xE, 0x66);
+    key_on();
+    for (int i = 0; i < 40; i++) next_sample();
+
+    int16_t first = next_sample();
+    int ph = -1;
+    for (int p = 0; p < 1024; p++) {
+        int32_t m   = opx_op((uint32_t)p, 0);
+        int32_t mod = (int32_t)(((int64_t)m * MODLEVEL[FEEDBACK]) >> 8);
+        int32_t lin = 8192 + (((mod * 1) << 6) & 32767);     // MUL 1
+        if ((int16_t)(4 * (opx_env_mul(lin, 0) >> 3)) == first) { ph = p; break; }
+    }
+    if (ph < 0) { fail("wave 6: matched no phase"); return; }
+
+    int bad = 0, peak = 0;
+    for (int i = 1; i <= 300; i++) {
+        int32_t m   = opx_op((uint32_t)(ph + i), 0);
+        int32_t mod = (int32_t)(((int64_t)m * MODLEVEL[FEEDBACK]) >> 8);
+        int32_t lin = 8192 + (((mod * 1) << 6) & 32767);
+        int32_t o   = opx_env_mul(lin, 0);
+        if (o > peak) peak = o;
+        int16_t got = next_sample();
+        if (got != (int16_t)(4 * (o >> 3))) {
+            if (bad < 3) printf("FAIL: wave 6 sample %d: want=%d got=%d\n",
+                                i, (int16_t)(4 * (o >> 3)), got);
+            bad++;
+        }
+    }
+    errors += bad;
+    // It has to actually exceed the operator range, or the 18-bit slot output
+    // is untested and a 14-bit one would have passed.
+    if (peak <= 8191) fail("wave 6: never exceeded the 14-bit operator range");
+    printf("wave 6: 300 samples, %d mismatches (peak %d, operator range 8191)\n",
+           bad, peak);
+}
+
+// ----------------------------------------------------------- detune -------
+// DT shifts the phase increment by a whole number of fs/2^20 units before the
+// multiplier. The old core dropped the field entirely.
+static void test_detune() {
+    static const uint8_t DETUNE_KC1[4] = { 0, 0, 1, 2 };   // detune_tab[1][0..3]
+    int bad = 0;
+    for (int dt = 0; dt < 8; dt++) {
+        reset_dut();
+        timer_write(0x00, 0x00);
+        setup_fm_op(0, 0, 0x00, 0, 0x0F);
+        setup_fm_op(1, 7, 0x00, 0, 0x0F);
+        setup_fm_op(2, 7, 0x00, 0, 0x0F);
+        setup_fm_op(3, 7, 0x00, 0, 0x0F);
+        silence_pcm_group0();
+        fm_write(0, 0, 0x3, (uint8_t)((dt << 4) | 1));      // MUL 1, DT
+        key_on();
+        for (int i = 0; i < 40; i++) next_sample();
+
+        // block 0, fns 0x800 -> key code 1; the increment is fnum<<11 plus or
+        // minus detune_tab[1][dt & 3] << 12, and MUL 1 leaves it alone.
+        int64_t inc = ((int64_t)0x800 << 7) << 4;
+        int64_t d   = (int64_t)DETUNE_KC1[dt & 3] << 12;
+        uint32_t step = (uint32_t)((dt & 4) ? (inc - d) : (inc + d));
+
+        int16_t seed[6];
+        for (int j = 0; j < 6; j++) seed[j] = next_sample();
+        int64_t p0 = -1;
+        for (int k = 0; k < 2048 && p0 < 0; k++) {
+            bool ok = true;
+            for (int j = 0; j < 6; j++) {
+                uint32_t sp = (uint32_t)((k + j) * (uint64_t)step);
+                if ((int16_t)(4 * opx_op(sp >> 22, 0)) != seed[j]) ok = false;
+            }
+            if (ok) p0 = (int64_t)(uint32_t)((k + 5) * (uint64_t)step);
+        }
+        if (p0 < 0) { printf("FAIL: detune %d: matched no phase\n", dt); errors++; continue; }
+
+        uint32_t sp = (uint32_t)p0;
+        int b = 0;
+        for (int i = 1; i <= 200; i++) {
+            sp += step;
+            int16_t want = (int16_t)(4 * opx_op(sp >> 22, 0));
+            int16_t got  = next_sample();
+            if (got != want) { if (b < 2) printf("FAIL: detune %d sample %d: want=%d got=%d\n",
+                                                 dt, i, want, got); b++; }
+        }
+        bad += b;
+        errors += b;
+    }
+    printf("detune: 8 settings x 200 samples, %d mismatches\n", bad);
+}
+
+// ----------------------------------------------------------- Acc On -------
+// The slot output is accumulated in a saturating 14-bit sum instead of being
+// output directly, so a sustained tone rails into a full-level square that
+// flips at the operator's zero crossings. Cleared at key-on.
+static void test_accon() {
+    reset_dut();
+    timer_write(0x00, 0x00);
+    setup_fm_op(0, 0, 0x00, 0, 0x0F);
+    setup_fm_op(1, 7, 0x00, 0, 0x0F);
+    setup_fm_op(2, 7, 0x00, 0, 0x0F);
+    setup_fm_op(3, 7, 0x00, 0, 0x0F);
+    silence_pcm_group0();
+    fm_write(0, 0, 0xB, 0x80);          // Acc On, waveform 0, feedback 0
+    key_on();
+
+    // A sine at one phase step a sample: the sum ramps for half a cycle and
+    // rails, then ramps back the other way. Over a few cycles the output must
+    // spend most of its time at the rails and must cross zero, which a plain
+    // operator at this level never would.
+    int rail_hi = 0, rail_lo = 0, n = 0;
+    for (int i = 0; i < 3000; i++) {
+        int16_t v = next_sample();
+        if (i < 1024) continue;         // let it reach steady state
+        n++;
+        if (v >=  4 * 8191) rail_hi++;
+        if (v <= -4 * 8192) rail_lo++;
+    }
+    if (rail_hi == 0 || rail_lo == 0) {
+        fail("acc on: the sum never railed in both directions");
+        return;
+    }
+    if (rail_hi + rail_lo < n / 2) {
+        fail("acc on: the output is not mostly railed, so it is not accumulating");
+        return;
+    }
+    printf("acc on: %d of %d samples railed (%d high, %d low)\n",
+           rail_hi + rail_lo, n, rail_hi, rail_lo);
+}
+
+
+// ------------------------------------------------- sync 1, second pair ----
+// The other half of a sync-1 group: banks 1 and 3, keyed from bank 1, taking
+// its algorithm from slot g+12 rather than slot g. That is a separate latch
+// (`grp_alg2`), a separate feedback head (`head_bank` 1) and a different
+// position-to-bank translation in the RTL's decode, none of which the pair-0
+// test above reaches.
+static void test_fm_pair_b() {
+    const int FEEDBACK = 5;             // modlevel[5] = 256
+    reset_dut();
+    timer_write(0x00, 0x01);            // group 0 sync = 1
+    setup_fm_op(0, 0, 0x7F, 0, 0x02);   // pair 0: never keyed, and silenced
+    setup_fm_op(2, 0, 0x7F, 0, 0x02);
+    setup_fm_op(1, 0, 0x00, 0, 0x00);        // pair 1 operator 1: modulator
+    setup_fm_op(3, 0, 0x00, FEEDBACK, 0x00); // pair 1 operator 2: carrier
+    // Key on bank 1, which is the key-on slot of the second pair. Writing
+    // bank 0 would key the first pair instead and leave this one silent.
+    fm_write(1, 0, 0x0, 0x01);
+
+    for (int i = 0; i < 40; i++) next_sample();
+
+    int16_t first = next_sample();
+    int ph = -1;
+    for (int p = 0; p < 1024; p++) {
+        int32_t m   = opx_op((uint32_t)p, 0);
+        int32_t mod = (int32_t)(((int64_t)m * MODLEVEL[FEEDBACK]) >> 8);
+        if ((int16_t)(4 * opx_op((uint32_t)(p + mod), 0)) == first) { ph = p; break; }
+    }
+    if (ph < 0) { fail("sync 1 pair B: no phase matched the first sample"); return; }
+
+    int bad = 0;
+    for (int i = 1; i <= 300; i++) {
+        int p = ph + i;
+        int32_t m   = opx_op((uint32_t)p, 0);
+        int32_t mod = (int32_t)(((int64_t)m * MODLEVEL[FEEDBACK]) >> 8);
+        int16_t want = (int16_t)(4 * opx_op((uint32_t)(p + mod), 0));
+        int16_t got  = next_sample();
+        if (got != want) {
+            if (bad < 5) printf("FAIL: sync 1 pair B %d: want=%d got=%d\n", i, want, got);
+            bad++;
+        }
+    }
+    errors += bad;
+    printf("sync 1 pair B: 300 samples, %d mismatches\n", bad);
+}
+
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vtb_ymf_top;
@@ -1615,11 +2127,13 @@ int main(int argc, char **argv) {
     // A block of silence for parking PCM voices the FM tests cannot switch off.
     for (uint32_t i = 0x100000; i < 0x101000; i++) rom[i] = 0;
 
-    // FIRST, on a machine nothing has played on yet. reset_dut() clears the
-    // state machine but NOT the per-slot RAM, so voices an earlier test left
-    // active keep sounding into the mix -- which is what silence_pcm_bank3()
-    // exists to work around further down. Run last, this test saw a constant
-    // 1408 in the right channel that had nothing to do with the routing.
+    // FIRST, on a machine nothing has played on yet. This used to be load
+    // bearing: reset_dut() cleared the state machine but NOT the per-slot RAM,
+    // so voices an earlier test left sounding leaked into the mix, and run last
+    // this test saw a constant 1408 in the right channel that had nothing to do
+    // with the routing. Reset now walks the slot RAM and silences all 48, the
+    // way device_reset() does, so the order is no longer required -- it is kept
+    // because a regression in that walk should surface here.
     test_stereo_split();
 
     test_8bit_playback();
@@ -1631,8 +2145,14 @@ int main(int argc, char **argv) {
     test_loop_and_end_status();
     test_timer_a();
     test_key_off_release();
+    test_polyphony();
     test_fm_carrier();
+    test_waveforms();
+    test_wave6();
+    test_detune();
+    test_accon();
     test_fm_modulation();
+    test_fm_pair_b();
     test_fm_chain_feedback();
     test_all_algorithms();
     test_lfo_amplitude();

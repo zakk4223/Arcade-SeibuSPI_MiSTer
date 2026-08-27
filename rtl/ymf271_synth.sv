@@ -1,41 +1,68 @@
 //============================================================================
 //  SeibuSPI - YMF271 "OPX" synthesis engine
 //
-//  MAME's sound_stream_update / calculate_op / update_pcm / update_envelope /
-//  calculate_slot_volume (ymf271.cpp), re-expressed as one serial pass over
-//  12 groups x 4 slots per 44100 Hz sample.
+//  MAME's sound_stream_update / op / eg_tick / pcm_sample / env_mul / pan
+//  (ymf271.cpp, the OPX rewrite 03761e46766), re-expressed as one serial pass
+//  over 48 slots per 44100 Hz sample.
 //
-//  The chip's 48 slots are organised as 12 groups of 4, and each group's `sync`
-//  field picks what its four slots are:
+//  This replaced a port of MAME's OLD core, which worked in linear gains: a
+//  6 x 1024 signed waveform ROM multiplied by an envelope volume. The chip is
+//  OPM-shaped and the new core models it that way -- everything is an
+//  attenuation in 1/256ths of a decade, the operator is a log-sin lookup
+//  summed with the envelope and resolved through one exponential, and the
+//  envelope counts UPWARD in attenuation units at fs/2. Detune, Acc On,
+//  EN/EXT Out, PCM interpolation and the external-waveform key code all
+//  arrived with it; PLAN.md 14.5 listed every one of them as unimplementable
+//  because MAME did not implement them either.
+//
+//  The chip's 48 slots are organised as 12 groups of 4, and each group's
+//  `sync` field picks what its four slots are:
 //
 //    sync 0   4-operator FM, one of 16 algorithms
 //    sync 1   two independent 2-operator FM pairs
 //    sync 2   3-operator FM, plus slot 4 as a PCM voice
 //    sync 3   four PCM voices
 //
-//  In every mode MAME evaluates the operators in the order slot1, slot3, slot2,
-//  slot4 -- banks 0, 2, 1, 3 -- which is why this walks the banks in that order
-//  unconditionally and lets the algorithm table sort out the wiring.
+//  EVALUATION ORDER IS FLAT AND BANK-MAJOR, WHICH IS THE WHOLE TRAP.
 //
-//  ONE DELIBERATE DIVERGENCE FROM MAME. In sync 0 MAME evaluates slot 4 as an
-//  FM operator AND then calls update_pcm() on it, advancing its phase pointer
-//  twice per sample. That only avoids tripping its own fatalerror because a
-//  waveform of 7 makes the operator output zero. Here slot 4 is one or the
-//  other: PCM when its waveform is 7, an FM operator otherwise. The audible
-//  result is the same except that the PCM voice plays at the right pitch.
+//  Slot n = 12*bank + group, and the chip evaluates n = 0..47 in order: all
+//  twelve S1 slots, then all S2, then S3, then S4. The old core walked one
+//  group at a time in bank order 0,2,1,3, so a 4-op network resolved
+//  S1->S3->S2->S4 inside one group and every modulator was same-frame. It is
+//  not: in sync 0 the chain is S1->S3->S2->S4 but S2 (n = g+12) is reached
+//  BEFORE its modulator S3 (n = g+24), so S2 reads S3's output from the
+//  PREVIOUS sample. MAME's comment says so outright -- "modulators with a
+//  lower slot number are taken from the current frame, higher-numbered ones
+//  from the previous". That one-sample delay is part of the model.
 //
-//  Timing: clk_sys / 44100 = 1298 cycles a sample. An FM operator costs 22
-//  cycles, a PCM voice 24 with a cache hit, and an idle slot 8. Only twelve
-//  slots can be PCM at all (see PLAN.md 15.5), so the true worst case is
-//  12 x 24 + 36 x 22 = 1080 plus a handful of cache misses. `dbg_overrun`
-//  counts the samples the pass could not finish, so the budget is measured
-//  rather than assumed.
+//  So there is no live r1/r3/r2 network here any more. Every slot's output
+//  persists in `out_reg`, and a slot reads whichever of its own group's four
+//  outputs the algorithm says modulate it -- some written this pass, some
+//  last. The algorithm itself is latched per group off the head slot as the
+//  pass walks bank 0 (and bank 1, for the second pair of a sync-1 group),
+//  which is always before any slot that needs it.
 //
-//  Those cycle counts are mostly pipelining, not work: the first version put
-//  the whole FM output chain -- feedback level, a multiply, the phase add, a
-//  waveform ROM lookup and a second multiply -- between one pair of flops, and
-//  missed clk_sys setup by 2.2 ns. No stage now holds more than one ROM read
-//  or one multiply.
+//  Timing: clk_sys / 44100 = 1298 cycles a sample. An FM operator and a PCM
+//  voice both cost 23 cycles -- the PCM path's fetch and interpolation come to
+//  the same as the operator's five stages -- and a slot in EG_OFF costs 11. So
+//  a chip with all 48 slots sounding is 1104 cycles plus cache misses.
+//
+//  That is measured, not argued: tb_ymf271's polyphony test configures the
+//  documented worst case -- groups 0, 4 and 8 in sync 3 for twelve PCM voices,
+//  the other nine in sync 0 for 36 FM operators, every one keyed and playing
+//  its way through the sample ROM -- and requires `dbg_overrun` to stay at zero
+//  across 400 samples with `dbg_active` reading 48.
+//
+//  No pipeline stage holds more than one ROM read or one multiply. That rule
+//  is not style: the first version of the old FM path put a feedback multiply,
+//  a phase add, a ROM lookup and a second multiply between one pair of flops
+//  and missed clk_sys setup by 2.2 ns. The operator now needs TWO dependent
+//  ROM reads -- log-sin then exp -- so it is three states, not one.
+//
+//  The fixed-point widths below are not guesses. tools/check_ymf271_math.py
+//  sweeps phase_inc, pcm_step and the envelope increment against MAME's
+//  unbounded integers, 2.5 M combinations, and fails if any of them is a bit
+//  short. Change a width here and change it there.
 //============================================================================
 
 module ymf271_synth
@@ -54,9 +81,14 @@ module ymf271_synth
 
 	// The cartridge board wires chip output 0 to the left speaker and 1 to the
 	// right (MAME's spi(): add_route(0,"speaker",1.0,0) and (1,...,1)); the
-	// single board sums all four into one (sxx2e(): ALL_OUTPUTS -> "mono").
-	// Outputs 2 and 3 reach no speaker at all on the cartridge, and MAME's own
-	// commented-out routes ask whether the hardware uses them.
+	// single board sums ALL of them into one (sxx2e(): ALL_OUTPUTS -> "mono").
+	//
+	// ALL_OUTPUTS now spans EIGHT outputs, not four: the rewrite exposes the
+	// EXT1/EXT2 pins as channels 4-7. So the mono sum here follows it and adds
+	// all eight. Nothing ships on that path -- every MRA in mra/ sets the mod
+	// byte's bit 0, so `stereo` is high on all six -- and on real hardware
+	// EXT1/EXT2 are external pins whose return wiring is not established. This
+	// matches MAME; it is not independently confirmed.
 	input                stereo,
 
 	// ---- slot parameter writes (from the register file) -------------------
@@ -74,7 +106,12 @@ module ymf271_synth
 	input          [5:0] key_slot,
 
 	// ---- end-of-sample status ---------------------------------------------
-	output reg           end_set,      // pulse: slot `end_slot` hit its loop point
+	// One pulse per key-on, the first time the read pointer passes the end
+	// address -- NOT once per loop. Drivers play one-shot samples as a short
+	// silent loop and free the channel from a copy of the status register, so
+	// re-raising End on every pass of that loop kills a note re-triggered on
+	// the same slot between the copy and the free pass.
+	output reg           end_set,      // pulse: slot `end_slot` reached its end
 	output reg     [5:0] end_slot,
 
 	// ---- 44100 Hz sample tick ---------------------------------------------
@@ -113,16 +150,33 @@ module ymf271_synth
 `include "spi_defs.vh"
 `include "ymf271_tables.vh"
 
-	localparam [1:0] ENV_ATTACK  = 2'd0;
-	localparam [1:0] ENV_DECAY1  = 2'd1;
-	localparam [1:0] ENV_DECAY2  = 2'd2;
-	localparam [1:0] ENV_RELEASE = 2'd3;
+	// EG states. EG_OFF is a real state, not "inactive": a released slot sits
+	// in it with its output forced to zero and its Acc On sum cleared.
+	localparam [2:0] EG_ATTACK  = 3'd0,
+	                 EG_DECAY1  = 3'd1,
+	                 EG_DECAY2  = 3'd2,
+	                 EG_RELEASE = 3'd3,
+	                 EG_OFF     = 3'd4;
+
+	// Widths pinned by tools/check_ymf271_math.py. W_OUT is 18 rather than the
+	// operator's 14 because waveform 6 is not an operator output: it is a DC
+	// half-scale level plus the modulation input stretched by 64, which reaches
+	// about 2.5x the range of every other waveform (MAME 783e8a2efc2).
+	localparam int W_OUT = 18;
+
+	// What device_reset() leaves every slot in: EG_OFF at full attenuation,
+	// everything else zero. A zero-filled slot would instead be EG_ATTACK at
+	// 0 dB -- the whole chip sounding.
+	localparam [127:0] ST_INIT = {32'd0, 23'd0, 16'd0, 10'h3FF, EG_OFF,
+	                              20'd0, 7'd0, 1'b0, 15'd0, 1'b0};
 
 	integer i;
 
 	// ------------------------------------------------------------------
-	// Slot parameter RAM: 3 x 64 bit words per slot, byte writable.
+	// Slot parameter RAM: 4 x 64 bit words per slot, byte writable.
 	// The byte layout is documented in ymf271.sv, which owns the decode.
+	// Word 3 was spare under the old core; it now carries FM register 0, the
+	// key-on register, whose EN and EXT Out bits route a voice to CH4-7.
 	//
 	// Eight separate byte-wide arrays rather than one 64 bit array written
 	// through a variable part-select. Quartus cannot turn
@@ -159,42 +213,97 @@ module ymf271_synth
 	endgenerate
 
 	// ------------------------------------------------------------------
-	// Per-slot dynamic state, feedback state and sample-line cache.
+	// Per-slot dynamic state. 128 bits, which is four savestate words, which
+	// keeps the stream's index arithmetic a shift and a mask -- three words
+	// needs a divide and a modulo by 3, and on a 32-bit index that is a full
+	// divider in the combinational path: 36 ns of negative slack on a 17.5 ns
+	// clock, measured.
+	//
+	//  [127:96] phase       FM phase accumulator, 2^32 = one cycle
+	//  [ 95:73] pcm_pos     external-waveform read position, in source words
+	//  [ 72:57] pcm_frac    its 16-bit fraction
+	//  [ 56:47] eg_att      envelope ATTENUATION, 0 = loudest, 0x3FF = silent
+	//  [ 46:44] eg_state
+	//  [ 43:24] lfo_cnt     clock divider toward lfo_period(lfo_freq)
+	//  [ 23:17] lfo_pos     one of 128 LFO steps
+	//  [    16] pcm_ended   End already raised since this key-on
+	//  [ 15: 1] acc         Acc On running sum, saturating at +/-8192
+	//  [     0] spare
 	// ------------------------------------------------------------------
-	// {stepptr[39:0], volume[26:0], env_state[1:0], active, lfo_phase[25:0]}
-	reg [95:0] st_mem [0:47];
-	reg  [5:0] st_ra, st_wa;
-	reg [95:0] st_q, st_wd;
-	reg        st_we;
+	reg [127:0] st_mem [0:47];
+	reg   [5:0] st_ra, st_wa;
+	reg [127:0] st_q, st_wd;
+	reg         st_we;
 
 	always @(posedge clk) begin
-		if (ss_st_commit)  st_mem[ss_st_slot] <= {ssbus_st.data[31:0],
-		                                          ss_st_stage[63:0]};
+		if (ss_st_commit)  st_mem[ss_st_slot] <= {ssbus_st.data[31:0], ss_st_stage};
 		else if (st_we)    st_mem[st_wa] <= st_wd;
 		st_q <= st_mem[ss_st_acc ? ss_st_slot : st_ra];
 	end
 
-	// {feedback_modulation0, feedback_modulation1}, only meaningful for the
-	// slot acting as operator 1 of a network.
-	reg [53:0] fb_mem [0:47];
-	reg  [5:0] fb_ra, fb_wa;
-	reg [53:0] fb_q, fb_wd;
-	reg        fb_we;
+	// Feedback history: a RAM the HEAD owns, plus a small hand-off register
+	// file for the one case that crosses slots.
+	//
+	// The obvious shape -- two 48-entry flop arrays, with the feedback source
+	// doing `hist1 = hist0; hist0 = out` on the head's entry -- costs 1,728
+	// flip-flops, two 48-way write decoders and two 48-to-1 read muxes, and it
+	// pushed the design past the device: the fitter wanted 4,212 LABs against
+	// the 4,191 this part has.
+	//
+	// It is also unnecessary. The source only ever needs to hand the head ONE
+	// word; the head can do its own shifting. At its visit the head takes
+	//
+	//     h0_now = fb_self ? h0 : fb_pend[...]        (this sample's newest)
+	//     mod    = (h0_now + h1) >> (10 - fb)
+	//
+	// and writes back {out, h0_now}, so h1 next sample is h0_now this sample --
+	// the older of the pair either way. That makes the head's entry a plain
+	// read-at-S_LD3 / write-at-S_MIX pair on its OWN address, which a
+	// single-port RAM does happily.
+	//
+	// The hand-off only exists when the source is NOT the head, and that is
+	// only the S3-loop algorithms (sync 0 and 2, fbsrc 2) and the sync-1 tail
+	// (fbsrc 1). Every one of those has its head at bank 0 or bank 1, so the
+	// register file is indexed by {head_b0, group} -- 24 entries, not 48.
+	// sync 3 and sync 2's fourth slot are their own source and never touch it.
+	reg [2*W_OUT-1:0] fb_mem [0:47];
+	reg         [5:0] fb_ra, fb_wa;
+	reg [2*W_OUT-1:0] fb_q, fb_wd;
+	reg               fb_we;
 
 	always @(posedge clk) begin
-		if (ss_fb_commit)  fb_mem[ss_fb_slot] <= {ssbus_fb.data[21:0],
-		                                          ss_fb_stage[31:0]};
-		else if (fb_we)    fb_mem[fb_wa] <= fb_wd;
+		if (ss_fb_commit) fb_mem[ss_fb_slot] <= {ssbus_fb.data[3:0], ss_fb_stage};
+		else if (fb_we)   fb_mem[fb_wa] <= fb_wd;
 		fb_q <= fb_mem[ss_fb_acc ? ss_fb_slot : fb_ra];
 	end
+
+	reg signed [W_OUT-1:0] fb_pend [0:23];
+
+	// ------------------------------------------------------------------
+	// Slot outputs, as FLOPS rather than a RAM.
+	//
+	// This is the state the flat evaluation order forces. A slot needs the
+	// outputs of up to three OTHER slots of its group, some written earlier in
+	// this pass and some left over from the previous one, so the array has to
+	// be readable at three arbitrary addresses at once. A single-port RAM
+	// cannot do that; 48 x 18 flip-flops can, and the read collapses to one
+	// 12-to-1 mux over the group's four entries because a slot's modulators
+	// are always in its own group.
+	// ------------------------------------------------------------------
+	reg signed [W_OUT-1:0] out_reg [0:47];
 
 	// ------------------------------------------------------------------
 	// The savestate's three sections.
 	//
-	// st_mem is 96 bits wide and fb_mem 54, while the stream carries 32-bit
-	// items -- so a slot is three words and two respectively. A write stages
-	// the earlier words and COMMITS on the last one, which is what lets the
-	// array keep a single write port and stay inferred as memory.
+	// st_mem is 128 bits wide and fb_mem 36, while the stream carries 32-bit
+	// items -- so a slot is four words and two respectively. A write stages the
+	// earlier words and COMMITS on the last one, which is what lets each array
+	// keep a single write port and stay inferred as memory.
+	//
+	// NOTE: every item here changed meaning with the OPX rewrite -- st_mem's
+	// envelope is an attenuation now, not a volume -- and the stream carries no
+	// version field, so a state written by the previous core loads as noise
+	// rather than being rejected. See PLAN.md.
 	// ------------------------------------------------------------------
 	wire ss_par_acc = ssbus_par.access(SSIDX_YMF_PAR);
 	wire ss_par_we  = ss_par_acc && ssbus_par.write;
@@ -211,14 +320,9 @@ module ymf271_synth
 		else ss_par_d <= 1'b0;
 	end
 
-	// 48 slots x FOUR words -- three of state and one unused -- then two words
-	// each of keyon and keyoff pending.
-	//
-	// Four, not three, purely so the index arithmetic is a shift and a mask.
-	// Three words per slot needs a divide and a modulo by 3, and on a 32-bit
-	// index that is a full divider in the combinational path: it cost 36 ns of
-	// negative slack, on a clock whose period is 17.5. The fourth word is 192
-	// bytes of blob nobody reads, which is the cheapest trade in this file.
+	// 48 slots x four words of state, then two words each of keyon and keyoff
+	// pending. Four words is what st_mem is; it is also what keeps the index
+	// arithmetic a shift and a mask.
 	localparam int SS_ST_ITEMS = 48*4 + 4;
 	localparam int SS_ST_KEY   = 48*4;
 
@@ -228,8 +332,8 @@ module ymf271_synth
 	wire  [1:0] ss_st_word = ss_st_idx[1:0];
 	wire ss_key_wr = ss_st_acc && ssbus_st.write && (ss_st_idx >= SS_ST_KEY);
 	wire ss_st_commit = ss_st_acc && ssbus_st.write
-	                    && (ss_st_idx < SS_ST_KEY) && (ss_st_word == 2'd2);
-	reg [63:0] ss_st_stage;
+	                    && (ss_st_idx < SS_ST_KEY) && (ss_st_word == 2'd3);
+	reg [95:0] ss_st_stage;
 	reg        ss_st_d;
 
 	always @(posedge clk) begin
@@ -239,6 +343,7 @@ module ymf271_synth
 				if (ss_st_idx < SS_ST_KEY) begin
 					if (ss_st_word == 2'd0) ss_st_stage[31:0]  <= ssbus_st.data[31:0];
 					if (ss_st_word == 2'd1) ss_st_stage[63:32] <= ssbus_st.data[31:0];
+					if (ss_st_word == 2'd2) ss_st_stage[95:64] <= ssbus_st.data[31:0];
 				end
 				ssbus_st.write_ack(SSIDX_YMF_ST);
 			end
@@ -251,23 +356,29 @@ module ymf271_synth
 						     ss_st_word == 2'd2 ? keyoff_pend[31:0] :
 						                          {16'd0, keyoff_pend[47:32]})
 						  : (ss_st_word == 2'd0 ? st_q[31:0]  :
-						     ss_st_word == 2'd1 ? st_q[63:32] : st_q[95:64])});
+						     ss_st_word == 2'd1 ? st_q[63:32] :
+						     ss_st_word == 2'd2 ? st_q[95:64] : st_q[127:96])});
 				ss_st_d <= 1'b1;
 			end
 		end
 		else ss_st_d <= 1'b0;
 	end
 
+	// Two words a slot: the two feedback history words and the slot's own
+	// output, 54 bits in 64. All three are flops rather than RAM, so the stream
+	// reads them straight out of the arrays; the write side lives in the main
+	// block, where the arrays are driven.
 	wire        ss_fb_acc  = ssbus_fb.access(SSIDX_YMF_FB);
 	wire [31:0] ss_fb_idx  = ssbus_fb.addr;
 	wire  [5:0] ss_fb_slot = 6'(ss_fb_idx >> 1);
 	wire        ss_fb_word = ss_fb_idx[0];
-	wire ss_fb_commit = ss_fb_acc && ssbus_fb.write && ss_fb_word;
+	wire ss_fb_commit = ss_fb_acc && ssbus_fb.write && ss_fb_word
+	                    && (ss_fb_idx < 32'd96);
 	reg  [31:0] ss_fb_stage;
 	reg         ss_fb_d;
 
 	always @(posedge clk) begin
-		ssbus_fb.setup(SSIDX_YMF_FB, 32'd96, 2);
+		ssbus_fb.setup(SSIDX_YMF_FB, 32'd120, 2);   // 48 x 2, then 24 hand-off
 		if (ss_fb_acc) begin
 			if (ssbus_fb.write) begin
 				if (!ss_fb_word) ss_fb_stage <= ssbus_fb.data[31:0];
@@ -275,31 +386,47 @@ module ymf271_synth
 			end
 			else if (ssbus_fb.read) begin
 				if (ss_fb_d) ssbus_fb.read_response(SSIDX_YMF_FB, {32'd0,
-					ss_fb_word ? {10'd0, fb_q[53:32]} : fb_q[31:0]});
+					(ss_fb_idx >= 32'd96)
+					  ? {14'd0, $unsigned(fb_pend[ss_fb_idx[4:0]])}
+					  : ss_fb_word ? {$unsigned(out_reg[ss_fb_slot]), 10'd0,
+					                  fb_q[2*W_OUT-1:32]}
+					               : fb_q[31:0]});
 				ss_fb_d <= 1'b1;
 			end
 		end
 		else ss_fb_d <= 1'b0;
 	end
 
-	// {valid, tag[19:0]} plus the eight bytes the line holds. The tags live in
-	// this RAM; the VALID bits live in a plain register outside it, because a
-	// flash write has to retire all 49 cached copies at once -- this line plus
-	// one per slot, restored when that slot comes round again -- and a RAM
-	// cannot be cleared in a cycle. See cch_vld.
-	reg [20:0] cch_tv   [0:47];
-	reg [63:0] cch_data [0:47];
-	reg  [5:0] cch_ra, cch_wa;
-	reg [20:0] cch_tv_q, cch_tv_wd;
-	reg [63:0] cch_data_q, cch_data_wd;
-	reg        cch_we;
+	// ------------------------------------------------------------------
+	// Sample line cache: TWO consecutive 8-byte lines under one tag.
+	//
+	// Interpolation needs the word at the read position and the one after it,
+	// and a packed 12-bit pair straddling an odd position spans four
+	// consecutive bytes. Four bytes fit in one 8-byte line for five of the
+	// eight alignments and cross into the next for the other three, so the
+	// entry holds line A (the tag's own) and line B (the one above it). Any
+	// four-byte span is then covered by A and B together, whatever its
+	// alignment -- which is why the pair is tagged as a pair rather than
+	// cached as two independent lines with two tags.
+	//
+	// The tags live in this RAM; the VALID bits live in plain registers
+	// outside it, because a flash write has to retire all 49 cached copies at
+	// once -- this pair plus one per slot, restored when that slot comes round
+	// again -- and a RAM cannot be cleared in a cycle. See cch_vld_a.
+	// ------------------------------------------------------------------
+	reg  [19:0] cch_tag  [0:47];
+	reg [127:0] cch_data [0:47];
+	reg   [5:0] cch_ra, cch_wa;
+	reg  [19:0] cch_tag_q, cch_tag_wd;
+	reg [127:0] cch_data_q, cch_data_wd;
+	reg         cch_we;
 
 	always @(posedge clk) begin
 		if (cch_we) begin
-			cch_tv[cch_wa]   <= cch_tv_wd;
+			cch_tag[cch_wa]  <= cch_tag_wd;
 			cch_data[cch_wa] <= cch_data_wd;
 		end
-		cch_tv_q   <= cch_tv[cch_ra];
+		cch_tag_q  <= cch_tag[cch_ra];
 		cch_data_q <= cch_data[cch_ra];
 	end
 
@@ -309,84 +436,109 @@ module ymf271_synth
 	reg [47:0] keyon_pend, keyoff_pend;
 	reg        tick_pend;
 
+	// The pass walks banks OUTSIDE and groups inside, which is slot order
+	// n = 0..47 with n = 12*bank + group. See the header: the order is the
+	// model, not an implementation choice.
+	reg  [1:0] bank;
 	reg  [3:0] group;
-	reg  [1:0] step;
-	reg [63:0] w0, w1, w2;
+	reg [63:0] w0, w1, w2, w3;
 
-	reg [39:0] stepptr;
-	reg signed [26:0] volume;
-	reg  [1:0] env_state;
-	reg        active;
-	reg [25:0] lfo_phase;
+	// Per-slot state, unpacked from st_q at S_LD1.
+	reg [31:0] phase;
+	reg [22:0] pcm_pos;
+	reg [15:0] pcm_frac;
+	reg  [9:0] eg_att;
+	reg  [2:0] eg_state;
+	reg [19:0] lfo_cnt;
+	reg  [6:0] lfo_pos;
+	reg        pcm_ended;
+	reg signed [14:0] acc;
 
-	reg signed [26:0] fb0, fb1;
+	reg signed [W_OUT-1:0] fb0, fb1;   // the head's history, loaded at S_LD3
 
-	reg [20:0] line_tv;
-	reg [63:0] line_data;
+	// The group's algorithm, latched off the head slot as the pass walks bank 0
+	// (and bank 1, for the second pair of a sync-1 group). Both heads are
+	// reached before any slot that needs the value, so this is never stale
+	// within a sample -- which is what MAME's rebuild_group() achieves by
+	// rebuilding the whole group's connection cache up front.
+	reg  [3:0] grp_alg  [0:11];
+	reg  [3:0] grp_alg2 [0:11];
 
-	// One valid bit per slot, outside the tag RAM so that a flash write can
-	// clear all 48 in one cycle. A generation NUMBER was tried first and is
-	// wrong: two writes flip a one-bit generation back to where it started and
-	// bring a stale line back to life, which the cache test caught as a single
-	// wrong byte out of five. Any width only makes that rarer, and an erase
-	// sweep writes often enough to reach it.
-	reg [47:0] cch_vld;
+	// The live cache pair.
+	reg [19:0] line_tag;
+	reg        line_va, line_vb;
+	reg [63:0] line_a, line_b;
+
+	// One valid bit per slot per line, outside the tag RAM so that a flash
+	// write can clear all 96 in one cycle. A generation NUMBER was tried first
+	// and is wrong: two writes flip a one-bit generation back to where it
+	// started and bring a stale line back to life, which the cache test caught
+	// as a single wrong byte out of five. Any width only makes that rarer, and
+	// an erase sweep writes often enough to reach it.
+	reg [47:0] cch_vld_a, cch_vld_b;
 	reg        dirty_ack;
 
-	// One accumulator per speaker. In mono the left one carries chip outputs
-	// 0 and 2 and the right one 1 and 3, so their SUM is the four-output mix
-	// the single board makes -- bit for bit what a single accumulator produced
-	// before, since (g0+g2)+(g1+g3) is the same addition in a different order.
-	reg signed [27:0] acc_l, acc_r;
-	reg signed [15:0] sample;
-	reg  [7:0] byte_lo;
+	// Eight accumulators: CH0-3 are the DO1/DO2 pins, CH4-7 the EXT1/EXT2
+	// pins. A carrier at full level is +/-8192 and the stream's full scale is
+	// 32768, so these are already at output scale -- there is no final shift,
+	// unlike the old core's >>2.
+	reg signed [23:0] acc_ch [0:7];
 
-	reg [31:0] step_r;
-	reg [16:0] env_gain;
-	reg [17:0] slot_gain;
-	reg [19:0] cvsum_l, cvsum_r;
-	reg [17:0] lfo_vol;
+	reg  [9:0] env;          // total attenuation, 0 (loudest) .. 1023
+	reg [31:0] step;         // phase increment, or PCM step in q16 words
+	reg signed [22:0] mod_in;
+	reg signed [13:0] pcm_out;
+	reg signed [W_OUT-1:0] op_out;
+	reg  [4:0] rks_r;
+	reg  [4:0] det_r;
+	reg  [5:0] eg_rate_r;
+	reg  [2:0] eg_state_pre_r;
+	reg        eg_to_d1_r, eg_hold_r;
+	reg  [2:0] eg_idx_r;
+	reg signed [15:0] pm_mul_r;
+	reg [19:0] fnum_q7;
+	reg signed [32:0] inc_r;
+	reg        op_neg, op_mute;
+	reg  [5:0] att_hi;   // att_c[13:8]: the shift, and the 4096 cutoff
 
-	// Pipeline registers. Everything the FM half added was originally one
-	// enormous combinational chain -- feedback level, a multiply, the phase
-	// add, a waveform ROM lookup and a second multiply, all between two flops.
-	// That missed clk_sys setup by 2.2 ns. Each of these breaks the chain so
-	// that no cycle holds more than one ROM read or one multiply.
-	reg  [7:0] lfo_idx_r;
-	reg signed [8:0] plfo_w_r;
-	reg [16:0] alfo_r;
-	reg [32:0] amul_r;
-	reg [17:0] plfo_r;
-	reg [16:0] num_r;
-	reg [31:0] base_r;
-	reg [16:0] env_raw;
-	reg [16:0] tl_r;
-	reg [12:0] wave_ra;
-	reg [15:0] wave_q;
+	// Table read ports. One address register each, one read a cycle: the
+	// operator's two lookups are DEPENDENT (exp is addressed with the sum of
+	// log-sin and the envelope) and must not share a stage.
+	reg  [7:0] logsin_ra;
+	reg [11:0] logsin_q;
+	reg  [7:0] exp_ra;
+	reg [10:0] exp_q;
+	reg  [4:0] rks_q;
+	reg  [4:0] det_q;
+	reg [31:0] eginc_q;
 
-	always @(posedge clk) wave_q <= YMF_WAVE[wave_ra];
+	// The log-sin and exp reads are addressed from registers because their
+	// addresses are computed in the operator's own stages. RKS, detune and the
+	// envelope increment are addressed combinationally from parameters that
+	// settled at S_LD3, so only their outputs need a flop.
+	always @(posedge clk) begin
+		logsin_q <= YMF_LOGSIN[logsin_ra];
+		exp_q    <= YMF_EXP[exp_ra];
+		rks_q    <= YMF_RKS[{kc_c, p_keyscale}];
+		det_q    <= YMF_DETUNE[{kc_c, p_dt[1:0]}];
+		eginc_q  <= YMF_EG_INC[eg_rate_r];
+	end
 
-	reg        fetch_second;
-	reg [22:0] fetch_addr;
+	reg [22:0] fetch_base;   // first of the up-to-four bytes a sample needs
 	reg [15:0] active_cnt;
-
-	// FM network state, live for the duration of one network
-	reg signed [17:0] r1, r3, r2;
-	reg signed [17:0] op_out;
-	reg  [3:0] net_alg;
-	reg        net_active;
-	reg  [2:0] net_fbk;    // operator 1's feedback field, for set_feedback()
 
 	wire [1:0] sync = grp_sync_flat[{group, 1'b0} +: 2];
 
-	// Bank order is always 1, 3, 2, 4 -> 0, 2, 1, 3.
-	wire [1:0] bank = (step == 2'd0) ? 2'd0 : (step == 2'd1) ? 2'd2 :
-	                  (step == 2'd2) ? 2'd1 : 2'd3;
-	// slot = bank * 12 + group
+	// slot = 12 * bank + group, written as shifts so nothing is inferred from
+	// a truncated multiply.
 	wire [5:0] slot = {1'b0, bank, 3'b000} + {2'b00, bank, 2'b00} + {2'b00, group};
 
 	// ---- parameter field views -------------------------------------------
+	// Word 3 is FM register 0; the rest is unchanged from the old core's
+	// packing. Detune, Acc On, Src Note and Src B were already stored -- they
+	// sat in bytes nothing extracted, because MAME's old core dropped them.
 	wire  [3:0] p_multiple   = w0[3:0];
+	wire  [2:0] p_dt         = w0[6:4];
 	wire  [6:0] p_tl         = w0[14:8];
 	wire  [4:0] p_ar         = w0[20:16];
 	wire  [2:0] p_keyscale   = w0[23:21];
@@ -398,6 +550,7 @@ module ymf271_synth
 	wire  [3:0] p_block      = w0[63:60];
 	wire  [2:0] p_waveform   = w1[2:0];
 	wire  [2:0] p_feedback   = w1[6:4];
+	wire        p_accon      = w1[7];
 	wire  [3:0] p_ch0        = w1[15:12];
 	wire  [3:0] p_ch1        = w1[11:8];
 	wire  [3:0] p_ch2        = w1[23:20];
@@ -407,347 +560,521 @@ module ymf271_synth
 	wire [22:0] p_loop       = {w2[30:24], w2[23:16], w2[15:8]};
 	wire  [1:0] p_fs         = w2[33:32];
 	wire        p_bits12     = w2[34];
+	wire  [1:0] p_srcnote    = w2[36:35];
+	wire  [2:0] p_srcb       = w2[39:37];
 	wire  [7:0] p_lfofreq    = w2[47:40];
 	wire  [1:0] p_lfowave    = w2[49:48];
 	wire  [2:0] p_pms        = w2[53:51];
 	wire  [1:0] p_ams        = w2[55:54];
 	wire  [3:0] p_alg        = w2[59:56];
+	wire  [3:0] p_extout     = w3[6:3];
+	wire        p_exten      = w3[7];
 
-	wire p_is_pcm = (p_waveform == 3'd7);
+	// Only the twelve slots of groups 0/4/8 -- slot % 4 == 0 -- can fetch
+	// external data; a wave-7 select anywhere else is silence, which is what
+	// MAME does and what the old core had to special-case because its
+	// update_pcm() called fatalerror() on the same input.
+	wire p_pcm_ok = (slot[1:0] == 2'd0);
+	wire p_is_pcm = (p_waveform == 3'd7) && p_pcm_ok;
+	wire p_is_lin = (p_waveform == 3'd6);
+	wire p_silent = (p_waveform == 3'd7) && !p_pcm_ok;
 
-	// ---- LFO --------------------------------------------------------------
-	// update_lfo() advances the phase first, then indexes both tables with the
-	// new value, so everything here uses lfo_next.
-	//
-	// 26 bits: an 8 bit index into the 256-entry shapes over 18 fractional
-	// bits. MAME keeps only 8 fractional bits, which truncates the step to
-	// zero for the 161 slowest of the 256 settings -- everything below 0.673
-	// Hz, where Table 2-6-2 goes down to 0.00066 Hz. Those slots do not lose
-	// their LFO quietly: a stalled phase sits at index 0, the peak of all
-	// three amplitude shapes, so they get a fixed attenuation instead of a
-	// sweep. Ten more fractional bits is the least that keeps setting 0 above
-	// zero, and costs ten bits a slot in st_mem.
-	wire [25:0] lfo_next = lfo_phase + {6'd0, YMF_LFO_STEP[p_lfofreq]};
-
-	// m_lut_alfo: silence, falling ramp, square, triangle -- all cheap enough
-	// to build from the phase rather than store.
-	wire [16:0] alfo_tri = {1'b0, lfo_idx_r[6:0], 9'd0};
-	wire [16:0] alfo =
-		(p_lfowave == 2'd0) ? 17'd0 :
-		(p_lfowave == 2'd1) ? (17'd65536 - {1'b0, lfo_idx_r, 8'd0}) :
-		(p_lfowave == 2'd2) ? (lfo_idx_r[7] ? 17'd0 : 17'd65536) :
-		                      (lfo_idx_r[7] ? alfo_tri : (17'd65536 - alfo_tri));
-
-	// calculate_slot_volume()'s tremolo, with one correction: alfo peaks at
-	// 65536, so the constant here is the SWING and 65536 minus it is the gain
-	// at full modulation. MAME uses the gains themselves -- 65536/10^(dB/20)
-	// for Table 2-6-3's 5.90625, 11.8125 and 23.625 dB -- which lands the gain
-	// at 65536-K instead, giving 6.1, 2.6 and 0.6 dB: the deepest ams setting
-	// comes out the shallowest. YMF_ALFO_K holds the complements.
-	wire [32:0] alfo_scaled = alfo_r * YMF_ALFO_K[p_ams];
-	wire [17:0] lfo_vol_c   = 18'd65536 - {2'd0, amul_r[31:16]};
-
-	// m_lut_plfo, split into the pitch shape and the exponential so the stored
-	// product is 7 x 257 entries instead of 4 x 8 x 256.
-	wire signed [8:0] plfo_q  = $signed(YMF_PLFO_W[{p_lfowave, lfo_idx_r}]);
-	wire        [8:0] plfo_i  = plfo_w_r + 9'sd128;
-	wire        [2:0] pms_m1  = p_pms - 3'd1;
-	// index = (pms - 1) * 257 + (q + 128)
-	wire       [11:0] plfo_base = {1'b0, pms_m1, 8'd0} + {9'd0, pms_m1};
-	wire       [11:0] plfo_addr = plfo_base + {3'd0, plfo_i};
-	wire       [17:0] plfo_c  = (p_pms == 3'd0) ? 18'd65536
-	                                            : YMF_PLFO[plfo_addr[10:0]];
-
-	// ---- phase step -------------------------------------------------------
-	//
-	// Every factor MAME writes as a double is a power of two or a half integer,
-	// so the base collapses to one multiply and a signed shift; the LFO factor
-	// goes on top. pow_table is 2^(block+7) below block 8, 2^(block-9) above.
-	//   PCM: st = (fns|2048) * (multiple*2) * 2^pow * plfo / 2^(3+fs)
-	//   FM:  st =  fns       * (multiple*2) * 2^pow * plfo / 8
-	wire [11:0] fns_ext  = p_is_pcm ? (p_fns | 12'h800) : p_fns;
-	wire  [4:0] mult2    = (p_multiple == 4'd0) ? 5'd1 : {p_multiple, 1'b0};
-	wire [16:0] step_num = fns_ext * mult2;      // registered into num_r
-
-	wire signed [7:0] blk_s   = $signed({4'b0000, p_block});
-	wire signed [7:0] pow_sh  = p_block[3] ? (blk_s - 8'sd9) : (blk_s + 8'sd7);
-	wire signed [7:0] fs_term = p_is_pcm ? $signed({6'b000000, p_fs}) : 8'sd0;
-	wire signed [7:0] step_sh = pow_sh - 8'sd3 - fs_term;
-	wire signed [7:0] step_nsh = -step_sh;
-	wire [31:0] step_base = (step_sh >= 0) ? ({15'd0, num_r} <<  step_sh[4:0])
-	                                       : ({15'd0, num_r} >> step_nsh[4:0]);
-	// plfo_c, not a registered copy: step_calc is sampled into step_r in the
-	// same cycle the LFO is evaluated, so reading a register here would apply
-	// the pitch shift a sample late -- and, on the first sample of a note, use
-	// whatever the previously processed slot had left behind.
-	// plfo is exactly 65536 when pms is 0, so the no-LFO case is bit-unchanged.
-	wire [49:0] step_mul  = base_r * plfo_r;
-	wire [31:0] step_calc = step_mul[47:16];
-
-	// ---- envelope rates (init_envelope) -----------------------------------
-	wire [10:0] fns_lo  = p_fns[10:0];
-	wire  [1:0] n43_ext = (fns_lo < 11'h100) ? 2'd0 :
-	                      (fns_lo < 11'h300) ? 2'd1 :
-	                      (fns_lo < 11'h500) ? 2'd2 : 2'd3;
+	// ---- key code (manual 2-9) --------------------------------------------
+	// Octave from Block, N4N3 from the F-number. The external-waveform form
+	// adds the sample's own base key code (4*SrcB + SrcNote) and reads the
+	// F-number as 11 bits against a different threshold set; the 5-bit sum
+	// wraps, which is the arithmetically right answer for negative blocks.
+	// For an internal waveform MAME clamps the octave at 0 instead of letting
+	// the manual's 4*Block wrap up to octave 7.
+	wire signed [4:0] block_s = $signed({p_block[3], p_block});
+	wire [10:0] fn11    = p_fns[10:0];
+	wire  [1:0] n43_ext = (fn11 < 11'h100) ? 2'd0 :
+	                      (fn11 < 11'h300) ? 2'd1 :
+	                      (fn11 < 11'h500) ? 2'd2 : 2'd3;
 	wire  [1:0] n43_int = (p_fns < 12'h780) ? 2'd0 :
 	                      (p_fns < 12'h900) ? 2'd1 :
 	                      (p_fns < 12'hA80) ? 2'd2 : 2'd3;
-	wire  [4:0] keycode = {p_block[2:0], p_is_pcm ? n43_ext : n43_int};
-	wire  [4:0] rks     = YMF_RKS[{keycode, p_keyscale}];
+	wire  [4:0] kc_int  = {(block_s < 0) ? 3'd0 : p_block[2:0], n43_int};
+	wire  [5:0] kc_ext  = {1'b0, p_srcb, p_srcnote} + {1'b0, p_block[2:0], n43_ext};
+	wire  [4:0] kc_c    = p_is_pcm ? kc_ext[4:0] : kc_int;
 
-	function [5:0] ks_rate(input [6:0] base, input [4:0] adj);
-		reg [7:0] sum;
-		begin
-			sum = {1'b0, base} + {3'd0, adj};
-			ks_rate = (sum > 8'd63) ? 6'd63 : sum[5:0];
-		end
-	endfunction
+	// ---- envelope state transitions ---------------------------------------
+	// MAME checks these BEFORE picking the rate, and the D1L test runs on the
+	// state the attack test may just have changed. Decay 1 ends at D1L * 32,
+	// except D1L 15, which means 31 * 32 -- the bottom of the range, not
+	// fifteen sixteenths of it.
+	wire [9:0] d1l_att = (p_dec1lvl == 4'd15) ? 10'd992 : {1'b0, p_dec1lvl, 5'd0};
+	wire       eg_to_d1 = (eg_state == EG_ATTACK) && (eg_att == 10'd0);
+	wire [2:0] eg_state_1 = eg_to_d1 ? EG_DECAY1 : eg_state;
+	wire [2:0] eg_state_pre = ((eg_state_1 == EG_DECAY1) && (eg_att >= d1l_att))
+	                        ? EG_DECAY2 : eg_state_1;
 
-	wire [5:0] r_ar  = ks_rate({1'b0, p_ar,        1'b0},  rks);   // ar * 2
-	wire [5:0] r_d1  = ks_rate({1'b0, p_dec1rate,  1'b0},  rks);
-	wire [5:0] r_d2  = ks_rate({1'b0, p_dec2rate,  1'b0},  rks);
-	wire [5:0] r_rel = ks_rate({1'b0, p_relrate,   2'b00}, rks);   // relrate * 4
+	// ---- envelope rate ----------------------------------------------------
+	// rate2 is 2*AR/D1R/D2R or 4*RR; rate 0 means infinite and never advances.
+	// 62 + rks 31 = 93 is what the pre-clamp sum has to hold, so seven bits.
+	wire [6:0] rate2 = (eg_state_pre == EG_ATTACK) ? {1'b0, p_ar,       1'b0} :
+	                   (eg_state_pre == EG_DECAY1) ? {1'b0, p_dec1rate, 1'b0} :
+	                   (eg_state_pre == EG_DECAY2) ? {1'b0, p_dec2rate, 1'b0} :
+	                                                 {1'b0, p_relrate, 2'b00};
+	wire [6:0] rate_sum = rate2 + {2'd0, rks_r};
+	wire [5:0] eg_rate  = (rate2 == 7'd0) ? 6'd0 :
+	                      (rate_sum > 7'd63) ? 6'd63 : rate_sum[5:0];
 
-	wire [23:0] attack_step  = YMF_AR_STEP[r_ar];
-	wire [23:0] decay2_step  = YMF_DC_STEP[r_d2];
-	wire [23:0] release_step = YMF_DC_STEP[r_rel];
-	// decay1 sweeps decay1lvl*16 rather than the full 255, so it is the one
-	// step that scales instead of reading straight out of a table.
-	wire [31:0] d1_mul       = {4'd0, p_dec1lvl, 4'b0000} * YMF_DC_RECIP[r_d1];
-	wire [23:0] decay1_step  = d1_mul[31:8];
-	wire  [7:0] decay_level  = 8'd255 - {p_dec1lvl, 4'b0000};
+	// The envelope update is THREE stages, not one. Everything above is
+	// downstream of eg_att -- the D1L compare picks the state, the state picks
+	// the rate, the rate picks the shift -- and everything below feeds back
+	// into eg_att. Run as one stage it is a compare, a mux, an add, a clamp, a
+	// subtract, a 16-bit barrel shift, a wide OR and a multiply in series, and
+	// it missed clk_sys setup by 2.557 ns: every failing path in the fit was
+	// eg_att -> eg_att, with Quartus duplicating the register trying to save it.
+	//
+	// S_EGA latches the state and the rate, S_EGB the hold and the sub-step
+	// index (and lets the eg_inc read land), S_EGC does the arithmetic.
+	wire       eg_slow  = (eg_rate_r < 6'd48);
+	wire [3:0] eg_sh    = eg_slow ? (4'd11 - eg_rate_r[5:2]) : 4'd0;
+	wire [15:0] eg_mask = (16'd1 << eg_sh) - 16'd1;
+	wire        eg_hold = eg_slow && |(eg_cnt & eg_mask);
+	wire [15:0] eg_cnt_sh = eg_cnt >> eg_sh;
+	wire  [2:0] eg_idx  = eg_slow ? eg_cnt_sh[2:0] : eg_cnt[2:0];
 
-	wire signed [27:0] v_att = {volume[26], volume} + $signed({4'd0, attack_step});
-	wire signed [27:0] v_d1  = {volume[26], volume} - $signed({4'd0, decay1_step});
-	wire signed [27:0] v_d2  = {volume[26], volume} - $signed({4'd0, decay2_step});
-	wire signed [27:0] v_rel = {volume[26], volume} - $signed({4'd0, release_step});
+	// nibble idx of eg_inc[rate] is this sub-step's increment
+	wire [3:0] eg_add = eginc_q[{eg_idx_r, 2'b00} +: 4];
 
-	// ---- volume chain (calculate_slot_volume) -----------------------------
-	wire  [7:0] vol8     = volume[26] ? 8'd0 : volume[23:16];
-	wire [34:0] gain_lfo = env_raw * lfo_vol;
-	wire [33:0] gain_tl  = env_gain * tl_r;
-	wire [34:0] g0       = slot_gain * YMF_ATTEN[p_ch0];
-	wire [34:0] g1       = slot_gain * YMF_ATTEN[p_ch1];
-	wire [34:0] g2       = slot_gain * YMF_ATTEN[p_ch2];
-	wire [34:0] g3       = slot_gain * YMF_ATTEN[p_ch3];
+	// ---- LFO --------------------------------------------------------------
+	// Table 2-6-2 as a clock divider: one of 128 steps every K samples,
+	// K = (32 - (n & 15)) << (14 - (n >> 4)) below 240 and 16 - (n & 15) above,
+	// so f = fs / 128 / K spans 0.00066 .. 344.5 Hz. A counter, not a phase
+	// accumulator -- the old core's init_lfo() truncated its increment to zero
+	// for the 161 slowest settings, and this cannot.
+	wire  [3:0] lfo_n_lo = p_lfofreq[3:0];
+	wire  [3:0] lfo_n_hi = p_lfofreq[7:4];
+	wire  [4:0] lfo_k_hi = 5'd16 - {1'b0, lfo_n_lo};      // n >= 240
+	wire  [5:0] lfo_k_lo = 6'd32 - {2'b0, lfo_n_lo};      // n <  240
+	wire [19:0] lfo_per  = (p_lfofreq >= 8'd240)
+	                     ? {15'd0, lfo_k_hi}
+	                     : ({14'd0, lfo_k_lo} << (4'd14 - lfo_n_hi));
+	wire        lfo_wrap = (lfo_cnt + 20'd1) >= lfo_per;
 
-	/* verilator lint_off UNUSEDSIGNAL */
-	function [17:0] chclip(input [34:0] g);
-		chclip = (g[34:16] > 19'd65536) ? 18'd65536 : g[33:16];
-	endfunction
-	/* verilator lint_on UNUSEDSIGNAL */
+	// Bipolar for PM, -128..127, every waveform starting at 0 and rising.
+	wire  [6:0] lp     = lfo_pos;
+	wire  [6:0] lp_s64 = lp + 7'd64;      // ((p + 64) & 127)
+	wire  [6:0] lp_m32 = lp - 7'd32;      // 0..63 in the triangle's middle leg
+	wire  [6:0] lp_m96 = lp - 7'd96;      // 0..31 in its last leg
+	wire signed [8:0] lfo_pm_saw = $signed({1'b0, lp_s64, 1'b0}) - 9'sd128;
+	wire signed [8:0] lfo_pm_tri =
+		(lp < 7'd32) ? $signed({2'b00, lp[4:0], 2'b00}) :
+		(lp < 7'd96) ? (9'sd128 - $signed({1'b0, lp_m32[5:0], 2'b00})) :
+		               ($signed({2'b00, lp_m96[4:0], 2'b00}) - 9'sd128);
+	wire signed [8:0] lfo_pm_c =
+		(p_lfowave == 2'd1) ? lfo_pm_saw :
+		(p_lfowave == 2'd2) ? (lp[6] ? -9'sd128 : 9'sd127) :
+		(p_lfowave == 2'd3) ? lfo_pm_tri : 9'sd0;
 
-	// An FM operator folds its envelope into its own output and MAME applies no
-	// channel clamp there, so its mix is a plain sum of the attenuations.
-	wire [19:0] fm_cvsum_l = {3'd0, YMF_ATTEN[p_ch0]}
-	                       + (stereo ? 20'd0 : {3'd0, YMF_ATTEN[p_ch2]});
-	wire [19:0] fm_cvsum_r = {3'd0, YMF_ATTEN[p_ch1]}
-	                       + (stereo ? 20'd0 : {3'd0, YMF_ATTEN[p_ch3]});
+	// Unipolar for AM, 0..127 of attenuation. Every waveform starts at FULL
+	// attenuation at key-on and the saw and triangle come down from there --
+	// the OPM convention, and ymfm's reading of the manual's figures.
+	wire  [6:0] lfo_am_c =
+		(p_lfowave == 2'd1) ? (7'd127 - lp) :
+		(p_lfowave == 2'd2) ? (lp[6] ? 7'd0 : 7'd127) :
+		(p_lfowave == 2'd3) ? (lp[6] ? ({lp[5:0], 1'b0} + 7'd1) : (7'd127 - {lp[5:0], 1'b0}))
+		                    : 7'd0;
 
-	wire signed [36:0] mix_pcm_l = $signed(sample) * $signed({1'b0, cvsum_l});
-	wire signed [36:0] mix_pcm_r = $signed(sample) * $signed({1'b0, cvsum_r});
-	wire signed [38:0] mix_fm_l  = op_out * $signed({1'b0, fm_cvsum_l});
-	wire signed [38:0] mix_fm_r  = op_out * $signed({1'b0, fm_cvsum_r});
-
-	// ---- sample addressing ------------------------------------------------
-	wire [23:0] addr8  = {1'b0, p_start} + stepptr[39:16];
-	// 12 bit packs two samples into three bytes; base is the start of the pair.
-	wire [25:0] idx3   = {2'b00, stepptr[39:17], 1'b0} + {3'b000, stepptr[39:17]};
-	wire [22:0] base12 = p_start + idx3[22:0];
-
-	wire line_hit  = line_tv[20] && (line_tv[19:0] == fetch_addr[22:3]);
-	wire [7:0] line_byte = line_data[{fetch_addr[2:0], 3'b000} +: 8];
+	wire lfo_on = (p_lfowave != 2'd0);
+	// AMS depth: 63 / 126 / 252 units of 0.09375 dB.
+	wire [8:0] am_term = (p_ams == 2'd1) ? {3'd0, lfo_am_c[6:1]} :
+	                     (p_ams == 2'd2) ? {2'd0, lfo_am_c} :
+	                     (p_ams == 2'd3) ? {1'd0, lfo_am_c, 1'b0} : 9'd0;
+	wire [11:0] env_sum = {2'd0, eg_att} + {2'd0, p_tl, 3'b000}
+	                    + ((p_ams != 2'd0 && lfo_on) ? {3'd0, am_term} : 12'd0);
+	wire  [9:0] env_c   = (env_sum > 12'd1023) ? 10'd1023 : env_sum[9:0];
 
 	// ------------------------------------------------------------------
 	// Algorithm wiring
 	//
-	// Every algorithm in every sync mode is the same four operators in the same
-	// order; only three things change. `in_m*` says which earlier results feed
-	// each operator, as {use r1, use r3, use r2}; `fb_from_r3` picks which
-	// result set_feedback() takes; `out_mask` says which operators reach the
-	// mixer, bit 0 being operator 1. Read off the diagrams in ymf271.cpp.
+	// The tables are MAME's alg4 / alg3 / alg2, packed. `mods` is a bitmask
+	// over POSITIONS in the network; for sync 0 and sync 2 position equals
+	// bank, so the mask is already a bank mask, and only sync 1 has to be
+	// translated (its two pairs are banks 0,2 and banks 1,3).
+	//
+	// `car` says which positions reach the mixer and `fbsrc` which position's
+	// output is written into the head's feedback history -- itself, or S3 for
+	// the loop algorithms 1/5/7/11.
 	// ------------------------------------------------------------------
-	reg  [2:0] in_m1, in_m2, in_m3;    // masks for steps 1, 2, 3
-	reg        fb_from_r3;
-	reg  [3:0] out_mask;
+	wire [3:0] alg_a = grp_alg[group];
+	wire [3:0] alg_b = grp_alg2[group];
 
+	reg [15:0] a4_mods; reg [3:0] a4_car; reg [1:0] a4_fbsrc;
 	always @* begin
-		in_m1 = 3'b000; in_m2 = 3'b000; in_m3 = 3'b000;
-		fb_from_r3 = 1'b0; out_mask = 4'b0000;
-		case (sync)
-			2'd0: case (net_alg)                    // 4-operator FM
-				4'd0:  begin in_m1=3'b100; in_m2=3'b010; in_m3=3'b001; out_mask=4'b1000; end
-				4'd1:  begin in_m1=3'b100; in_m2=3'b010; in_m3=3'b001; out_mask=4'b1000; fb_from_r3=1'b1; end
-				4'd2:  begin in_m1=3'b000; in_m2=3'b110; in_m3=3'b001; out_mask=4'b1000; end
-				4'd3:  begin in_m1=3'b000; in_m2=3'b010; in_m3=3'b101; out_mask=4'b1000; end
-				4'd4:  begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b011; out_mask=4'b1000; end
-				4'd5:  begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b011; out_mask=4'b1000; fb_from_r3=1'b1; end
-				4'd6:  begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b001; out_mask=4'b1010; end
-				4'd7:  begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b001; out_mask=4'b1010; fb_from_r3=1'b1; end
-				4'd8:  begin in_m1=3'b000; in_m2=3'b010; in_m3=3'b001; out_mask=4'b1001; end
-				4'd9:  begin in_m1=3'b000; in_m2=3'b000; in_m3=3'b011; out_mask=4'b1001; end
-				4'd10: begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b000; out_mask=4'b1110; end
-				4'd11: begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b000; out_mask=4'b1110; fb_from_r3=1'b1; end
-				4'd12: begin in_m1=3'b100; in_m2=3'b100; in_m3=3'b100; out_mask=4'b1110; end
-				4'd13: begin in_m1=3'b000; in_m2=3'b010; in_m3=3'b000; out_mask=4'b1101; end
-				4'd14: begin in_m1=3'b100; in_m2=3'b000; in_m3=3'b001; out_mask=4'b1011; end
-				default: begin                       // 15: all four carriers
-					in_m1=3'b000; in_m2=3'b000; in_m3=3'b000; out_mask=4'b1111; end
-			endcase
-
-			2'd1: case (net_alg[1:0])               // two 2-operator pairs
-				// Steps 0,1 are one pair and 2,3 the other, so one entry serves
-				// both halves: in_m1 wires the pair's second operator and
-				// in_m3 the same thing for the second pair.
-				2'd0: begin in_m1=3'b100; in_m3=3'b100; out_mask=4'b1010; end
-				2'd1: begin in_m1=3'b100; in_m3=3'b100; out_mask=4'b1010; fb_from_r3=1'b1; end
-				2'd2: begin in_m1=3'b000; in_m3=3'b000; out_mask=4'b1111; end
-				default: begin in_m1=3'b100; in_m3=3'b100; out_mask=4'b1111; end
-			endcase
-
-			2'd2: case (net_alg[2:0])               // 3-operator FM + PCM
-				3'd0: begin in_m1=3'b100; in_m2=3'b010; out_mask=4'b0100; end
-				3'd1: begin in_m1=3'b100; in_m2=3'b010; out_mask=4'b0100; fb_from_r3=1'b1; end
-				3'd2: begin in_m1=3'b000; in_m2=3'b110; out_mask=4'b0100; end
-				3'd3: begin in_m1=3'b000; in_m2=3'b010; out_mask=4'b0101; end
-				3'd4: begin in_m1=3'b100; in_m2=3'b000; out_mask=4'b0110; end
-				3'd5: begin in_m1=3'b100; in_m2=3'b000; out_mask=4'b0110; fb_from_r3=1'b1; end
-				3'd6: begin in_m1=3'b000; in_m2=3'b000; out_mask=4'b0111; end
-				default: begin in_m1=3'b100; in_m2=3'b000; out_mask=4'b0111; end
-			endcase
-
-			default: ;                              // sync 3: four PCM voices
+		a4_fbsrc = 2'd0;
+		case (alg_a)
+			4'd0:  begin a4_mods = 16'h2140; a4_car = 4'h8; end
+			4'd1:  begin a4_mods = 16'h2140; a4_car = 4'h8; a4_fbsrc = 2'd2; end
+			4'd2:  begin a4_mods = 16'h2050; a4_car = 4'h8; end
+			4'd3:  begin a4_mods = 16'h3040; a4_car = 4'h8; end
+			4'd4:  begin a4_mods = 16'h6100; a4_car = 4'h8; end
+			4'd5:  begin a4_mods = 16'h6100; a4_car = 4'h8; a4_fbsrc = 2'd2; end
+			4'd6:  begin a4_mods = 16'h2100; a4_car = 4'hC; end
+			4'd7:  begin a4_mods = 16'h2100; a4_car = 4'hC; a4_fbsrc = 2'd2; end
+			4'd8:  begin a4_mods = 16'h2040; a4_car = 4'h9; end
+			4'd9:  begin a4_mods = 16'h6000; a4_car = 4'h9; end
+			4'd10: begin a4_mods = 16'h0100; a4_car = 4'hE; end
+			4'd11: begin a4_mods = 16'h0100; a4_car = 4'hE; a4_fbsrc = 2'd2; end
+			4'd12: begin a4_mods = 16'h1110; a4_car = 4'hE; end
+			4'd13: begin a4_mods = 16'h0040; a4_car = 4'hB; end
+			4'd14: begin a4_mods = 16'h2100; a4_car = 4'hD; end
+			default: begin a4_mods = 16'h0000; a4_car = 4'hF; end
 		endcase
 	end
 
-	// In sync 1 the second pair restarts the network, so step 2 behaves like
-	// step 0 and step 3 like step 1.
-	wire net_start = (step == 2'd0) || ((sync == 2'd1) && (step == 2'd2));
-	wire is_op1    = net_start;
-	wire net_last  = (sync == 2'd1) ? ((step == 2'd1) || (step == 2'd3))
-	                                : (step == 2'd1);
+	reg [11:0] a3_mods; reg [2:0] a3_car; reg [1:0] a3_fbsrc;
+	always @* begin
+		a3_fbsrc = 2'd0;
+		case (alg_a[2:0])
+			3'd0: begin a3_mods = 12'h140; a3_car = 3'h2; end
+			3'd1: begin a3_mods = 12'h140; a3_car = 3'h2; a3_fbsrc = 2'd2; end
+			3'd2: begin a3_mods = 12'h050; a3_car = 3'h2; end
+			3'd3: begin a3_mods = 12'h040; a3_car = 3'h3; end
+			3'd4: begin a3_mods = 12'h100; a3_car = 3'h6; end
+			3'd5: begin a3_mods = 12'h100; a3_car = 3'h6; a3_fbsrc = 2'd2; end
+			3'd6: begin a3_mods = 12'h000; a3_car = 3'h7; end
+			default: begin a3_mods = 12'h100; a3_car = 3'h7; end
+		endcase
+	end
 
-	wire [2:0] in_mask = (step == 2'd1) ? in_m1 :
-	                     (step == 2'd2) ? in_m2 : in_m3;
+	// sync 1: the pair is picked by bank bit 0 and the position by bank bit 1,
+	// so banks 0,2 are the first pair's head and tail and banks 1,3 the
+	// second's. Each pair takes its algorithm from its own head slot.
+	wire       pairB = bank[0];
+	wire       pos2  = bank[1];
+	wire [1:0] alg2s = pairB ? alg_b[1:0] : alg_a[1:0];
+	reg  [3:0] a2_mods; reg [1:0] a2_car; reg a2_fbsrc;
+	always @* begin
+		a2_fbsrc = 1'b0;
+		case (alg2s)
+			2'd0: begin a2_mods = 4'h4; a2_car = 2'h2; end
+			2'd1: begin a2_mods = 4'h4; a2_car = 2'h2; a2_fbsrc = 1'b1; end
+			2'd2: begin a2_mods = 4'h0; a2_car = 2'h3; end
+			default: begin a2_mods = 4'h4; a2_car = 2'h3; end
+		endcase
+	end
+	wire [1:0] a2_m = a2_mods[{pos2, 1'b0} +: 2];
 
-	// PCM when the group says so, or when a slot 4 the network leaves spare
-	// carries the external waveform.
+	reg  [3:0] mod_mask;     // which banks of this group modulate me
+	reg        is_carrier, is_fbhead, is_fbsrc, fb_self;
+	// Only which HALF the head is in matters, and only when the source is not
+	// the head: those cases always have the head at bank 0 or bank 1.
+	reg        head_b0;
+	always @* begin
+		fb_self = 1'b1;      // the head is its own feedback source
+		case (sync)
+			2'd0: begin
+				mod_mask   = a4_mods[{bank, 2'b00} +: 4];
+				is_carrier = a4_car[bank];
+				is_fbhead  = (bank == 2'd0);
+				is_fbsrc   = (bank == a4_fbsrc);
+				head_b0    = 1'b0;
+				fb_self    = (a4_fbsrc == 2'd0);
+			end
+			2'd1: begin
+				mod_mask   = (a2_m[0] ? (pairB ? 4'b0010 : 4'b0001) : 4'b0000)
+				           | (a2_m[1] ? (pairB ? 4'b1000 : 4'b0100) : 4'b0000);
+				is_carrier = a2_car[pos2];
+				is_fbhead  = (pos2 == 1'b0);
+				is_fbsrc   = (pos2 == a2_fbsrc);
+				head_b0    = pairB;
+				fb_self    = (a2_fbsrc == 1'b0);
+			end
+			2'd2: begin
+				if (bank == 2'd3) begin
+					mod_mask   = 4'b0000;
+					is_carrier = 1'b1;
+					is_fbhead  = 1'b1;
+					is_fbsrc   = 1'b1;
+					head_b0    = 1'b0;
+				end
+				else begin
+					mod_mask   = a3_mods[{bank, 2'b00} +: 4];
+					is_carrier = a3_car[bank];
+					is_fbhead  = (bank == 2'd0);
+					is_fbsrc   = (bank == a3_fbsrc);
+					head_b0    = 1'b0;
+					fb_self    = (a3_fbsrc == 2'd0);
+				end
+			end
+			default: begin                      // sync 3: four independent slots
+				mod_mask   = 4'b0000;
+				is_carrier = 1'b1;
+				is_fbhead  = 1'b1;
+				is_fbsrc   = 1'b1;
+				head_b0    = 1'b0;
+			end
+		endcase
+	end
+
+	// The group's four outputs. A slot's modulators are always inside its own
+	// group, so this is one 12-to-1 mux over four entries rather than a 48-way
+	// read.
+	wire signed [W_OUT-1:0] gout0 = out_reg[{2'b00, group}];
+	wire signed [W_OUT-1:0] gout1 = out_reg[6'd12 + {2'b00, group}];
+	wire signed [W_OUT-1:0] gout2 = out_reg[6'd24 + {2'b00, group}];
+	wire signed [W_OUT-1:0] gout3 = out_reg[6'd36 + {2'b00, group}];
+
+	wire signed [W_OUT+1:0] in_sum = (mod_mask[0] ? {{2{gout0[W_OUT-1]}}, gout0} : 20'sd0)
+	                               + (mod_mask[1] ? {{2{gout1[W_OUT-1]}}, gout1} : 20'sd0)
+	                               + (mod_mask[2] ? {{2{gout2[W_OUT-1]}}, gout2} : 20'sd0)
+	                               + (mod_mask[3] ? {{2{gout3[W_OUT-1]}}, gout3} : 20'sd0);
+
+	// OPM's feedback law on the average of the last two outputs; the S3->S1
+	// loop of algorithms 1/5/7/11 follows the same law. Level 0 is off.
+	// {head_b0, group}: the hand-off entry for a source that is not the
+	// head. Only banks 0 and 1 are ever a head in that case.
+	wire [4:0] fb_pidx = {head_b0, group};
+	wire signed [W_OUT-1:0] fb_h0 = fb_self ? fb0 : fb_pend[fb_pidx];
+	wire signed [W_OUT:0] fb_sum = {fb_h0[W_OUT-1], fb_h0} + {fb1[W_OUT-1], fb1};
+	wire  [3:0] fb_sh  = 4'd10 - {1'b0, p_feedback};
+	wire signed [22:0] mod_fb = (p_feedback == 3'd0) ? 23'sd0
+	                          : ({{4{fb_sum[W_OUT]}}, fb_sum} >>> fb_sh);
+	wire signed [30:0] mod_mul = in_sum * $signed({1'b0, YMF_MODLVL[p_feedback]});
+	wire signed [22:0] mod_c   = is_fbhead ? mod_fb : mod_mul[30:8];
+
+	// ---- phase increment ---------------------------------------------------
+	// f = 2 * fnum * 2^(block-7) * MUL * fs / 2^15, which is fnum << (block+11)
+	// times MUL with detune added in units of fs/2^20 before the multiplier.
+	// The external-waveform form is the same PG with the implicit F-number bit
+	// 11, a step in source words with a 16-bit fraction, and the Fs divider.
 	//
-	// Every case is additionally gated on the slot actually carrying waveform 7.
-	// Section 2-7 gives external waveforms to groups 0, 4 and 8 only -- the
-	// twelve slots with PCM attribute registers -- so a sync-3 group anywhere
-	// else is four one-operator FM voices, not PCM. Without the gate such a
-	// group played from sample address 0, because its start/end/loop bytes are
-	// never written. MAME does not handle this either: update_pcm() calls
-	// fatalerror() on any waveform but 7, so it would abort where this now
-	// sounds the operator. Latent in practice -- the games never do it, which
-	// is why MAME can get away with the assertion.
-	wire step_is_pcm = p_is_pcm
-	                && ((sync == 2'd3)
-	                 || ((sync == 2'd2) && (step == 2'd3))
-	                 || ((sync == 2'd0) && (step == 2'd3)));
+	// Every width here is swept against MAME's int64 by
+	// tools/check_ymf271_math.py; the accumulator TRUNCATES to 32 bits, which
+	// is how increments above fs/2 alias (the hi-hat carriers of the Seibu
+	// titles are fed by such a modulator).
+	wire [11:0] fnum_base = p_is_pcm ? {1'b1, p_fns[10:0]} : p_fns;
 
-	wire mix_this_op = out_mask[step];
+	wire signed [15:0] pm_t1 = $signed({1'b0, YMF_PMS_K[p_pms]}) * lfo_pm_c;
+	wire signed [28:0] pm_t2 = $signed({1'b0, fnum_base}) * pm_mul_r;
+	wire signed [18:0] pm_term = pm_t2[28:10];
+	wire        [19:0] fnum_c = {fnum_base, 7'd0}
+	                          + ((p_pms != 3'd0 && lfo_on) ? {{1{pm_term[18]}}, pm_term}
+	                                                       : 20'd0);
 
-	// The feedback state belongs to the network's operator 1: bank 0 normally,
-	// bank 1 for the second pair of a sync-1 group.
-	wire [1:0] fb_bank = ((sync == 2'd1) && (step == 2'd3)) ? 2'd1 : 2'd0;
-	wire [5:0] fb_slot = {1'b0, fb_bank, 3'b000} + {2'b00, fb_bank, 2'b00}
-	                   + {2'b00, group};
+	wire signed [5:0] fm_sh  = {block_s[4], block_s} + 6'sd4;     // -4 .. 11
+	wire        [5:0] fm_nsh = 6'd0 - $unsigned(fm_sh);
+	wire [32:0] inc_fm  = fm_sh[5] ? ({13'd0, fnum_q7} >> fm_nsh[2:0])
+	                               : ({13'd0, fnum_q7} << fm_sh[3:0]);
+	wire [35:0] pcm_num = {fnum_q7, 16'd0};
+	wire  [4:0] pcm_sh  = 5'd18 - $unsigned(block_s[4:0]);        // 11 .. 26
+	wire [35:0] pcm_shr  = pcm_num >> pcm_sh;
+	wire [32:0] inc_pcm = pcm_shr[32:0];
 
-	// ---- operator input ---------------------------------------------------
-	wire signed [17:0] in_sum = (in_mask[2] ? r1 : 18'sd0)
-	                          + (in_mask[1] ? r3 : 18'sd0)
-	                          + (in_mask[0] ? r2 : 18'sd0);
-	wire signed [33:0] mod_in = ({{8{in_sum[17]}}, in_sum, 8'd0})
-	                          * $signed({1'b0, YMF_MODLVL[p_feedback]});
-	// MAME divides by 2 and by 16 with C integer division, which truncates
-	// TOWARD ZERO; an arithmetic shift floors instead, so negatives would come
-	// out one too low. Bias before shifting.
-	wire signed [27:0] fb_sum = {fb0[26], fb0} + {fb1[26], fb1};
-	wire signed [27:0] fb_avg = (fb_sum + {27'd0, fb_sum[27]}) >>> 1;
-	wire signed [33:0] op_input = is_op1 ? {{6{fb_avg[27]}}, fb_avg}
-	                                     : ((in_mask == 3'b000) ? 34'sd0 : mod_in);
+	wire signed [32:0] inc_base = $signed(p_is_pcm ? inc_pcm : inc_fm);
+	wire signed [32:0] det_term = p_is_pcm ? $signed({22'd0, det_r, 6'd0})
+	                                       : $signed({16'd0, det_r, 12'd0});
+	wire signed [32:0] inc_dt   = p_dt[2] ? (inc_base - det_term) : (inc_base + det_term);
+	wire        [32:0] inc_cl   = inc_dt[32] ? 33'd0 : $unsigned(inc_dt);
 
-	// Phase index. Only bits 25:16 of the sum survive and carries never
-	// propagate downward, so 32 bit arithmetic is exact here even though MAME
-	// does it in 64.
-	wire [31:0] phase_sum = stepptr[31:0] + op_input[31:0];
-	wire  [9:0] phase_idx = phase_sum[25:16];
-	// Waveforms 6 and 7 are the constant 32767 and silence, so the ROM only
-	// holds 0..5; the address is forced in range and the constant picked after
-	// the read. The read itself is registered -- an asynchronous lookup sat
-	// between the two multiplies and was most of the 2.2 ns setup failure.
-	wire  [2:0] wave_sel = (p_waveform >= 3'd6) ? 3'd0 : p_waveform;
-	wire signed [15:0] wave_val =
-		(p_waveform == 3'd7) ? 16'sd0 :
-		(p_waveform == 3'd6) ? 16'sd32767 : $signed(wave_q);
-	// slot_gain, not env_gain: calculate_slot_volume() folds total level in
-	// before calculate_op() scales the waveform, and env_gain is only the
-	// envelope-times-LFO half of it. It is valid by S_FMOP, one state later.
-	wire signed [34:0] op_mul = wave_val * $signed({1'b0, slot_gain});
+	// MUL 0 means one half. The Fs divide happens on the full product, before
+	// the 32-bit truncation, which is the order MAME uses and the order the
+	// sweep checks.
+	wire [32:0] inc_u    = $unsigned(inc_r);
+	wire [36:0] inc_mul  = (p_multiple == 4'd0) ? {5'd0, inc_u[32:1]}
+	                                            : ({4'd0, inc_u} * {33'd0, p_multiple});
+	wire [36:0] inc_fsd  = p_is_pcm ? (inc_mul >> p_fs) : inc_mul;
+	wire [31:0] step_c   = inc_fsd[31:0];
 
-	// set_feedback(): ((result << 8) * feedback_level) / 16, taken from the
-	// operator result that has just been latched into op_out.
-	// net_fbk, not p_feedback: set_feedback() is always about operator 1, and
-	// the algorithms that take their feedback from operator 3 run it a step
-	// later, by which point p_feedback belongs to a different operator.
-	wire signed [31:0] fb_mul = ({{6{op_out[17]}}, op_out, 8'd0})
-	                          * $signed({1'b0, YMF_FBLVL[net_fbk]});
-	wire signed [31:0] fb_div = fb_mul + (fb_mul[31] ? 32'sd15 : 32'sd0);
-	wire signed [26:0] fb_new = fb_div[30:4];
+	// ---- operator ----------------------------------------------------------
+	// 10-bit phase, folded into the quarter sine; waves 4 and 5 run at twice
+	// the rate over the first half only. att = log-sin + 4*env, cut off at
+	// 4096, resolved through the shared exponential.
+	wire  [9:0] p10   = phase[31:22] + $unsigned(mod_in[9:0]);
+	wire  [7:0] idx_n = p10[7:0] ^ {8{p10[8]}};
+	wire  [7:0] idx_2 = {p10[6:0], 1'b0} ^ {8{p10[7]}};
+	wire        w45   = (p_waveform == 3'd4) || (p_waveform == 3'd5);
+	wire  [7:0] logsin_ra_c = w45 ? idx_2 : idx_n;
+	wire        op_neg_c = ((p_waveform == 3'd0) || (p_waveform == 3'd1)) ? p10[9] :
+	                       (p_waveform == 3'd4) ? p10[8] : 1'b0;
+	wire        op_mute_c = ((p_waveform == 3'd3) || w45) && p10[9];
+
+	wire [12:0] logsin_x = (p_waveform == 3'd1) ? {logsin_q, 1'b0} : {1'b0, logsin_q};
+	wire [13:0] att_c    = {1'b0, logsin_x} + {2'd0, env, 2'b00};
+	wire [12:0] exp_sh   = {exp_q, 2'b00};
+	wire [12:0] op_mag   = exp_sh >> att_hi[3:0];
+	wire signed [W_OUT-1:0] op_val =
+		(op_mute || att_hi[5] || att_hi[4]) ? {W_OUT{1'b0}}
+		: (op_neg ? -$signed({{(W_OUT-13){1'b0}}, op_mag})
+		          :  $signed({{(W_OUT-13){1'b0}}, op_mag}));
+
+	// ---- envelope multiply (PCM and the linear waveform) --------------------
+	// (v * exp[(env & 63) << 2]) >> (11 + (env >> 6)); 64 attenuation units are
+	// 6 dB, so the low six bits pick the mantissa and the top four the shift.
+	wire signed [W_OUT+11:0] em_mul = env_mul_in * $signed({1'b0, exp_q});
+	wire  [4:0] em_sh = 5'd11 + {1'b0, env[9:6]};
+	wire signed [W_OUT+11:0] em_shr = em_mul >>> em_sh;
+	wire signed [W_OUT-1:0]  em_val = em_shr[W_OUT-1:0];
+
+	// waveform 6: no phase dependence at all. A DC level of half scale plus the
+	// modulation input scaled by MUL, wrapped at 9 bits and stretched by 64 --
+	// a hi-hat carrier emits its own modulator, up to 2.5x the range of every
+	// other waveform. The PG keeps running underneath.
+	wire signed [26:0] lin_mm = (p_multiple == 4'd0) ? {{4{mod_in[22]}}, mod_in[22:0]} >>> 1
+	                                                 : mod_in * $signed({1'b0, p_multiple});
+	wire signed [W_OUT-1:0] lin_c = $signed({4'd0, 14'd8192})
+	                              + $signed({3'd0, lin_mm[8:0], 6'd0});
+
+	// ---- external waveform -------------------------------------------------
+	// Words are 8-bit (the upper byte of a 12-bit sample) or packed three
+	// bytes to two words. Byte 0 of a pair is word0 bits 11..4, byte 1 is
+	// word1 bits 3..0 in its high nibble and word0 bits 3..0 in its low, byte 2
+	// is word1 bits 11..4.
+	wire [23:0] pos3    = {1'b0, pcm_pos[22:1], 1'b0} + {2'b00, pcm_pos[22:1]};  // (pos>>1)*3
+	wire [22:0] tri_a   = p_start + pos3[22:0];
+	wire [22:0] base_c  = !p_bits12    ? (p_start + pcm_pos)
+	                    : !pcm_pos[0]  ? tri_a
+	                                   : (tri_a + 23'd1);
+	// how far past the base the last needed byte sits
+	wire  [1:0] span    = !p_bits12   ? 2'd1 : (!pcm_pos[0] ? 2'd2 : 2'd3);
+	wire        need_b  = ({1'b0, fetch_base[2:0]} + {2'b00, span}) > 4'd7;
+
+	wire [127:0] win = {line_b, line_a};
+	wire  [3:0] wo   = {1'b0, fetch_base[2:0]};
+	wire   [7:0] B0  = win[{wo,          3'b000} +: 8];
+	wire   [7:0] B1  = win[{(wo + 4'd1), 3'b000} +: 8];
+	wire   [7:0] B2  = win[{(wo + 4'd2), 3'b000} +: 8];
+	wire   [7:0] B3  = win[{(wo + 4'd3), 3'b000} +: 8];
+
+	wire [11:0] wordA_12 = pcm_pos[0] ? {B1, B0[7:4]} : {B0, B1[3:0]};
+	wire [11:0] wordB_12 = pcm_pos[0] ? {B2, B3[3:0]} : {B2, B1[7:4]};
+	wire signed [12:0] wordA = p_bits12 ? $signed({wordA_12[11], wordA_12})
+	                                    : $signed({B0[7], B0, 4'd0});
+	wire signed [12:0] wordB = p_bits12 ? $signed({wordB_12[11], wordB_12})
+	                                    : $signed({B1[7], B1, 4'd0});
+
+	wire  [8:0] frac8 = {1'b0, pcm_frac[15:8]};
+	wire signed [22:0] ip_a = wordA * $signed({1'b0, 9'd256 - frac8});
+	wire signed [22:0] ip_b = wordB * $signed({1'b0, frac8});
+	wire signed [23:0] ip_s = {ip_a[22], ip_a} + {ip_b[22], ip_b};
+	wire signed [13:0] pcm_c = ip_s[19:6];
+
+	// ---- loop ---------------------------------------------------------------
+	wire [39:0] adv      = {1'b0, pcm_pos, pcm_frac} + {8'd0, step_c};
+	wire [22:0] adv_pos  = adv[38:16];
+	wire        loop_ok  = (p_end > p_loop);
+	wire [22:0] loop_len = p_end - p_loop;
+
+	// ---- channel level ------------------------------------------------------
+	// x * (1 or 0.75) >> (L >> 1), and L >= 13 is silence. The old core's
+	// 16-entry linear attenuation table is gone with the linear gain domain.
+	/* verilator lint_off UNUSEDSIGNAL */
+	// t's top two bits exist only to carry the *3 before it is shifted back
+	// down, so nothing ever reads them.
+	function automatic signed [W_OUT-1:0] pan(input signed [W_OUT-1:0] v,
+	                                          input [3:0] lvl);
+		reg signed [W_OUT+1:0] t;
+		begin
+			// (v * 3) >> 2 is the 0.75 step; the shift is the coarse 6 dB one.
+			// Two extra bits carry the *3 before it is shifted back down.
+			t = (lvl[0] ? (($signed({{2{v[W_OUT-1]}}, v}) * 3) >>> 2)
+			            :   $signed({{2{v[W_OUT-1]}}, v})) >>> lvl[3:1];
+			pan = (lvl >= 4'd13) ? {W_OUT{1'b0}} : t[W_OUT-1:0];
+		end
+	endfunction
+	/* verilator lint_on UNUSEDSIGNAL */
+
+	wire signed [W_OUT-1:0] pan0 = pan(op_out, p_ch0);
+	wire signed [W_OUT-1:0] pan1 = pan(op_out, p_ch1);
+	wire signed [W_OUT-1:0] pan2 = pan(op_out, p_ch2);
+	wire signed [W_OUT-1:0] pan3 = pan(op_out, p_ch3);
+
+	// Attack multiplies the remaining headroom; every other phase adds.
+	//
+	// MAME writes this as `eg_att += ((~eg_att) * inc) >> 4` on a SIGNED
+	// int32, where ~att is -(att+1) and the shift floors toward -infinity --
+	// so the step is ceil((att+1) * inc / 16) subtracted, not
+	// floor((1023 - att) * inc / 16) added. A ten-bit complement is a
+	// different function and it stalls: at att = 0x3FF, ~att is 0, the step is
+	// zero, and the envelope never leaves full attenuation.
+	wire [10:0] att_p1   = {1'b0, eg_att} + 11'd1;      // 1 .. 1024
+	wire [14:0] att_prod = att_p1 * {11'd0, eg_add};    // max 1024 * 8
+	wire [14:0] att_ceil = att_prod + 15'd15;           // the ceiling of >> 4
+	wire signed [11:0] att_atk = $signed({2'b00, eg_att})
+	                           - $signed({1'b0, att_ceil[14:4]});
+	wire [10:0] att_dec  = {1'b0, eg_att} + {7'd0, eg_add};
+
+	// Key-on jumps straight to 0 dB when the attack rate is already maximal
+	// (table 2-6-8: rate 63 is 0.07 ms). The attenuation otherwise continues
+	// from wherever it was, which is the OPM convention.
+	wire [6:0] kon_rate = {1'b0, p_ar, 1'b0} + {2'd0, rks_q};
+	wire       kon_fast = (p_ar != 5'd0) && (kon_rate >= 7'd63);
+
+	wire signed [W_OUT-1:0] env_mul_in = p_is_pcm
+		? {{(W_OUT-14){pcm_out[13]}}, pcm_out}
+		: lin_c;
+
+	// Acc On: a running sum that saturates at the operator's own range, so any
+	// sustained tone rails into a full-level square that flips at the
+	// operator's zero crossings. Cleared at key-on and when the EG goes off.
+	wire signed [W_OUT:0] acc_sum = {{(W_OUT-14){acc[14]}}, acc} + {op_out[W_OUT-1], op_out};
+	wire signed [14:0] acc_sat = (acc_sum >  $signed({{(W_OUT-12){1'b0}}, 13'd8191}))
+	                                ?  15'sd8191
+	                           : (acc_sum < -$signed({{(W_OUT-13){1'b0}}, 14'd8192}))
+	                                ? -15'sd8192 : acc_sum[14:0];
 
 	// ------------------------------------------------------------------
 	// Sequencer
 	// ------------------------------------------------------------------
 	localparam [5:0] S_IDLE  = 6'd0,
-	                 S_LD0   = 6'd1,  S_LD1  = 6'd2,  S_LD2  = 6'd3,  S_LD3 = 6'd4,
-	                 S_KEY   = 6'd5,
-	                 S_GATE  = 6'd6,
-	                 S_LFO0  = 6'd7,  S_LFO1 = 6'd8,  S_LFO2 = 6'd9,
-	                 S_STEP0 = 6'd10, S_STEP1 = 6'd11, S_STEP2 = 6'd12,
-	                 S_LOOP  = 6'd13, S_LOOP2 = 6'd14, S_LOOP3 = 6'd15,
-	                 S_ADDR  = 6'd16,
-	                 S_FE0   = 6'd17, S_FE1  = 6'd18, S_FE2  = 6'd19,
-	                 S_SAMP  = 6'd20,
-	                 S_ENV   = 6'd21,
-	                 S_VOL0  = 6'd22, S_VOL1 = 6'd23, S_VOL2 = 6'd24,
-	                 S_VOL3  = 6'd25,
-	                 S_MIX   = 6'd26,
-	                 S_FMPH  = 6'd27, S_FMWT = 6'd28, S_FMOP = 6'd29, S_FMMIX = 6'd30,
-	                 S_STORE = 6'd31,
-	                 S_NEXT  = 6'd32,
-	                 S_OUT   = 6'd33,
-	                 S_EXT   = 6'd34;   // host wave-memory readback
+	                 S_LD0   = 6'd1,  S_LD1   = 6'd2,  S_LD2  = 6'd3,  S_LD3  = 6'd4,
+	                 S_KEY   = 6'd5,  S_KC    = 6'd6,
+	                 S_EGA   = 6'd7,  S_EGB   = 6'd8,
+	                 S_GATE  = 6'd9,  S_ENV   = 6'd10,
+	                 S_PM0   = 6'd11, S_PM1   = 6'd12,
+	                 S_PH0   = 6'd13, S_PH1   = 6'd14,
+	                 S_MOD   = 6'd15,
+	                 S_OPA   = 6'd16, S_OPB   = 6'd17, S_OPC  = 6'd18,
+	                 S_OPD   = 6'd19, S_OPE   = 6'd20,
+	                 S_W6    = 6'd21,
+	                 S_ADDR  = 6'd22, S_FEA0  = 6'd23, S_FEA1 = 6'd24,
+	                 S_FEB0  = 6'd25, S_FEB1  = 6'd26,
+	                 S_INTP  = 6'd27, S_EMUL  = 6'd28,
+	                 S_LOOP  = 6'd29, S_LOOP2 = 6'd30, S_LOOP3 = 6'd31,
+	                 S_ACC   = 6'd32, S_MIX   = 6'd33,
+	                 S_NEXT  = 6'd34, S_OUT   = 6'd35,
+	                 S_EXT   = 6'd36, S_CLR   = 6'd37, S_EGC = 6'd38;
 
 	reg [5:0] state;
+	reg [5:0] clr_cnt;
 	reg [5:0] ext_ret;    // where S_EXT resumes: the pass must not lose its place
+	reg [15:0] eg_cnt;
+	reg        eg_phase, eg_clk;
 
-	// MAME normalises every one of the chip's four outputs by 32768<<2, so a
-	// speaker's sample is its accumulator >> 2 whatever is routed to it.
-	//
-	// Mono sums the two accumulators BEFORE the shift, not after. Shifting
-	// each and adding would round each half toward -inf separately and lose up
-	// to one LSB against the old single-accumulator mono, which is the one
-	// thing this change must not do -- rdfts' sound is already measured.
-	wire signed [28:0] acc_sum = {acc_l[27], acc_l} + {acc_r[27], acc_r};
-
-	function signed [15:0] outclip(input signed [28:0] a);
-		outclip = (a >>> 2 >  29'sd32767) ?  16'sh7FFF :
-		          (a >>> 2 < -29'sd32768) ? -16'sh8000 :
-		          $signed(a[17:2]);
+	// One carrier at full level is +/-8192 against a full scale of 32768, so
+	// the accumulators are already at output scale. The old core's >>2 is gone
+	// with the linear gain domain.
+	// Wide enough for the mono sum: eight 24-bit accumulators, not four.
+	function automatic signed [15:0] outclip(input signed [26:0] a);
+		outclip = (a >  27'sd32767) ?  16'sh7FFF :
+		          (a < -27'sd32768) ? -16'sh8000 : a[15:0];
 	endfunction
 
-	wire signed [15:0] out_mono  = outclip(acc_sum);
-	wire signed [15:0] out_left  = outclip({acc_l[27], acc_l});
-	wire signed [15:0] out_right = outclip({acc_r[27], acc_r});
+	// Mono sums every channel MAME routes, which is now all eight -- see the
+	// note on `stereo` at the top. Stereo takes CH0 and CH1 and leaves the
+	// EXT pins unmixed, exactly as spi() routes them.
+	wire signed [26:0] acc_mono = {{3{acc_ch[0][23]}}, acc_ch[0]}
+	                            + {{3{acc_ch[1][23]}}, acc_ch[1]}
+	                            + {{3{acc_ch[2][23]}}, acc_ch[2]}
+	                            + {{3{acc_ch[3][23]}}, acc_ch[3]}
+	                            + {{3{acc_ch[4][23]}}, acc_ch[4]}
+	                            + {{3{acc_ch[5][23]}}, acc_ch[5]}
+	                            + {{3{acc_ch[6][23]}}, acc_ch[6]}
+	                            + {{3{acc_ch[7][23]}}, acc_ch[7]};
 
-	// The slot to prefetch: next step in bank order 0, 2, 1, 3.
-	wire [1:0] nstep  = step + 2'd1;
-	wire [1:0] nbank  = (nstep == 2'd0) ? 2'd0 : (nstep == 2'd1) ? 2'd2 :
-	                    (nstep == 2'd2) ? 2'd1 : 2'd3;
-	wire [3:0] ngroup = (step == 2'd3) ? (group + 4'd1) : group;
+	// The slot to prefetch: groups inside, banks outside.
+	wire [3:0] ngroup = (group == 4'd11) ? 4'd0 : (group + 4'd1);
+	wire [1:0] nbank  = (group == 4'd11) ? (bank + 2'd1) : bank;
 	wire [5:0] nslot  = {1'b0, nbank, 3'b000} + {2'b00, nbank, 2'b00} + {2'b00, ngroup};
+	wire       last_slot = (group == 4'd11) && (bank == 2'd3);
+
+	wire [19:0] tag_c = fetch_base[22:3];
+	wire        hit_a = line_va && (line_tag == tag_c);
+	wire        hit_b = line_vb && (line_tag == tag_c);
 
 	always @(posedge clk) begin
 		end_set <= 1'b0;
@@ -777,15 +1104,18 @@ module ymf271_synth
 		end
 		else if (tick_pend) begin
 			tick_pend  <= 1'b0;
+			bank       <= 2'd0;
 			group      <= 4'd0;
-			step       <= 2'd0;
-			acc_l      <= 28'sd0;
-			acc_r      <= 28'sd0;
+			for (i = 0; i < 8; i = i + 1) acc_ch[i] <= 24'sd0;
 			active_cnt <= 16'd0;
 			st_ra      <= 6'd0;
 			fb_ra      <= 6'd0;
 			cch_ra     <= 6'd0;
 			par_ra     <= 8'd0;
+			// The envelope runs at fs/2: one sample arms it, the next clocks it.
+			eg_clk     <= eg_phase;
+			eg_phase   <= ~eg_phase;
+			if (eg_phase) eg_cnt <= eg_cnt + 16'd1;
 			state      <= S_LD0;
 		end
 
@@ -795,304 +1125,347 @@ module ymf271_synth
 		S_LD1: begin
 			w0        <= par_q;
 			par_ra    <= {slot, 2'd2};
-			stepptr   <= st_q[95:56];
-			volume    <= st_q[55:29];
-			env_state <= st_q[28:27];
-			active    <= st_q[26];
-			lfo_phase <= st_q[25:0];
-			// The tag comes out of the RAM, the valid bit out of the register
-			// beside it: a flash write clears every bit of cch_vld at once, so
-			// a line cached before it can never be trusted again even though
+			phase     <= st_q[127:96];
+			pcm_pos   <= st_q[95:73];
+			pcm_frac  <= st_q[72:57];
+			eg_att    <= st_q[56:47];
+			eg_state  <= st_q[46:44];
+			lfo_cnt   <= st_q[43:24];
+			lfo_pos   <= st_q[23:17];
+			pcm_ended <= st_q[16];
+			acc       <= $signed(st_q[15:1]);
+			// The tag comes out of the RAM, the valid bits out of the registers
+			// beside it: a flash write clears every bit of cch_vld_a/b at once,
+			// so a line cached before it can never be trusted again even though
 			// its tag is still sitting in the RAM.
-			line_tv   <= {cch_tv_q[20] & cch_vld[slot], cch_tv_q[19:0]};
-			line_data <= cch_data_q;
+			line_tag  <= cch_tag_q;
+			line_va   <= cch_vld_a[slot];
+			line_vb   <= cch_vld_b[slot];
+			line_a    <= cch_data_q[63:0];
+			line_b    <= cch_data_q[127:64];
 			state     <= S_LD2;
 		end
-		S_LD2: begin w1 <= par_q; state <= S_LD3; end
+		S_LD2: begin w1 <= par_q; par_ra <= {slot, 2'd3}; state <= S_LD3; end
 		S_LD3: begin
-			w2 <= par_q;
-			if (net_start) begin
-				fb0 <= $signed(fb_q[53:27]);
-				fb1 <= $signed(fb_q[26:0]);
-			end
+			w2    <= par_q;
+			fb0   <= $signed(fb_q[2*W_OUT-1:W_OUT]);
+			fb1   <= $signed(fb_q[W_OUT-1:0]);
 			state <= S_KEY;
 		end
 
-		// ------------------------------------------------------------
-		// write_register() case 0: key on restarts the phase and the envelope
-		// from -60 dB, key off drops a sounding slot into release.
+		// Word 3 is FM register 0. The group's algorithm is latched here off
+		// its head slot -- bank 0, and bank 1 for the second pair of a sync-1
+		// group -- which the pass always reaches before any slot that reads it.
 		S_KEY: begin
+			w3 <= par_q;
+			if (bank == 2'd0) grp_alg[group]  <= p_alg;
+			if (bank == 2'd1) grp_alg2[group] <= p_alg;
+			state <= S_KC;
+		end
+
+		// Key on restarts the phase, the LFO and the sample pointer; key off
+		// drops a sounding slot into release. Every KON=1 write retriggers,
+		// edge or not -- P-47 Aces writes KON=1 onto already-keyed slots for
+		// note repeats, and edge-triggering drops those notes.
+		S_KC: begin
+			det_r <= det_q;
+			rks_r <= rks_q;
 			if (keyon_pend[slot]) begin
-				stepptr   <= 40'd0;
-				volume    <= 27'sd6225920;      // (255 - 160) << 16
-				env_state <= ENV_ATTACK;
-				active    <= 1'b1;
-				lfo_phase <= 26'd0;             // init_lfo
-				line_tv   <= 21'd0;             // the sample line moved too
+				eg_state  <= EG_ATTACK;
+				phase     <= 32'd0;
+				if (kon_fast) eg_att <= 10'd0;
+				lfo_cnt   <= 20'd0;
+				lfo_pos   <= 7'd0;
+				pcm_pos   <= 23'd0;
+				pcm_frac  <= 16'd0;
+				pcm_ended <= 1'b0;
+				acc       <= 15'sd0;
 			end
-			else if (keyoff_pend[slot] && active) env_state <= ENV_RELEASE;
+			else if (keyoff_pend[slot] && (eg_state != EG_OFF))
+				eg_state <= EG_RELEASE;
+			state <= S_EGA;
+		end
+
+		// Stage 1: the state transition and the rate, both downstream of eg_att.
+		S_EGA: begin
+			eg_state_pre_r <= eg_state_pre;
+			eg_rate_r      <= eg_rate;
+			eg_to_d1_r     <= eg_to_d1;
+			state          <= S_EGB;
+		end
+
+		// Stage 2: the hold test and the sub-step index, both downstream of the
+		// rate. The eg_inc read lands at the end of this cycle.
+		S_EGB: begin
+			eg_hold_r <= eg_hold;
+			eg_idx_r  <= eg_idx;
+			// The LFO advances every sample, whether or not the EG is clocked,
+			// and whether or not the slot is sounding.
+			if (lfo_on) begin
+				if (lfo_wrap) begin
+					lfo_cnt <= 20'd0;
+					lfo_pos <= lfo_pos + 7'd1;
+				end
+				else lfo_cnt <= lfo_cnt + 20'd1;
+			end
+			state <= S_EGC;
+		end
+
+		// Stage 3: apply the increment.
+		S_EGC: begin
+			if (eg_clk && (eg_state != EG_OFF)) begin
+				eg_state <= eg_state_pre_r;
+				if (eg_to_d1_r) eg_att <= 10'd0;
+				if (!eg_hold_r) begin
+					if (eg_state_pre_r == EG_ATTACK) begin
+						if (att_atk <= 12'sd0) begin
+							eg_att   <= 10'd0;
+							eg_state <= EG_DECAY1;
+						end
+						else eg_att <= att_atk[9:0];
+					end
+					else if (att_dec >= 11'd1023) begin
+						eg_att <= 10'd1023;
+						if (eg_state_pre_r == EG_RELEASE) eg_state <= EG_OFF;
+					end
+					else eg_att <= att_dec[9:0];
+				end
+			end
 			state <= S_GATE;
 		end
 
-		// MAME only reaches update_lfo() and calculate_step() from inside
-		// calculate_op()/update_pcm(), both of which return early on an idle
-		// slot, so the gate comes first and an idle slot costs eight cycles.
 		S_GATE: begin
-			tl_r <= YMF_TL[p_tl];
-			if (net_start) begin
-				net_alg    <= p_alg;
-				net_active <= active;
-				net_fbk    <= p_feedback;
+			if (eg_state == EG_OFF) begin
+				op_out <= {W_OUT{1'b0}};
+				acc    <= 15'sd0;
+				state  <= S_MIX;      // stores zeros, mixes nothing
 			end
-			// A network is gated by its own operator 1; a PCM voice by itself.
-			if (step_is_pcm ? active : (net_start ? active : net_active)) begin
+			else begin
 				active_cnt <= active_cnt + 16'd1;
-				state      <= S_LFO0;
+				state      <= S_ENV;
 			end
-			else state <= S_STORE;
 		end
 
-		// update_lfo(): advance the phase, then read both shapes with it.
-		S_LFO0: begin
-			lfo_phase <= lfo_next;
-			lfo_idx_r <= lfo_next[25:18];
-			state     <= S_LFO1;
-		end
-		S_LFO1: begin
-			plfo_w_r <= plfo_q;
-			alfo_r   <= alfo;
-			state    <= S_LFO2;
-		end
-		S_LFO2: begin
-			plfo_r <= plfo_c;
-			amul_r <= alfo_scaled;
-			state  <= S_STEP0;
+		S_ENV: begin
+			env    <= env_c;
+			exp_ra <= {env_c[5:0], 2'b00};    // env_mul's mantissa
+			state  <= S_PM0;
 		end
 
-		// calculate_step(), one operation a cycle: the multiply, the power of
-		// two shift, then the LFO pitch factor.
-		S_STEP0: begin
-			lfo_vol <= lfo_vol_c;
-			num_r   <= step_num;
-			state   <= S_STEP1;
-		end
-		S_STEP1: begin base_r <= step_base; state <= S_STEP2; end
-		S_STEP2: begin
-			step_r <= step_calc;
-			state  <= step_is_pcm ? S_LOOP : S_ENV;
+		S_PM0: begin pm_mul_r <= pm_t1;  state <= S_PM1; end
+		S_PM1: begin fnum_q7  <= fnum_c; state <= S_PH0; end
+		S_PH0: begin inc_r    <= $signed(inc_cl); state <= S_PH1; end
+		S_PH1: begin
+			step  <= step_c;
+			state <= p_is_pcm ? S_ADDR : S_MOD;
 		end
 
 		// ------------------------------------------------------------
-		// PCM: loop wrap, then the sample fetch. MAME retries the wrap twice
-		// more, because a step long enough to clear the whole loop can still
-		// land past the end after folding.
-		S_LOOP: begin
-			if (stepptr[39:16] > {1'b0, p_end}) begin
-				stepptr  <= stepptr - {p_end, 16'd0} + {p_loop, 16'd0};
-				end_set  <= 1'b1;
-				end_slot <= slot;
-				state    <= S_LOOP2;
-			end
-			else state <= S_ADDR;
+		// FM operator: modulation in, waveform out. Two DEPENDENT ROM reads --
+		// the exponential is addressed with the sum of the log-sin and the
+		// envelope -- so they cannot share a stage.
+		S_MOD: begin
+			mod_in <= mod_c;
+			state  <= p_silent ? S_ACC : (p_is_lin ? S_W6 : S_OPA);
+			if (p_silent) op_out <= {W_OUT{1'b0}};
 		end
+
+		S_OPA: begin
+			logsin_ra <= logsin_ra_c;
+			op_neg    <= op_neg_c;
+			op_mute   <= op_mute_c;
+			phase     <= phase + step;
+			state     <= S_OPB;
+		end
+		S_OPB: state <= S_OPC;                    // log-sin lands at the end
+		S_OPC: begin
+			att_hi <= att_c[13:8];
+			exp_ra <= att_c[7:0];
+			state  <= S_OPD;
+		end
+		S_OPD: state <= S_OPE;                    // exp lands at the end
+		S_OPE: begin op_out <= op_val; state <= S_ACC; end
+
+		// Waveform 6 does not read the phase at all, but the PG keeps running
+		// underneath it.
+		S_W6: begin
+			op_out <= em_val;
+			phase  <= phase + step;
+			state  <= S_ACC;
+		end
+
+		// ------------------------------------------------------------
+		// External waveform. Interpolation needs the word at the read position
+		// and the one after it, which is up to four consecutive bytes; line A
+		// is the tag's own and line B the one above, so any alignment is
+		// covered by at most two fetches.
+		S_ADDR: begin
+			fetch_base <= base_c;
+			state      <= S_FEA0;
+		end
+
+		S_FEA0: begin
+			if (hit_a) state <= S_FEB0;
+			else begin
+				sdr_addr <= SDR_PCM_BASE + {4'd0, fetch_base[20:3], 3'b000};
+				sdr_req  <= ~sdr_req;
+				state    <= S_FEA1;
+			end
+		end
+		S_FEA1: if (sdr_ack == sdr_req) begin
+			line_a   <= sdr_dout;
+			line_tag <= tag_c;
+			line_va  <= 1'b1;
+			line_vb  <= 1'b0;          // the pair moved; B is stale
+			state    <= S_FEB0;
+		end
+
+		S_FEB0: begin
+			if (!need_b || hit_b) state <= S_INTP;
+			else begin
+				sdr_addr <= SDR_PCM_BASE + {4'd0, fetch_base[20:3], 3'b000} + 26'd8;
+				sdr_req  <= ~sdr_req;
+				state    <= S_FEB1;
+			end
+		end
+		S_FEB1: if (sdr_ack == sdr_req) begin
+			line_b  <= sdr_dout;
+			line_vb <= 1'b1;
+			state   <= S_INTP;
+		end
+
+		S_INTP: begin pcm_out <= pcm_c; state <= S_EMUL; end
+		S_EMUL: begin op_out  <= em_val; state <= S_LOOP; end
+
+		// The output comes from the CURRENT position; only then does the
+		// pointer advance. Positions run over [0, End): reaching End wraps back
+		// by End-Loop, so a looped sample's period is exactly End-Loop words
+		// and word End is only ever read as End-1's interpolation partner.
+		S_LOOP: begin
+			pcm_frac <= adv[15:0];
+			if (adv_pos >= p_end) begin
+				// End is raised once per key-on, not once per pass. Drivers play
+				// one-shot samples as a short silent loop and free the channel
+				// from a copy of the status register; re-raising it would kill a
+				// note re-triggered between the copy and the free pass.
+				if (!pcm_ended) begin
+					pcm_ended <= 1'b1;
+					end_set   <= 1'b1;
+					end_slot  <= slot;
+				end
+				if (!loop_ok) begin
+					pcm_pos <= p_loop;
+					state   <= S_ACC;
+				end
+				else begin
+					pcm_pos <= adv_pos - loop_len;
+					state   <= S_LOOP2;
+				end
+			end
+			else begin
+				pcm_pos <= adv_pos;
+				state   <= S_ACC;
+			end
+		end
+		// A step long enough to clear the whole loop can still land past the
+		// end after one fold, so the subtraction repeats; three passes is more
+		// than any reachable step needs, and the last one gives up at Loop.
 		S_LOOP2: begin
-			if (stepptr[39:16] > {1'b0, p_end}) begin
-				stepptr <= {1'b0, p_loop, stepptr[15:0]};
+			if (pcm_pos >= p_end) begin
+				pcm_pos <= pcm_pos - loop_len;
 				state   <= S_LOOP3;
 			end
-			else state <= S_ADDR;
+			else state <= S_ACC;
 		end
 		S_LOOP3: begin
-			if (stepptr[39:16] > {1'b0, p_end}) stepptr <= {1'b0, p_end, stepptr[15:0]};
-			state <= S_ADDR;
-		end
-
-		S_ADDR: begin
-			fetch_second <= 1'b0;
-			fetch_addr <= p_bits12 ? (base12 + 23'd1) : addr8[22:0];
-			state      <= S_FE0;
-		end
-
-		S_FE0: begin
-			if (line_hit) state <= S_SAMP;
-			else begin
-				sdr_addr <= SDR_PCM_BASE + {4'd0, fetch_addr[20:3], 3'b000};
-				sdr_req  <= ~sdr_req;
-				state    <= S_FE1;
-			end
-		end
-		S_FE1: if (sdr_ack == sdr_req) begin
-			line_data <= sdr_dout;
-			line_tv   <= {1'b1, fetch_addr[22:3]};
-			state     <= S_FE2;
-		end
-		S_FE2: state <= S_SAMP;      // let line_hit / line_byte settle
-
-		// Host readback. Deliberately does not touch line_data / line_tv: that
-		// cache belongs to whichever slot is mid-note, and evicting it here
-		// would cost that slot a refetch for a transfer the synthesis path
-		// never asked for.
-		S_EXT: if (sdr_ack == sdr_req) begin
-			ext_data <= sdr_dout[{ext_addr[2:0], 3'b000} +: 8];
-			ext_ack  <= ext_req;
-			state    <= ext_ret;
-		end
-
-		S_SAMP: begin
-			if (!p_bits12) begin
-				sample <= {line_byte, 8'h00};
-				state  <= S_ENV;
-			end
-			else if (!fetch_second) begin
-				byte_lo      <= line_byte;
-				fetch_second <= 1'b1;
-				fetch_addr   <= stepptr[16] ? (base12 + 23'd2) : base12;
-				state        <= S_FE0;
-			end
-			else begin
-				sample <= stepptr[16] ? {line_byte, byte_lo[3:0], 4'h0}
-				                      : {line_byte, byte_lo[7:4], 4'h0};
-				state  <= S_ENV;
-			end
+			if (pcm_pos >= p_end) pcm_pos <= p_loop;
+			state <= S_ACC;
 		end
 
 		// ------------------------------------------------------------
-		// Shared: envelope, then the volume chain.
-		S_ENV: begin
-			case (env_state)
-				ENV_ATTACK:
-					if (v_att >= 28'sd16711680) begin
-						volume    <= 27'sd16711680;
-						env_state <= ENV_DECAY1;
-					end
-					else volume <= v_att[26:0];
-
-				ENV_DECAY1:
-					if (v_d1 <= 28'sd0) begin
-						volume <= 27'sd0;
-						active <= 1'b0;
-					end
-					else begin
-						volume <= v_d1[26:0];
-						if (v_d1[26:16] <= {3'd0, decay_level}) env_state <= ENV_DECAY2;
-					end
-
-				ENV_DECAY2:
-					if (v_d2 <= 28'sd0) begin
-						volume <= 27'sd0;
-						active <= 1'b0;
-					end
-					else volume <= v_d2[26:0];
-
-				ENV_RELEASE:
-					if (v_rel <= 28'sd0) begin
-						volume <= 27'sd0;
-						active <= 1'b0;
-					end
-					else volume <= v_rel[26:0];
-			endcase
-			state <= S_VOL0;
-		end
-
-		S_VOL0: begin env_raw  <= YMF_ENV_VOL[8'd255 - vol8]; state <= S_VOL1; end
-		S_VOL1: begin env_gain <= gain_lfo[32:16];            state <= S_VOL2; end
-		S_VOL2: begin
-			slot_gain <= gain_tl[33:16];
-			// An operator folds the envelope into its output and needs no
-			// channel clamp, so it skips the rest of the PCM chain.
-			state <= step_is_pcm ? S_VOL3 : S_FMPH;
-		end
-		S_VOL3: begin
-			// Each channel is clamped at 65536 individually before it is summed
-			// (update_pcm's four `if (chN_vol > 65536)`), so the clamp has to
-			// stay per channel here even when two of them land in one speaker.
-			cvsum_l <= {2'd0, chclip(g0)}
-			         + (stereo ? 20'd0 : {2'd0, chclip(g2)});
-			cvsum_r <= {2'd0, chclip(g1)}
-			         + (stereo ? 20'd0 : {2'd0, chclip(g3)});
+		S_ACC: begin
+			if (p_accon) begin
+				acc    <= acc_sat;
+				op_out <= {{(W_OUT-15){acc_sat[14]}}, acc_sat};
+			end
 			state <= S_MIX;
 		end
 
+		// Mix, publish the output, write the feedback history and store the
+		// slot's state -- all independent, so one cycle.
 		S_MIX: begin
-			acc_l   <= acc_l + {{7{mix_pcm_l[36]}}, mix_pcm_l[36:16]};
-			acc_r   <= acc_r + {{7{mix_pcm_r[36]}}, mix_pcm_r[36:16]};
-			stepptr <= stepptr + {8'd0, step_r};
-			state   <= S_STORE;
-		end
+			out_reg[slot] <= op_out;
 
-		// ------------------------------------------------------------
-		// FM operator: phase modulation in, waveform out.
-		// The phase index, the waveform lookup and the output multiply were one
-		// chain; they are three cycles now.
-		S_FMPH: begin wave_ra <= {wave_sel, phase_idx}; state <= S_FMWT; end
-		S_FMWT: state <= S_FMOP;
-
-		S_FMOP: begin
-			op_out  <= op_mul[33:16];
-			stepptr <= stepptr + {8'd0, step_r};
-			if (is_op1) fb0 <= fb1;         // set_feedback's rolling average
-			state   <= S_FMMIX;
-		end
-
-		S_FMMIX: begin
-			case (step)
-				2'd0: r1 <= op_out;
-				2'd1: r3 <= op_out;
-				// In sync 1 step 2 opens the second pair, so its result is
-				// that pair's r1 rather than the 4-op network's r2.
-				2'd2: if (sync == 2'd1) r1 <= op_out; else r2 <= op_out;
-				default: ;
-			endcase
-			// set_feedback() runs on operator 1's own result, or on operator
-			// 3's, depending on the algorithm.
-			if ((is_op1 && !fb_from_r3) || (!is_op1 && net_last && fb_from_r3))
-				fb1 <= fb_new;
-			if (mix_this_op) begin
-				acc_l <= acc_l + {{5{mix_fm_l[38]}}, mix_fm_l[38:16]};
-				acc_r <= acc_r + {{5{mix_fm_r[38]}}, mix_fm_r[38:16]};
+			if (is_carrier) begin
+				acc_ch[0] <= acc_ch[0] + {{6{pan0[W_OUT-1]}}, pan0};
+				acc_ch[1] <= acc_ch[1] + {{6{pan1[W_OUT-1]}}, pan1};
+				acc_ch[2] <= acc_ch[2] + {{6{pan2[W_OUT-1]}}, pan2};
+				acc_ch[3] <= acc_ch[3] + {{6{pan3[W_OUT-1]}}, pan3};
+				// EXT1 = CH4/5, EXT2 = CH6/7. EN enables them and EXT Out is a
+				// bitmask of which they reach, at full level -- there is no
+				// attenuation register on these pins.
+				if (p_exten) begin
+					if (p_extout[0]) acc_ch[4] <= acc_ch[4] + {{6{op_out[W_OUT-1]}}, op_out};
+					if (p_extout[1]) acc_ch[5] <= acc_ch[5] + {{6{op_out[W_OUT-1]}}, op_out};
+					if (p_extout[2]) acc_ch[6] <= acc_ch[6] + {{6{op_out[W_OUT-1]}}, op_out};
+					if (p_extout[3]) acc_ch[7] <= acc_ch[7] + {{6{op_out[W_OUT-1]}}, op_out};
+				end
 			end
-			state <= S_STORE;
-		end
 
-		// ------------------------------------------------------------
-		S_STORE: begin
-			st_wa       <= slot;
-			st_wd       <= {stepptr, volume, env_state, active, lfo_phase};
-			st_we       <= 1'b1;
-			cch_wa       <= slot;
-			cch_tv_wd    <= line_tv;
-			cch_data_wd  <= line_data;
-			cch_we       <= 1'b1;
-			cch_vld[slot] <= line_tv[20];
-			// Feedback goes back one step after it was read, by which point
-			// both set_feedback() opportunities have passed.
-			if (net_last && (sync != 2'd3)) begin
-				fb_wa <= fb_slot;
-				fb_wd <= {fb0, fb1};
+			// The feedback history belongs to the network's head; the slot that
+			// writes it is the head itself, or S3 for the loop algorithms.
+			//
+			// A slot in EG_OFF writes nothing: MAME's `continue` skips the
+			// history update along with the output, so a released operator
+			// leaves the head's loop holding its last real samples rather than
+			// pushing zeros through it.
+			// The head shifts its own pair; a separate source only hands over
+			// its output. A slot in EG_OFF hands over nothing: MAME's
+			// `continue` skips the history update along with the output.
+			if (is_fbhead && (eg_state != EG_OFF)) begin
+				fb_wa <= slot;
+				fb_wd <= {$unsigned(op_out), $unsigned(fb_h0)};
 				fb_we <= 1'b1;
 			end
+			if (is_fbsrc && !is_fbhead && (eg_state != EG_OFF))
+				fb_pend[fb_pidx] <= op_out;
+
+			st_wa <= slot;
+			st_wd <= {phase, pcm_pos, pcm_frac, eg_att, eg_state, lfo_cnt,
+			          lfo_pos, pcm_ended, $unsigned(acc), 1'b0};
+			st_we <= 1'b1;
+
+			cch_wa      <= slot;
+			cch_tag_wd  <= line_tag;
+			cch_data_wd <= {line_b, line_a};
+			cch_we      <= 1'b1;
+			cch_vld_a[slot] <= line_va;
+			cch_vld_b[slot] <= line_vb;
+
 			state <= S_NEXT;
 		end
 
 		// A slot boundary is the other safe place to serve the host: no sample
-		// fetch is outstanding and the line cache is not mid-use. Servicing
-		// only from S_IDLE was not enough -- under polyphony the pass occupies
-		// most of a sample period, while a Z80 `in` is about 88 clk_sys cycles,
-		// so back-to-back reads outran the refill and returned a stale latch.
-		// Here the host gets an opening every slot, ~20-27 cycles.
+		// fetch is outstanding and the line pair is not mid-use. Servicing only
+		// from S_IDLE was not enough -- under polyphony the pass occupies most
+		// of a sample period, while a Z80 `in` is about 88 clk_sys cycles, so
+		// back-to-back reads outran the refill and returned a stale latch.
+		// Here the host gets an opening every slot, ~24 cycles.
 		S_NEXT: begin
 			keyon_pend[slot]  <= 1'b0;
 			keyoff_pend[slot] <= 1'b0;
-			// Sample memory changed since the last slot: flip the generation,
-			// which misses every cached line at once, and drop the live one
-			// with it. Safe here and nowhere cheaper -- this is the same point
-			// the host read is served from, chosen for the same reason.
+			// Sample memory changed since the last slot: drop every cached line
+			// at once, and the live pair with it. Safe here and nowhere cheaper
+			// -- this is the same point the host read is served from, chosen for
+			// the same reason.
 			if (mem_dirty != dirty_ack) begin
 				dirty_ack <= mem_dirty;
-				cch_vld   <= 48'd0;
-				line_tv   <= 21'd0;
+				cch_vld_a <= 48'd0;
+				cch_vld_b <= 48'd0;
+				line_va   <= 1'b0;
+				line_vb   <= 1'b0;
 			end
-			if ((group == 4'd11) && (step == 2'd3)) begin
+			if (last_slot) begin
 				if (ext_req != ext_ack) begin
 					sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
 					sdr_req  <= ~sdr_req;
@@ -1102,7 +1475,7 @@ module ymf271_synth
 				else state <= S_OUT;
 			end
 			else begin
-				step   <= nstep;
+				bank   <= nbank;
 				group  <= ngroup;
 				st_ra  <= nslot;
 				fb_ra  <= nslot;
@@ -1118,9 +1491,39 @@ module ymf271_synth
 			end
 		end
 
+		// Host readback. Deliberately does not touch line_a / line_b / line_tag:
+		// that pair belongs to whichever slot is mid-note, and evicting it here
+		// would cost that slot a refetch for a transfer the synthesis path
+		// never asked for.
+		S_EXT: if (sdr_ack == sdr_req) begin
+			ext_data <= sdr_dout[{ext_addr[2:0], 3'b000} +: 8];
+			ext_ack  <= ext_req;
+			state    <= ext_ret;
+		end
+
+		// Reset silences the chip, which means walking the slot RAM: a RAM
+		// cannot be cleared in a cycle, and leaving it alone would carry every
+		// sounding note across a reset. MAME's device_reset() puts all 48 slots
+		// in EG_OFF, and a core that did not would come out of reset playing
+		// whatever it was playing when it went in.
+		S_CLR: begin
+			st_wa  <= clr_cnt;
+			st_wd  <= ST_INIT;
+			st_we  <= 1'b1;
+			out_reg[clr_cnt] <= {W_OUT{1'b0}};
+			fb_wa  <= clr_cnt;
+			fb_wd  <= {(2*W_OUT){1'b0}};
+			fb_we  <= 1'b1;
+			if (clr_cnt < 6'd24) fb_pend[clr_cnt[4:0]] <= {W_OUT{1'b0}};
+			if (clr_cnt == 6'd47) state <= S_IDLE;
+			else clr_cnt <= clr_cnt + 6'd1;
+		end
+
 		S_OUT: begin
-			audio_l    <= stereo ? out_left  : out_mono;
-			audio_r    <= stereo ? out_right : out_mono;
+			audio_l    <= stereo ? outclip({{3{acc_ch[0][23]}}, acc_ch[0]})
+			                     : outclip(acc_mono);
+			audio_r    <= stereo ? outclip({{3{acc_ch[1][23]}}, acc_ch[1]})
+			                     : outclip(acc_mono);
 			dbg_active <= active_cnt;
 			state      <= S_IDLE;
 		end
@@ -1141,41 +1544,54 @@ module ymf271_synth
 		if (key_on)  keyon_pend[key_slot]  <= 1'b1;
 		if (key_off) keyoff_pend[key_slot] <= 1'b1;
 
+		// The feedback history lands in fb_mem through its own write port; the
+		// slot outputs and the hand-off file are flops, so they are written
+		// here. Items 96..119 of the section are the hand-off file.
+		if (ss_fb_commit) out_reg[ss_fb_slot] <= $signed(ssbus_fb.data[31:14]);
+		if (ss_fb_acc && ssbus_fb.write && (ss_fb_idx >= 32'd96))
+			fb_pend[ss_fb_idx[4:0]] <= $signed(ssbus_fb.data[W_OUT-1:0]);
+
 		if (reset) begin
-			state       <= S_IDLE;
+			state       <= S_CLR;
+			clr_cnt     <= 6'd0;
 			sdr_req     <= 1'b0;
 			ext_ack     <= 1'b0;
 			ext_data    <= 8'd0;
 			tick_pend   <= 1'b0;
 			audio_l     <= 16'd0;
 			audio_r     <= 16'd0;
-			acc_l       <= 28'sd0;
-			acc_r       <= 28'sd0;
+			for (i = 0; i < 8; i = i + 1) acc_ch[i] <= 24'sd0;
 			keyon_pend  <= 48'd0;
 			keyoff_pend <= 48'd0;
 			dbg_overrun <= 16'd0;
 			dbg_active  <= 16'd0;
 			active_cnt  <= 16'd0;
+			bank        <= 2'd0;
 			group       <= 4'd0;
-			step        <= 2'd0;
 			end_set     <= 1'b0;
 			st_we       <= 1'b0;
 			fb_we       <= 1'b0;
 			cch_we      <= 1'b0;
-			cch_vld     <= 48'd0;
+			cch_vld_a   <= 48'd0;
+			cch_vld_b   <= 48'd0;
 			dirty_ack   <= 1'b0;
-			line_tv     <= 21'd0;
+			line_va     <= 1'b0;
+			line_vb     <= 1'b0;
+			eg_cnt      <= 16'd0;
+			eg_phase    <= 1'b0;
+			eg_clk      <= 1'b0;
 		end
 	end
 
 	// Fields one path or the other does not use, and the low halves of products
-	// the >>16 scaling deliberately discards.
+	// the scaling deliberately discards.
 	/* verilator lint_off UNUSEDSIGNAL */
-	wire _unused = &{1'b0, w0, w1, w2, step_nsh, d1_mul, gain_tl, gain_lfo,
-	                 mix_pcm_l, mix_pcm_r, mix_fm_l, mix_fm_r,
-	                 acc_sum, addr8, idx3, step_mul, alfo_scaled,
-	                 op_mul, fb_mul, fb_div, fb_sum, phase_sum, mod_in, op_input, fb_avg,
-	                 plfo_q, plfo_base, plfo_addr, alfo, amul_r,
+	wire _unused = &{1'b0, w0, w1, w2, w3, pm_t1, pm_t2, mod_mul, in_sum,
+	                 inc_fm, inc_pcm, inc_dt, inc_mul, inc_fsd, pcm_num,
+	                 em_mul, lin_mm, ip_a, ip_b, ip_s, acc_sum, att_prod,
+	                 att_atk, att_dec, att_ceil, adv, pos3, fm_nsh, exp_sh, op_mag,
+	                 logsin_x, att_c, kc_ext, lfo_per, eg_mask, env_sum,
+	                 eg_cnt_sh, pcm_shr, em_shr, lp_m32, lp_m96, alg_b, B3,
 	                 // ext_addr is the chip's full 23-bit space; the sample
 	                 // region is 2 MB, so [20:0] addresses all of it -- both
 	                 // flash chips included, since chip 1 is just bit 20 -- and
@@ -1184,12 +1600,18 @@ module ymf271_synth
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	initial begin
-		for (i = 0; i <  48; i = i + 1) begin
-			st_mem[i]   = 96'd0;
-			fb_mem[i]   = 54'd0;
-			cch_tv[i]   = 21'd0;
-			cch_data[i] = 64'd0;
+		for (i = 0; i < 48; i = i + 1) begin
+			st_mem[i]   = ST_INIT;
+			cch_tag[i]  = 20'd0;
+			cch_data[i] = 128'd0;
+			out_reg[i]  = {W_OUT{1'b0}};
+			fb_mem[i]   = {(2*W_OUT){1'b0}};
 		end
+		for (i = 0; i < 12; i = i + 1) begin
+			grp_alg[i]  = 4'd0;
+			grp_alg2[i] = 4'd0;
+		end
+		for (i = 0; i < 24; i = i + 1) fb_pend[i] = {W_OUT{1'b0}};
 	end
 
 endmodule
