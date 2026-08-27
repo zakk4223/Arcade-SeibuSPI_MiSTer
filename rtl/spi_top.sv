@@ -630,9 +630,18 @@ module spi_top
 	wire        sndfifo_full;
 	wire [15:0] snd_audio_l, snd_audio_r;
 
+	// The sound board stops for BOTH pauses: the board-wide savestate one, and
+	// the Pause button. `freeze` leaves the video engines running so the frozen
+	// frame stays on screen (see the comment above ss_pause), but there is no
+	// equivalent reason to leave the music playing -- it just runs on into a
+	// song the 386 is no longer driving. Stopping the board rather than muting
+	// the output is what makes it resume on the note it left off.
+	//
+	// Both are clk_sys signals and spi_sound is a clk_sys client, so this needs
+	// no synchroniser; `freeze` gets one only where it crosses into clk_cpu.
 	spi_sound sound
 	(
-		.pause      (ss_pause),
+		.pause      (ss_pause | freeze),
 		.ssbus_z80    (ssb[SSIDX_Z80]),
 		.ssbus_z80ram (ssb[SSIDX_Z80_RAM]),
 		.ssbus_fifo   (ssb[SSIDX_SND_FIFO]),
@@ -746,10 +755,11 @@ module spi_top
 	// bit-identical. No vblank was lost in the window -- it is the raster phase,
 	// not the interrupt count.
 	//
-	// This is deliberately NOT wired to `freeze`. That is the Pause button, and
-	// STATUS.md documents its behaviour as stopping the 386 alone so a frozen
-	// frame stays on screen to be studied -- which is the opposite of what a
-	// save state wants and a useful thing to keep.
+	// This is NOT the same signal as `freeze`. The Pause button stops the 386
+	// and the sound board but deliberately leaves the video engines running, so
+	// the frozen frame stays on screen to be studied. A save state needs the
+	// raster stopped too, which is the opposite -- so the two stay separate,
+	// and only the sound board takes both (see spi_sound's .pause).
 	wire        ss_pause;      // driven by spi_ss, below
 	assign ss_dbg_esp_scratch = ss_esp_scratch;
 	wire        ss_ram_own, ss_ram_we;

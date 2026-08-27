@@ -405,11 +405,13 @@ Savestates on the keyboard are `F1`-`F4` to load and `Alt`+`F1`-`F4` to save.
 
 **Pause** is bit 11 and not button 3, because four of the seven sets are MAME's
 `spi_3button` and use button 3 as a game input. It toggles: press to freeze, press
-again to resume. Only the 386 stops — the video engines keep running, so the frozen
-frame stays on screen and can be studied or captured at leisure, which also makes
-it the tool to reach for on a rendering fault. The music carries on, since the Z80
-and the YMF271 are not gated; what you hear is whatever loop the Z80 was in when
-the 386 stopped feeding it.
+again to resume. The 386 and the sound board stop; the video engines keep running,
+so the frozen frame stays on screen and can be studied or captured at leisure,
+which also makes it the tool to reach for on a rendering fault. Audio goes silent
+— the Z80's clock enable and the YMF271's sample tick are both held, and the
+output is muted to zero rather than left holding its last sample, so there is no
+DC offset for the length of the pause. The chip keeps its state, so a note resumes
+where it left off.
 
 **Savestate (SS)** is bit 12, and it is the savestate UI's modifier button, not an
 action on its own: hold it and press Left/Right to pick a slot, Down to save, Up to
