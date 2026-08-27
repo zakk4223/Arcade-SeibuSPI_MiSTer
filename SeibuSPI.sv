@@ -737,10 +737,14 @@ wire [25:0] ldr_addr;
 // that replaced that was once shared with the vital signs panel, which REPLACED
 // the picture with a telemetry screen and so could not show a frozen frame at all.
 //
-// The music keeps playing, deliberately-untouched rather than deliberately-kept:
-// the Z80 and the YMF271 are on clk_sys and nothing here gates them. The 386
-// stops feeding the sound FIFO, so what carries on is whatever the Z80's current
-// loop plays.
+// The sound board stops too: `freeze` reaches spi_sound's `pause`, which holds
+// the Z80's clock enable and the YMF271's 44.1 kHz tick, and the audio output is
+// muted to zero below rather than left holding its last sample. The video
+// engines are still NOT gated -- that is what keeps the frozen frame on screen.
+//
+// It used to leave the music running, on the grounds that nothing here gated
+// the Z80 or the YMF271 and the 386 stopped feeding the sound FIFO anyway. What
+// actually carried on was whatever loop the Z80 was in, forever.
 // ---------------------------------------------------------------------------
 wire pause_btn = joystick_p1[11] | joystick_p2[11];
 reg  pause_btn_d, freeze_tgl;
@@ -1393,8 +1397,14 @@ spi_top spi_top
 	.audio_r      (audio_r)
 );
 
-assign AUDIO_L = audio_l;
-assign AUDIO_R = audio_r;
+// Silence while paused. Gating the sound board (spi_top's spi_sound.pause)
+// already stops the music, but it leaves audio_l/r holding whatever sample the
+// engine last produced -- an arbitrary DC level, up to a quarter of full scale,
+// held for as long as the pause lasts. That is a thump on the way in, a DC
+// offset on the line, and a thump on the way out. Zero is the right thing to
+// hold. The board keeps its state either way, so the note resumes where it was.
+assign AUDIO_L = freeze ? 16'd0 : audio_l;
+assign AUDIO_R = freeze ? 16'd0 : audio_r;
 
 ////////////////////////////  VIDEO  /////////////////////////////
 

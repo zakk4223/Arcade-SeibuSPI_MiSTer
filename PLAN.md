@@ -4807,155 +4807,191 @@ changing a DIP would restart the game.
 
 ### 14.5 Divergences, from MAME and from the datasheet
 
-The engine is a port of `ymf271.cpp`, so by default it inherits MAME's reading
-of the chip. Yamaha's own documents are in `~/Downloads/OPX`: `YMF271.pdf` is
-the 26-page Japanese catalog datasheet (pinout, mode-select table, bank layout,
-PCM overview) and `ymf271_trans.pdf` is a translation of the 78-page
-application manual, which is the one with the register bit maps and every
-numeric table. The four `Ce*.jpg` files are the algorithm diagrams, which
-appear in neither PDF.
+**The engine is a port of MAME's OPX core** -- the rewrite in `03761e46766`
+plus its wave-6 follow-up `783e8a2efc2`, not the MAME-derived core that came
+before it. Yamaha's own documents are in `~/Downloads/OPX`: `YMF271.pdf` is the
+26-page Japanese catalog datasheet (pinout, mode-select table, bank layout, PCM
+overview) and `ymf271_trans.pdf` is a translation of the 78-page application
+manual, which is the one with the register bit maps and every numeric table.
+The four `Ce*.jpg` files are the algorithm diagrams, which appear in neither PDF.
 
-The whole engine was checked against those documents. What came out clean, and
-does not need rechecking: the bus and bank decode, every function- and
-PCM-register bit field, the status-flag scramble, the sync-mode mirroring, both
-pitch formulas against the manual's own worked examples (C4 lands on 261.60 Hz
-against a quoted 261.626, and the external-waveform cent table matches to four
-places), all 28 algorithms read off the diagrams, and the RKS, AR/DC, LFO
-frequency, PMS, feedback/modulation, channel attenuation, waveform and keycode
-tables.
+**Most of what this section used to list as unimplementable is now implemented.**
+The old core worked in linear gains and left detune, Acc On, EN/EXT Out, PCM
+interpolation and the external-waveform key code undone, and the standing
+argument for each was *"it cannot be verified -- the engine is checked by
+predicting its output from MAME's own formulas, so a change MAME does not make
+has nothing to score against."* The OPX rewrite makes all of them, so that
+argument expired and they were all done. What follows is the state after that.
 
-**Two places where the datasheet wins and MAME is wrong.** Both are fixed here,
-so the output deliberately differs from MAME:
+#### What the rewrite changed underneath
 
-* **AMS tremolo depth.** `alfo` peaks at 65536, so the constant in
-  `lfo_volume = 65536 - ((alfo * K) >> 16)` is the swing and `65536-K` is the
-  gain at full modulation. MAME passes the gains themselves — 65536/10^(dB/20)
-  for Table 2-6-3's 5.90625 / 11.8125 / 23.625 dB — which lands the gain at
-  `65536-K` instead and yields 6.1 / 2.6 / 0.6 dB. The ordering inverts: ams=3,
-  the deepest setting in the book, comes out the shallowest by a factor of ten.
-  `YMF_ALFO_K` holds the complements, and `tb_ymf271` now asserts the ams=1
-  depth is 5.90625 dB rather than comparing against a constant.
-* **LFO phase resolution.** `init_lfo` keeps 8 fractional bits below the 8-bit
-  shape index and truncates, which makes the step zero for the 161 slowest of
-  the 256 settings — everything below 0.673 Hz, where Table 2-6-2 goes down to
-  0.00066 Hz. A stalled LFO is not a silent one: phase 0 is the peak of all
-  three amplitude shapes, so those slots take a fixed attenuation instead of a
-  sweep. `lfo_phase` is 26 bits here, 18 fractional, which is the least that
-  keeps setting 0 above zero; every setting now oscillates. Cost is ten bits a
-  slot in `st_mem`, which stays a 48 x 96 inferred RAM at 0 ALUTs.
+Every DSP block changed numeric domain. The operator is an OPM log-sin lookup
+summed with the envelope and resolved through one exponential; the envelope
+counts UPWARD in attenuation units at fs/2; AM is additive in that same domain
+and PM is a deviation on the F-number. `rtl/ymf271_tables.vh` went from 1,718
+lines to 193, because the 6 x 1024 x 16-bit waveform ROM and the 7 x 257 pitch
+LFO table are replaced by two 256-entry tables -- about 130 Kbit of block RAM
+returned, on a fit that was at 539/553 RAM blocks.
 
-**One place where MAME wins and the datasheet is wrong.** Register 0x10 is the
-*high* 8 bits of the 10-bit timer A period and 0x11 the low 2, which is what
-`ymf271.sv` does. Section 2-6 3) says the opposite in as many words — 10H is
-"Timer-A1", 11H is "Timer-A2, the top 2 bits", and tA = 384·(1024 − (A2·256 +
-A1)). MAME contradicts it on purpose, with a comment saying the split matches
-the other Yamaha FM chips and not Yamaha's own book. Since the timer is the
-sound driver's heartbeat on this board, follow MAME.
+**The trap is the evaluation order, not the arithmetic.** Slot n = 12*bank +
+group and the chip evaluates n = 0..47 flat -- all twelve S1 slots, then all S2,
+then S3, then S4. The old core walked one group at a time in bank order 0,2,1,3,
+so a 4-op network resolved S1->S3->S2->S4 inside one group and every modulator
+was same-frame. It is not: in sync 0 the chain is S1->S3->S2->S4 but S2 (n=g+12)
+is reached BEFORE its modulator S3 (n=g+24), so S2 reads S3's output from the
+previous sample. MAME says so in as many words. `ymf271_synth.sv` keeps every
+slot's output in `out_reg` across samples and evaluates banks in order, and
+`tb_ymf271`'s algorithm model does the same -- a model that resolved each
+network within one sample would agree with an RTL that made the same mistake,
+and neither would match the chip.
 
-**Known gaps, in rough order of how likely they are to be heard:**
+#### Two divergences retired
 
-* ~~**The wave memory data read register is not implemented.**~~ **Done.**
-  Utility registers 0x14-0x17 set the 23-bit address and direction bit, and
-  offset 2 returns data. It is a read-AHEAD, exactly as MAME's `read()` is: a
-  read returns the latched byte and only then pre-increments and refetches, so
-  the first read after setting an address is a dummy and the stream starts at
-  address+1. That is the same convention the cartridge flash updater relies on
-  when it programs from 0x7FFFFF (section 0). With the direction bit clear the
-  port reads 0xFF. Writes through 0x17 advance the address and go nowhere,
-  which is what a mask ROM does; on SXX2C that path becomes the flash write.
-  `tb_ymf271`'s `ext memory read` check reads 32 bytes and requires the sample
-  ROM verbatim.
+Both of the places where 14.5 used to say "the datasheet wins and MAME is wrong"
+are gone, because the OPX core does not make either mistake:
 
-  Confirmed on hardware 2026-08-09: attract renders with heavy sprite traffic,
-  Z80 executing, FIFO reads and YMF writes climbing, 17-23 slots sounding and
-  **0 PCM overruns** across every sample -- which is the reading that matters,
-  since serving the port at slot boundaries adds an SDRAM round trip to the
-  pass. Timing met on every clock (clk_ram +0.841, clk_sys +0.882, TNS 0.000)
-  at SEED 5; three of the five seeds swept closed, and the failing endpoints
-  were the usual `sdram|dq_reg -> chN_dout`, none on the new address mux.
+* **AMS tremolo depth.** The old core scaled a gain table and the constants had
+  to be complemented to stop ams=3, the deepest setting in the book, coming out
+  the shallowest by a factor of ten. AM is additive now: ams 1/2/3 add 63/126/252
+  units of 0.09375 dB, and 63 units IS 5.90625 dB, Table 2-6-3's figure, with no
+  correction. `tb_ymf271` asserts that to five decimal places.
+* **LFO phase resolution.** The old core's `init_lfo` truncated its phase
+  increment to zero for the 161 slowest of the 256 settings. The LFO is a clock
+  DIVIDER now -- one of 128 steps every K samples -- so every setting oscillates
+  by construction and there is nothing to widen.
 
-  **The service point is the interesting part.** The refill is an SDRAM read on
-  ch5, which the synthesis pass owns, so it is served at slot boundaries
-  (`S_NEXT`) and when idle. Serving it only when idle -- the obvious first
-  choice -- lost bytes: under polyphony the pass fills most of a sample period
-  while a Z80 `in` is about 88 clk_sys cycles, so back-to-back reads outran the
-  refill and got a stale latch. 8 of 32 bytes wrong, and it would have been
-  worse on hardware than in the testbench, since the reflash plays music while
-  it reads. A slot boundary comes round every 20-27 cycles, which the host
-  cannot outrun.
-* **PCM samples are not interpolated.** Block description 13 says external
-  waveform data is interpolated before the envelope multiply. Nearest-sample
-  here, as in MAME, so samples played away from their native rate alias more
-  than they should.
-* **The external-waveform keycode ignores Src B and Src Note.** Section 2-9(b)
-  makes the key code the sum of the sample's base key code and the played
-  block/F-number; only the second term is computed, so RKS envelope key-scaling
-  on a PCM voice is that of octave 0 regardless of how the sample was recorded.
-  MAME has the line present but commented out with "not sure". Note the sum can
-  exceed 31 and would need a clamp.
-* **Register fields decoded nowhere.** Detune (3xH d6:4, Table 2-6-5), A/L
-  alternate loop (PCM 2xH d7), Acc On (BxH d7), EN and EXT Out (0xH d7 and
-  d6:3, which route a voice to CH4-7 and so *out* of the DO1/DO2 mix), PFM
-  (utility 0xH d7, FM with an external PCM operator source), and the status
-  Busy flag, which always reads 0. Every one of these is also on MAME's own
-  TODO list at the top of `ymf271.cpp`.
-* ~~**Sync 3 forces PCM on any group.**~~ **Closed.** `step_is_pcm` is now
-  gated on the slot actually carrying waveform 7, so a sync-3 group outside
-  groups 0, 4 and 8 sounds its operators instead of playing from sample
-  address 0 (its start/end/loop bytes are never written). Still latent -- the
-  games never do it, which is why MAME can afford to `fatalerror` on the same
-  case in `update_pcm()` rather than handle it.
-* **`fns` / `block` update immediately.** MAME's `write_register` case 0x9 does
-  `fns = (fns_hi << 8 & 0x0f00) | data` and `block = fns_hi >> 4`, so writing
-  register 0xA alone changes nothing until register 9 is written — which is the
-  datasheet's rule too (2-6 AxH: write Block and F-Number2 before F-Number1).
-  Here both fields are decoded straight out of the stored bytes, so a lone 0xA
-  write takes effect at once. Drivers write A then 9 together, which gives the
-  same result except for the one sample where a tick falls between them.
-* **Timer A and B free-run once started.** Register 13H's Load bit is
-  documented as start on 1, stop on 0; nothing stops them here. That is MAME's
-  behaviour too: the "stop" branch in `ymf271_write_timer` case 0x13 is only
-  reachable when the enable bit is already set, so it can never be taken.
-* **Channel levels D, E and F are 1/65536, not silence.** The book says ∞
-  attenuation, MAME uses 96.1 dB. Inaudible, listed so nobody re-derives it.
+**One place where MAME still wins and the datasheet is wrong.** Register 0x10 is
+the *high* 8 bits of the 10-bit timer A period and 0x11 the low 2. Section 2-6
+3) says the opposite in as many words. The rewrite kept MAME's reading, with a
+comment saying `seibuspi` shows it behaves like the other Yamaha chips. Since
+the timer is the sound driver's heartbeat on this board, follow MAME. Do not
+"fix".
 
-**Everything still on that list is left there on purpose, not forgotten.** The
-two that were worth closing are closed; each of the rest fails at least one of
-the two tests that matter here.
+#### Closed by the port
 
-*It cannot be verified.* The engine is checked by predicting its output from
-MAME's own formulas, so a change MAME does not make has nothing to score
-against. The external-waveform keycode is the clearest case: MAME has the Src B
-/ Src Note term written out and commented `not sure`, so implementing it means
-guessing, and the sum can exceed 31 and would need a clamp nobody can calibrate.
-Detune, A/L alternate loop, Acc On, EN / EXT Out, PFM and the Busy flag are the
-same -- all on MAME's own TODO, none reachable from a driver we can run.
+* **PCM samples are interpolated.** Linearly, on the word at the read position
+  and the one after it. That needs up to four consecutive bytes, so the line
+  cache holds TWO consecutive 8-byte lines under one tag rather than one line:
+  four bytes fit inside one line for five of the eight alignments and cross into
+  the next for the other three, and tagging the pair covers every alignment with
+  at most two fetches. It does not break the test that proves the PCM path
+  end-to-end -- a linear interpolation of a linear ramp is that ramp, and at a
+  step of exactly one word per sample the fraction stays zero anyway.
+* **Detune**, from the OPM DT1 table, applied before the multiplier.
+* **Acc On**, as a saturating 14-bit running sum per slot: any sustained tone
+  rails it into a full-level square that flips at the operator's zero crossings.
+* **EN / EXT Out**, routing a voice to CH4-7. See the open question below.
+* **The external-waveform key code** now adds Src B and Src Note (2-9(b)), and
+  the block is signed with the octave clamped at 0 for negative blocks.
+* **`fns` / `block` defer until register 9 is written.** Register A only
+  latches; 9 commits both halves. This was rejected before for costing a shadow
+  byte per slot when RAM blocks were the binding constraint, and the tables
+  freed enough to make that objection moot. `fnum_latch` in `ymf271.sv` is that
+  byte, and a write to register 9 now takes two parameter stores per slot.
+  Note this made `tb_ymf271` honest: it had been writing register 9 before A,
+  which the manual forbids and which the chip ignores, and the tests only passed
+  because a previous test had left the right value in the latch.
+* **End flags are raised once per key-on and cleared by reading the status
+  register.** Drivers play one-shot samples as a short silent loop and free the
+  channel from a copy of the status register, so a sticky flag kills a note
+  re-triggered between the copy and the free pass. The bit SCRAMBLE did not
+  change: what this core already did -- status 0 d3..d6 for slots 0/12/24/36,
+  status 1 d0..d3 for 4/16/28/40 and d4..d7 for 8/20/32/44 -- is exactly what
+  the rewrite spells out, which is a second reading of the manual agreeing with
+  the one 14.5 recorded.
+* **Reset silences the chip.** `device_reset()` puts all 48 slots in EG_OFF at
+  full attenuation, and the engine now walks the slot RAM to do the same. It did
+  not before -- a RAM cannot be cleared in a cycle and nothing had forced the
+  issue -- so voices carried across a reset. That was not theoretical: it is why
+  `tb_ymf271` used to need its tests in a particular order, and it is what made
+  eleven of the 24 algorithm networks disagree with the model until it was found.
 
-*It costs more than it returns.* PCM interpolation is real per the datasheet and
-we do not do it, but it adds a second sample fetch and a multiply to a 27-cycle
-slot budget, and it would break the one test that proves the PCM path
-end-to-end -- that a ramp in the ROM comes back verbatim. `fns`/`block`
-deferring until register 9 is written would need a shadow byte per slot, and RAM
-blocks are the tightest resource in the design at 86%; the divergence it removes
-is one sample in a race the drivers do not run.
+#### Still open
 
-*It is the heartbeat.* Timers A and B free-run once started because MAME's stop
-branch is unreachable. The datasheet says the Load bit should stop them, and
-that is probably a MAME bug -- but this chip's timer IS the sound driver's
-sequencer on this board (14), and 14.5 already resolved the one other
-timer-versus-datasheet conflict in MAME's favour for exactly that reason.
-Diverging here on an untestable reading risks silence, and buys nothing
-observable.
+* **PFM** (utility 0xH d7, FM with an external PCM operator source) and the
+  **PCM alternate loop** (A/L, PCM 2xH d7, probably bidirectional). Both are
+  decoded nowhere here and unimplemented upstream; no game we run uses either.
+* **The status Busy flag** always reads 0, as it did.
+* **Waveforms 1-6 are upstream guesswork.** The rewrite's own header says they
+  are unverified against hardware recordings. So is the assumption that the key
+  code's octave clamps at 0 for negative blocks rather than wrapping the way the
+  manual's formula would. We inherit both.
+* **EXT1/EXT2 on the mono boards is untested.** `sxx2e`/`sxx2f`/`sxx2g` use
+  `add_route(ALL_OUTPUTS, "mono")`, and ALL_OUTPUTS now spans eight outputs
+  rather than four, so MAME sums the EXT pins into the speaker. On real hardware
+  those are external pins and whether the board returns them is not established.
+  The engine follows MAME. Nothing ships on that path: every MRA in `mra/` sets
+  the mod byte's bit 0, so all six sets are cartridge boards and run stereo,
+  where `spi()` routes outputs 0 and 1 only and the EXT channels reach nothing.
+* **Timer A and B free-run once started.** Register 13H's Load bit is documented
+  as start on 1, stop on 0; nothing stops them here, and the rewrite kept the
+  same behaviour with a comment saying so. This chip's timer IS the sound
+  driver's sequencer on this board (14), so diverging on an untestable reading
+  risks silence and buys nothing observable.
+* **Channel levels D, E and F are silence now, not 1/65536.** The OPX `pan()`
+  mutes outright at level 13 and above. The old core's gain table had 96.1 dB
+  there, which left one LSB of residue on a negative sample; that is gone, and
+  `tb_ymf271` requires an exact zero.
 
-So the audio is finished in the sense that matters: everything reachable from
-the hardware we emulate is implemented and checked, and what is left is either
-MAME's uncertainty or a deliberate trade recorded above.
+#### The fit, and the two things it caught
 
-Also noted for later: `sxx2g` boards clock the YMF271 at 16.384 MHz rather than
-16.9344, which moves the sample rate to 42666.7 Hz and scales every envelope
-and LFO table by 16.9344/16.384. `rdfts` is `sxx2e` and runs at the documented
-clock, so the hardcoded 44100 and MAME's `clock_correction` of 1.0 are right
-for the only supported set.
+The port closes: **setup +0.114 ns worst, hold +0.169 ns worst, TNS 0.000 on
+every clock**, 94% ALMs, **526/553 RAM blocks** (down from 539 -- the waveform
+ROM and the pitch LFO table are gone), 3,839,265 block memory bits, 52% DSP. The
+critical path is back to `spi_ds2404`, where it was before; nothing in the sound
+chip is on the worst-25 list.
+
+It did not close on the first two attempts, and both failures were mine:
+
+* **-2.557 ns, every one of the 25 worst paths `eg_att -> eg_att`.** The
+  envelope update was one stage: a D1L compare picks the state, the state picks
+  the rate, the rate picks the shift and the sub-step, and the increment feeds
+  back into eg_att -- a compare, a mux, an add, a clamp, a subtract, a 16-bit
+  barrel shift, a wide OR and a multiply in series. Quartus was duplicating the
+  register trying to save it. It is three stages now (`S_EGA` state and rate,
+  `S_EGB` hold and index, `S_EGC` arithmetic), which is the same rule the old
+  core's FM path learned at 2.2 ns and this file's header states.
+* **Then it would not fit at all: 4,212 LABs wanted against 4,191.** The
+  feedback history was two 48-entry x 18-bit FLOP arrays, on the reasoning that
+  a RAM cannot serve the source's read-modify-write on the head's entry. The
+  reasoning was wrong. The source only has to hand the head one word, and the
+  head can shift its own pair -- see the comment above `fb_mem`. That put the
+  history back in RAM and cut the hand-off to 24 entries, because the only
+  algorithms whose source is not the head (the S3 loops, and the sync-1 tail)
+  all have their head at bank 0 or 1. 1,728 flip-flops, two 48-way decoders and
+  two 48-to-1 muxes became a RAM and 432 flip-flops.
+
+Measured end to end on `rdft2` against a MAME built at the rewrite: **spectrum r
+0.9999**, envelope r 0.9869, per-second median 0.9998, silence agreement 99.8%,
+and the only register whose value sequence differs is the timer/IRQ acknowledge
+0x13 -- which the two machines reorder because they service Timer A and Timer B
+at slightly different offsets, without changing a note. The time bases agree to
+0.05%.
+
+Note the reference run needs a pre-flashed `-nvram_directory` or MAME spends its
+first ~420 emulated seconds running the sample reflash while the core, booting
+from a derived image, does not: the first attempt compared a core that was
+playing music against a MAME that was still programming flash, and read as a
+30x difference in time base. `tools/build_soundflash.py` writes that image and
+MAME's nvram is it split at 1 MB (STATUS.md, "Testing against MAME"). With it,
+MAME runs the same passage at 3245% instead of 694%.
+
+#### The savestate
+
+`st_mem` is 128 bits a slot now and every field in it changed meaning -- the
+envelope is an attenuation, not a volume. The stream carries no version field,
+and the section item counts did not change, so **a state written by the previous
+core loads as noise rather than being rejected**. There is no mechanism here to
+catch that.
+
+Worse, and pre-existing: **`SSIDX_YMF_REGS` does not restore at all.** Its write
+path acks and discards (`ymf271.sv`, the `ss_rg_acc` block), so the register
+file, the group sync modes, both timers, the end flags and the external-memory
+port are captured on save and thrown away on load. `fnum_latch` is new state in
+that same section and inherits the same gap. Fixing it means driving those
+registers from the restore path, and several of them -- `tick_acc` in
+particular -- live in other always blocks, so it is not a one-line change. It is
+unrelated to the OPX port and was left alone.
 
 ### 14.6 What to check first when this is put on hardware
 

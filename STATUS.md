@@ -14,8 +14,12 @@ scenes and eleven rfjet ones. **All seven sets boot and run on real hardware**,
 and **the sound path is matched against MAME in simulation on three sets** —
 `rdfts`, `rdft` and `rdft2` — where the sound CPU writes the YMF271 the same
 values in the same order MAME's does, on every register that carries a note, for
-as long as the attract sequence stays in step (48 s on `rdft`). Long-term
-spectrum r is 0.9996 or better on all three. `PLAN.md` 51. The hardware
+as long as the attract sequence stays in step (48 s on `rdft`). Since the OPX
+port, `rdft2` re-measured against a MAME built at the rewrite scores **spectrum
+r 0.9999** — the synthesis — with envelope r 0.9869 and per-second median
+0.9998, and the only register whose value sequence differs at all is the
+timer/IRQ acknowledge. `rdfts` and `rdft` have not been re-measured against the
+new core. `PLAN.md` 51. The hardware
 ROM checker verifies all four regions on the board (`ok bits 1111` on rdfts;
 its expected sums are still rdfts-only, so other sets are checked by comparing
 the sums it reports against the reference image instead). See `PLAN.md` for the
@@ -33,15 +37,27 @@ full design notes and the task list.
 | Mixer, including the exact 127/129 alpha blend | **bit-exact against MAME** |
 | Z80 + banked ROM + command FIFO + coin latch | running on hardware |
 | YMF271 registers, timers, IRQ | verified in simulation, running on hardware |
-| YMF271 PCM synthesis (12 voices) | verified in simulation, music plays on hardware |
-| YMF271 FM (4-op, 2x2-op, 3-op, all 16 algorithms, feedback) | verified in simulation |
+| YMF271 PCM synthesis (12 voices), interpolated | verified in simulation, music plays on hardware |
+| YMF271 FM (4-op, 2x2-op, 3-op, all 28 networks, feedback, detune, Acc On) | verified in simulation |
 | YMF271 LFO (pitch and amplitude) | verified in simulation |
-| Sound output as a whole | **matched against MAME on hardware** (`rdft2`, `rfjet`) and, since the tv80 swap, **in simulation** — same YMF271 register writes, spectrum r ≥ 0.9996 (`make -C sim run-sound`) |
+| Sound output as a whole | **matched against MAME on hardware** (`rdft2`, `rfjet`) and **in simulation** — same YMF271 register writes on every register that carries a note, spectrum r 0.9999 on `rdft2` against the OPX rewrite (`make -C sim run-sound`) |
 
-Known gaps, all in the sound chip and none of them silent-failure risks: PCM
-interpolation and a handful of register fields nothing writes. `PLAN.md`
-section 14.5 lists them in order of how likely they are to be heard, and says
-for each one why it is deliberate rather than pending.
+**The sound chip is a port of MAME's OPX core** — the rewrite in `03761e46766`
+(Aug 2026), which replaced the MAME-derived core this engine was originally
+built from. Every DSP block changed numeric domain: the operator is an OPM
+log-sin/exp pair, the envelope counts in attenuation units at fs/2, and the LFO
+is a clock divider. Detune, Acc On, EN/EXT Out, PCM interpolation and the
+external-waveform key code came with it — `PLAN.md` 14.5 used to list all five
+as unimplementable because MAME did not implement them either.
+
+Known gaps, all in the sound chip and none of them silent-failure risks: PFM,
+the PCM alternate loop, and the status Busy flag — none of them reachable from
+any game we run. Two things we inherit rather than verify: waveforms 1–6 are
+upstream guesswork (the rewrite's own header says so), and the EXT1/EXT2 routing
+on the mono boards follows MAME without independent confirmation — no shipping
+MRA uses that path. `PLAN.md` 14.5 has the detail, including a savestate caveat:
+states written by the previous core load as noise, and the `SSIDX_YMF_REGS`
+section has never restored at all.
 
 **The cartridge sets are stereo and the single board is mono, the way MAME has
 them.** MAME routes YMF output 0 to the left speaker and 1 to the right for
@@ -389,11 +405,13 @@ Savestates on the keyboard are `F1`-`F4` to load and `Alt`+`F1`-`F4` to save.
 
 **Pause** is bit 11 and not button 3, because four of the seven sets are MAME's
 `spi_3button` and use button 3 as a game input. It toggles: press to freeze, press
-again to resume. Only the 386 stops — the video engines keep running, so the frozen
-frame stays on screen and can be studied or captured at leisure, which also makes
-it the tool to reach for on a rendering fault. The music carries on, since the Z80
-and the YMF271 are not gated; what you hear is whatever loop the Z80 was in when
-the 386 stopped feeding it.
+again to resume. The 386 and the sound board stop; the video engines keep running,
+so the frozen frame stays on screen and can be studied or captured at leisure,
+which also makes it the tool to reach for on a rendering fault. Audio goes silent
+— the Z80's clock enable and the YMF271's sample tick are both held, and the
+output is muted to zero rather than left holding its last sample, so there is no
+DC offset for the length of the pause. The chip keeps its state, so a note resumes
+where it left off.
 
 **Savestate (SS)** is bit 12, and it is the savestate UI's modifier button, not an
 action on its own: hold it and press Left/Right to pick a slot, Down to save, Up to
