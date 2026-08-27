@@ -88,6 +88,16 @@ module tb_boot_top
 	output            p_z80_ce,
 	output            p_z80_stall,
 
+	// OSD refresh mode: 0 Normal, 1 = 50 Hz, 2 = 57 Hz, 3 = 60 Hz. The whole
+	// point of driving it here is to run the game at a SHORTENED field and
+	// check the vblank handler still fits.
+	input       [1:0] i_video_mode,
+
+	// Driven controls (idle = all ones, everything is active low)
+	input      [15:0] i_inputs,
+	input       [7:0] i_system,
+	input       [7:0] i_coin,
+
 	// probes
 	output            p_io_wr,
 	output      [8:0] p_io_addr,
@@ -101,6 +111,13 @@ module tb_boot_top
 	output            p_dma_palette,
 	output            p_dma_sprite,
 	output            p_vbl_rise,
+	// Flip-screen chain, for bring-up: the raw decode, the synchronised copy
+	// and the per-frame latch.
+	output            p_flip_raw,
+	output            p_flip_lat,
+	output            p_flip_layers,
+	output      [8:0] p_src_row,
+	output      [8:0] p_render_line,
 
 	output     [29:0] p_cpu_addr,
 	output            p_cpu_valid,
@@ -248,9 +265,7 @@ module tb_boot_top
 		// Normal video timing and centred sync. This bench checks the 386 boots
 		// and the vblank IRQ arrives on phase, both of which are defined
 		// against the hardware raster.
-		.video_mode   (2'd0),
-		.hoffset      (4'd0),
-		.voffset      (4'd0),
+		.video_mode   (i_video_mode),
 
 		.ss_save         (ss_save),
 		.ss_load         (ss_load),
@@ -357,9 +372,12 @@ module tb_boot_top
 		.sdr_pcm_req  (sdr_pcm_req),
 		.sdr_pcm_ack  (sdr_pcm_ack),
 
-		.inputs       (16'hFFFF),
-		.system       (8'hFF),
-		.coin         (8'hFF),
+		// Driven from the C++ side so the sim can get past attract into
+		// gameplay: the vblank ISR is longest when the game is actually
+		// running, and that is what decides the VTOTAL question.
+		.inputs       (i_inputs),
+		.system       (i_system),
+		.coin         (i_coin),
 
 		.ce_pix       (v_ce_pix),
 		.red          (v_r),
@@ -392,6 +410,11 @@ module tb_boot_top
 	assign p_dma_palette = dut.dma_palette;
 	assign p_dma_sprite  = dut.dma_sprite;
 	assign p_vbl_rise    = dut.vbl_rise;
+	assign p_flip_raw    = dut.flip_screen;
+	assign p_flip_lat    = dut.flip_lat;
+	assign p_flip_layers = dut.layers.flip;
+	assign p_src_row     = dut.layers.src_row;
+	assign p_render_line = dut.layers.render_line;
 
 	assign p_cpu_addr    = dut.cpu.cpu_addr;
 	assign p_cpu_valid   = dut.cpu.cpu_valid;

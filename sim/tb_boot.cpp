@@ -187,6 +187,27 @@ int main(int argc, char **argv)
     uint32_t first_fetch = 0xFFFFFFFF;
     uint64_t n_dma_tm = 0, n_dma_pal = 0, n_dma_spr = 0, n_vbl = 0;
     std::vector<int> dma_tm_lines;
+
+    // --- vblank ISR extent (PLAN: is the VTOTAL route safe?) --------------
+    // The renderer draws line 0 during the LAST blanked line, so every VRAM
+    // update the vblank handler makes has to be finished before it. These
+    // record, per frame, the last scanline on which the DMA engine was still
+    // busy and the last on which the 386 wrote an I/O register (scroll and
+    // layer control land there and the renderer latches them per line).
+    std::vector<int> isr_dma_end, isr_io_end;
+    int f_dma_end = -1, f_io_end = -1;
+    bool in_vbl = false;
+    // Every I/O write later than line 247, with the frame it fell in and
+    // the register it hit: the DMA never goes past 244, so these late
+    // writes are the only thing that can push the safe VTOTAL up.
+    struct LateIO { int frame, line; uint32_t addr; };
+    std::vector<LateIO> late_io;
+    std::map<uint32_t,int> late_by_addr;      // unbounded tally, all frames
+    int late_video = 0, late_video_max = -1;  // writes to VIDEO registers only
+    int late_video_pb = 0, late_video_pb_max = -1;   // ... past boot only
+    std::vector<int> over_frames;             // frames whose worst line > 247
+    struct LateIO2 { int frame, line; uint32_t addr; };
+    std::vector<LateIO2> vid_pb;
     std::map<uint32_t, std::pair<uint64_t, uint32_t>> io_writes; // addr -> (count, last value)
     uint64_t io_wr_total = 0;
 
@@ -238,6 +259,33 @@ int main(int argc, char **argv)
 
     uint8_t io_wr_d = 0, tm_d = 0, pal_d = 0, spr_d = 0, vbl_d = 0;
 
+    // --- scripted controls: coin, then start, then hold fire ---------------
+    // The vblank handler is longest during gameplay, so attract-only numbers
+    // understate it. Schedule is in frames (vblank count) and comes from the
+    // environment so it can be retuned without a rebuild.
+    //   SPI_COIN_F / SPI_START_F : frame at which each is pressed (10 frames)
+    //   SPI_FIRE_F               : frame from which P1 button 1 is held
+    auto envi = [](const char *k, int d) {
+        const char *v = getenv(k); return v ? atoi(v) : d; };
+    const int coin_f  = envi("SPI_COIN_F",  0);
+    const int start_f = envi("SPI_START_F", 0);
+    const int fire_f  = envi("SPI_FIRE_F",  0);
+    // INPUTS bit 15 is the flip-screen DIP and it passes through UNINVERTED
+    // while 14:0 are active low (PLAN.md 14.4), so idle is 0x7FFF, not 0xFFFF.
+    // SPI_FLIP=1 raises it.
+    uint64_t n_inp_rd = 0, n_flip_raw = 0, n_flip_lat = 0, n_flip_lay = 0;
+    int max_src_row = -1;
+    uint64_t n_row_differs = 0;
+    const int flip_dip = envi("SPI_FLIP", 0);
+    const uint16_t idle_inputs = flip_dip ? 0xFFFF : 0x7FFF;
+    dut->i_inputs = idle_inputs; dut->i_system = 0xFF; dut->i_coin = 0xFF;
+    dut->i_video_mode = envi("SPI_VIDEO_MODE", 0);
+    // Blanking starts at VBSTART 240 in every mode; only the field length moves.
+    static const int VT[4] = { 296, 320, 280, 266 };
+    const int vt_mode = VT[dut->i_video_mode & 3];
+    printf("video mode %d: field %d lines, %d blanked, deadline line %d\n",
+           dut->i_video_mode, vt_mode, vt_mode - 240, vt_mode - 2);
+
     // Frame grabber. The core emits 320x240 inside its blanking.
     const int FW = 320, FH = 240;
     std::vector<uint8_t> fb(FW * FH * 3, 0);
@@ -248,6 +296,8 @@ int main(int argc, char **argv)
     // Keep the busiest frame seen, not the last one: the attract sequence has
     // long black stretches and the final frame is usually one of them.
     std::vector<uint8_t> best_fb(FW * FH * 3, 0);
+    std::vector<uint8_t> pinned_fb(FW * FH * 3, 0);
+    const int pin_frame = envi("SPI_PPM_FRAME", 0);
     uint64_t best_nonblack = 0;
     const uint64_t dump_every =
         getenv("SLOP_DUMP_EVERY") ? strtoull(getenv("SLOP_DUMP_EVERY"), nullptr, 0) : 0;
@@ -527,6 +577,18 @@ int main(int argc, char **argv)
             else if (z80dl_delay == 0) { bus_owner = &cdl;  bus_busy = burst_len(); z80dl_delay = 1; }
         }
 
+        // Controls, refreshed every step (cheap) from the frame counter.
+        {
+            int f = (int)n_vbl;
+            bool coin  = coin_f  && f >= coin_f  && f < coin_f  + 10;
+            bool start = start_f && f >= start_f && f < start_f + 10;
+            bool fire  = fire_f  && f >= fire_f;
+            dut->i_coin   = coin  ? 0xFE : 0xFF;   // bit0 = coin1, active low
+            dut->i_system = start ? 0xFE : 0xFF;   // bit0 = start1, active low
+            // P1 button 1 is bit 4 of the 15-bit button field (see SeibuSPI.sv)
+            dut->i_inputs = fire ? (uint16_t)(idle_inputs & ~0x0010) : idle_inputs;
+        }
+
         dut->eval();
 
         // The sound board runs on clk_sys, so both of its probes are read on
@@ -558,6 +620,13 @@ int main(int argc, char **argv)
                 frames++;
                 nonblack_last = nonblack;
                 if (nonblack > best_nonblack) { best_nonblack = nonblack; best_fb = fb; }
+                // SPI_PPM_FRAME pins the dump to a specific frame NUMBER rather
+                // than to the busiest one. Comparing two runs by "busiest frame"
+                // is unsound the moment the runs differ at all -- they can and do
+                // select different frames -- which makes any A/B of the picture
+                // meaningless. Anything comparing frames across runs must use
+                // this, not best_fb.
+                if (pin_frame && frames == (uint64_t)pin_frame) pinned_fb = fb;
                 // Dump a frame every DUMP_EVERY so the whole attract sequence can
                 // be walked; the interesting failures are late (demo gameplay),
                 // not on the early static screens.
@@ -1014,6 +1083,14 @@ int main(int argc, char **argv)
                 io_rd_trail[io_rd_n++] = dut->p_io_raddr * 4;
                 io_rd_trail[io_rd_n++] = dut->p_io_rdata;
             }
+            // Does the game ever READ the input port that carries the
+            // flip-screen switch? 0x604 is INPUTS (spi_io.sv), bit 15 the DIP.
+            if (dut->p_io_rd && !io_rd_d && dut->p_io_raddr * 4 == 0x604) n_inp_rd++;
+            if (dut->p_flip_raw) n_flip_raw++;
+            if (dut->p_flip_lat) n_flip_lat++;
+            if (dut->p_flip_layers) n_flip_lay++;
+            if (dut->p_src_row > max_src_row) max_src_row = dut->p_src_row;
+            if (dut->p_src_row != dut->p_render_line) n_row_differs++;
             io_rd_d = dut->p_io_rd;
 
             if (dut->p_io_wr && !io_wr_d) {
@@ -1048,6 +1125,48 @@ int main(int argc, char **argv)
                 // >= 240 means it arrived during vertical blanking.
                 if (dma_tm_lines.size() < 64) dma_tm_lines.push_back(dut->p_vcnt);
             }
+            // vblank ISR extent: track the last blanked line on which the
+            // DMA was busy / the CPU wrote I/O, and latch it at vbl_rise.
+            if (dut->p_vcnt >= 240) {
+                in_vbl = true;
+                if (dut->p_dma_busy) f_dma_end = dut->p_vcnt;
+                if (dut->p_io_wr) {
+                    f_io_end = dut->p_vcnt;
+                    if (dut->p_vcnt > 247) {
+                        uint32_t a = dut->p_io_addr;
+                        late_by_addr[a]++;
+                        // Video-affecting registers: CRTC/layer 0x400-0x44C
+                        // (io_addr 0x100-0x113), DMA 0x480-0x498 (0x120-0x126),
+                        // scroll 0x600-0x60C (0x180-0x183). Everything else is
+                        // the Z80 link (0x1A0-0x1A3) or the DS2404 (0x1B4-0x1B7).
+                        bool vid = (a <= 0x126) || (a >= 0x180 && a <= 0x183);
+                        if (vid) { late_video++;
+                                   if ((int)dut->p_vcnt > late_video_max)
+                                       late_video_max = dut->p_vcnt;
+                                   // The only number that decides the VTOTAL
+                                   // question: a video-register write past the
+                                   // deadline, in a frame past boot.
+                                   if ((int)n_vbl >= envi("SPI_STATS_FROM", 60)) {
+                                       late_video_pb++;
+                                       if ((int)dut->p_vcnt > late_video_pb_max)
+                                           late_video_pb_max = dut->p_vcnt;
+                                       if (vid_pb.size() < 64)
+                                           vid_pb.push_back({(int)n_vbl,
+                                               (int)dut->p_vcnt, a});
+                                   } }
+                        if (late_io.size() < 512)
+                            late_io.push_back({(int)n_vbl, (int)dut->p_vcnt, a});
+                    }
+                }
+            } else if (in_vbl) {
+                in_vbl = false;
+                if (isr_dma_end.size() < 4096) {
+                    isr_dma_end.push_back(f_dma_end);
+                    isr_io_end.push_back(f_io_end);
+                }
+                f_dma_end = -1; f_io_end = -1;
+            }
+
             if (dut->p_dma_tilemap && !tm_d)  { n_dma_tm++;  b_tm++;  }
             if (dut->p_dma_palette && !pal_d) { n_dma_pal++; b_pal++; }
             if (dut->p_dma_sprite  && !spr_d) { n_dma_spr++; b_spr++; }
@@ -1104,6 +1223,13 @@ int main(int argc, char **argv)
     printf("PRG ROM 64-bit fetches : %llu\n", (unsigned long long)rom_fetches);
     printf("GFX fetches            : %llu\n", (unsigned long long)cgfx.count);
     printf("SPR fetches            : %llu\n", (unsigned long long)cspr.count);
+    printf("INPUTS (0x604) reads   : %llu   flip DIP driven %d\n",
+           (unsigned long long)n_inp_rd, flip_dip);
+    printf("flip decode high cycles: %llu   flip LATCH high cycles: %llu\n",
+           (unsigned long long)n_flip_raw, (unsigned long long)n_flip_lat);
+    printf("flip AT LAYERS cycles  : %llu   max src_row seen: %d\n",
+           (unsigned long long)n_flip_lay, max_src_row);
+    printf("cycles src_row != render_line: %llu\n", (unsigned long long)n_row_differs);
     printf("vblank pulses          : %llu\n", (unsigned long long)n_vbl);
     printf("INTA cycles            : %llu\n", (unsigned long long)inta_cycles);
     printf("CPU stall cycles       : %llu\n", (unsigned long long)stall_cycles);
@@ -1185,6 +1311,88 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < dma_tm_lines.size(); i++)
         printf(" %d%s", dma_tm_lines[i], dma_tm_lines[i] >= 240 ? "(vbl)" : "");
     printf("\n");
+    // --- vblank ISR extent report ----------------------------------------
+    // Decides whether the VTOTAL route to 60 Hz is safe: at VTOTAL 266 the
+    // blanked lines are 240..265, the renderer owns 265, so everything the
+    // handler does must finish by line 264.
+    {
+        int n = 0, dmax = -1, imax = -1;
+        double dsum = 0, isum = 0;
+        for (size_t i = 0; i < isr_dma_end.size(); i++) {
+            if (isr_dma_end[i] < 0 && isr_io_end[i] < 0) continue;
+            n++;
+            if (isr_dma_end[i] > dmax) dmax = isr_dma_end[i];
+            if (isr_io_end[i]  > imax) imax = isr_io_end[i];
+            if (isr_dma_end[i] >= 0) dsum += isr_dma_end[i];
+            if (isr_io_end[i]  >= 0) isum += isr_io_end[i];
+        }
+        printf("vblank ISR extent      : %d frames with activity "
+               "(of %zu blanking periods)\n", n, isr_dma_end.size());
+        printf("  last DMA-busy line    : max %d  (mean %.1f)\n",
+               dmax, n ? dsum / n : 0.0);
+        printf("  last I/O-write line   : max %d  (mean %.1f)\n",
+               imax, n ? isum / n : 0.0);
+        // Distribution of the last active line, and how many frames would
+        // overrun each candidate VTOTAL. The renderer owns the LAST blanked
+        // line, so a frame is safe at VTOTAL V iff its worst line <= V-2.
+        int hist[8] = {0,0,0,0,0,0,0,0};   // 240-247,248-255,...,288-295
+        int over266 = 0, over280 = 0, over296 = 0, nact = 0;
+        for (size_t i = 0; i < isr_dma_end.size(); i++) {
+            int w = isr_dma_end[i] > isr_io_end[i] ? isr_dma_end[i] : isr_io_end[i];
+            if (w < 240) continue;
+            nact++;
+            int b = (w - 240) / 8; if (b > 7) b = 7;
+            hist[b]++;
+            if (w > 264) over266++;
+            if (w > 278) over280++;
+            if (w > 294) over296++;
+            if (w > 247 && over_frames.size() < 64) over_frames.push_back((int)i);
+        }
+        printf("  last-active histogram :");
+        for (int b = 0; b < 8; b++) printf(" %d-%d:%d", 240+b*8, 247+b*8, hist[b]);
+        printf("\n");
+        printf("  frames overrunning    : VTOTAL 266 (60Hz): %d/%d   "
+               "280 (57Hz): %d/%d   296 (native): %d/%d\n",
+               over266, nact, over280, nact, over296, nact);
+        // What the late writes actually are. Grouped by register, because a
+        // scroll write after the line-0 render pass is a real hazard while a
+        // CRTC or DMA-setup write is not.
+        {
+            size_t tot = 0; for (auto &kv : late_by_addr) tot += kv.second;
+            printf("  late I/O writes (>247): %zu total, registers:", tot);
+            for (auto &kv : late_by_addr)
+                printf(" %03X(=%03X)x%d", kv.first, kv.first << 2, kv.second);
+            printf("\n  VIDEO-register writes past 247: %d  (worst line %d)\n",
+                   late_video, late_video_max);
+            printf("  overrunning frame indices:");
+            for (size_t i = 0; i < over_frames.size(); i++) printf(" %d", over_frames[i]);
+            printf("\n");
+            // Boot writes the Z80 program and walks the DS2404, both of which
+            // sit in vblank for many lines and neither of which touches VRAM.
+            // Split the run so the steady state is not judged by them.
+            int cut = envi("SPI_STATS_FROM", 60);
+            int n2 = 0, w2 = -1, d2 = -1, o2 = 0;
+            for (size_t i = cut; i < isr_dma_end.size(); i++) {
+                int w = isr_dma_end[i] > isr_io_end[i] ? isr_dma_end[i] : isr_io_end[i];
+                if (isr_dma_end[i] > d2) d2 = isr_dma_end[i];
+                if (w < 240) continue;
+                n2++; if (w > w2) w2 = w; if (w > 264) o2++;
+            }
+            printf("  --- frames %d..%zu only (past boot) ---\n", cut, isr_dma_end.size());
+            printf("      active frames %d, worst last-active line %d, "
+                   "worst DMA line %d, overrunning VTOTAL 266: %d\n",
+                   n2, w2, d2, o2);
+            printf("      VIDEO-register writes past 247: %d (worst line %d)",
+                   late_video_pb, late_video_pb_max);
+            for (size_t i = 0; i < vid_pb.size() && i < 12; i++)
+                printf(" %d@%d=%03X", vid_pb[i].frame, vid_pb[i].line,
+                       vid_pb[i].addr << 2);
+            printf("\n");
+        }
+        int worst = dmax > imax ? dmax : imax;
+        printf("  => needs VTOTAL >= %d (worst line %d + 1 render line)\n",
+               worst + 2, worst);
+    }
     printf("palette DMA triggers   : %llu\n", (unsigned long long)n_dma_pal);
     printf("sprite  DMA triggers   : %llu\n", (unsigned long long)n_dma_spr);
     // This used to be always zero and not a fault, because sim/T80s.sv was a
@@ -1310,10 +1518,12 @@ int main(int argc, char **argv)
     (void)first_fetch; (void)fetch_pages;
 
     {
-        FILE *pf = fopen("boot_frame.ppm", "wb");
+        const char *ppm_name = getenv("SPI_PPM") ? getenv("SPI_PPM") : "boot_frame.ppm";
+        FILE *pf = fopen(ppm_name, "wb");
         if (pf) {
             fprintf(pf, "P6\n%d %d\n255\n", FW, FH);
-            fwrite(best_fb.data(), 1, best_fb.size(), pf);
+            const std::vector<uint8_t> &out_fb = pin_frame ? pinned_fb : best_fb;
+            fwrite(out_fb.data(), 1, out_fb.size(), pf);
             fclose(pf);
             printf("busiest frame had %llu non-black pixels\n",
                    (unsigned long long)best_nonblack);
