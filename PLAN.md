@@ -4997,6 +4997,14 @@ normal logic wrote that cycle; `tick_acc` is driven by the sample-tick block and
 restores there. `pause` is asserted throughout a restore so nothing should be
 racing, but none of this depends on that being true.
 
+**Confirmed on hardware, 2026-08-28.** Save in stage 1 with the music playing,
+play on until the music changes, restore: the stage 1 passage comes back with
+its own instruments and tempo rather than the later cue's. That is the case the
+testbench cannot reach -- it proves the 23 words round-trip, not that the
+machine those words describe is the one you hear -- and it is the case the bug
+actually broke, since a save and an immediate reload sounds correct either way.
+Core `94d7c599`, `BUILD_DATE 260828`, on the MiSTer at 192.168.1.125.
+
 `tb_ymf271`'s `savestate regs` check is the regression: it snapshots a
 distinctive machine -- two timers running, twelve different sync modes, a
 wave-memory address mid-read, a committed F-Number latch -- scribbles over all

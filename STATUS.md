@@ -57,7 +57,10 @@ upstream guesswork (the rewrite's own header says so), and the EXT1/EXT2 routing
 on the mono boards follows MAME without independent confirmation — no shipping
 MRA uses that path. `PLAN.md` 14.5 has the detail, including a savestate caveat:
 states written by the previous core load as noise, since the per-slot state
-changed width and meaning and the stream carries no version field.
+changed width and meaning and the stream carries no version field. Savestates
+written by THIS core restore correctly, confirmed on hardware 2026-08-28 --
+save during one music cue, play until it changes, restore, and the first cue
+returns with its own instruments and tempo.
 
 **The cartridge sets are stereo and the single board is mono, the way MAME has
 them.** MAME routes YMF output 0 to the left speaker and 1 to the right for
