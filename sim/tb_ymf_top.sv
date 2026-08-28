@@ -14,6 +14,7 @@
 //============================================================================
 
 module tb_ymf_top
+	import system_consts::*;
 (
 	input             clk,
 	input             reset,
@@ -28,6 +29,18 @@ module tb_ymf_top
 	output      [7:0] dout,
 	input             wr,
 	input             rd,
+
+	// ---- the savestate's register section, driven from the testbench -----
+	// SSIDX_YMF_REGS only. It is the section whose restore path was a no-op --
+	// the read side was complete and the write side did nothing but ack -- so
+	// it is the one that needs a round trip to prove.
+	input             ss_pause,
+	input      [31:0] ss_addr,
+	input      [31:0] ss_din,
+	input             ss_wr,
+	input             ss_rd,
+	output     [31:0] ss_dout,
+	output            ss_ack,
 	output            irq,
 
 	// ch5, sample reads
@@ -79,16 +92,27 @@ module tb_ymf_top
 	wire  [7:0] ext_ovr_data;
 	wire        dirty;
 
-	// The savestate's four sections on the chip. This testbench drives the
-	// register interface directly and never takes a state, so they are tied
-	// off -- but the interfaces still have to exist to connect.
-	ssbus_if ss_unused_regs(), ss_unused_par(), ss_unused_st(), ss_unused_fb();
+	// The savestate's four sections. The register section is driven from the
+	// ports above; the other three are tied off.
+	ssbus_if ss_regs(), ss_unused_par(), ss_unused_st(), ss_unused_fb();
+
+	// The master side of the interface. `select` picks the section, and the
+	// slave answers on data_out/ack.
+	assign ss_regs.select = SSIDX_YMF_REGS[7:0];
+	assign ss_regs.addr   = ss_addr;
+	assign ss_regs.data   = {32'd0, ss_din};
+	assign ss_regs.write  = ss_wr;
+	assign ss_regs.read   = ss_rd;
+	assign ss_regs.query  = 1'b0;
+	assign ss_dout        = ss_regs.data_out[31:0];
+	assign ss_ack         = ss_regs.ack;
 
 	ymf271 ymf
 	(
-		// The savestate's board-wide pause. Nothing here ever asserts it.
-		.pause    (1'b0),
-		.ssbus_regs (ss_unused_regs),
+		// The savestate's board-wide pause, asserted around a save or a load
+		// exactly as spi_sound does it.
+		.pause    (ss_pause),
+		.ssbus_regs (ss_regs),
 		.ssbus_par  (ss_unused_par),
 		.ssbus_st   (ss_unused_st),
 		.ssbus_fb   (ss_unused_fb),

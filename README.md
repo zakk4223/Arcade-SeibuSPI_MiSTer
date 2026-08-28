@@ -48,32 +48,44 @@ current gaps:
 ## Core utilization
 
 Quartus Prime 17.0.0 Lite, Cyclone V `5CSEBA6U23I7` (MiSTer DE10-Nano),
-top-level entity `sys_top`, `SEED 3`. From `output_files/SeibuSPI.fit.summary`,
-fit dated 2026-08-27.
+top-level entity `sys_top`, `SEED 1`. From `output_files/SeibuSPI.fit.summary`,
+fit dated 2026-08-28.
 
 | Resource                | Used      | Available | Utilization |
 |-------------------------|-----------|-----------|-------------|
-| Logic utilization (ALMs)| 37,569    | 41,910    | 90 %        |
-| Total registers         | 36,796    | -         | -           |
-| Block memory bits       | 3,942,313 | 5,662,720 | 70 %        |
-| RAM blocks              | 539       | 553       | 97 %        |
-| DSP blocks              | 69        | 112       | 62 %        |
+| Logic utilization (ALMs)| 40,078    | 41,910    | 96 %        |
+| Total registers         | 39,073    | -         | -           |
+| Block memory bits       | 3,839,265 | 5,662,720 | 68 %        |
+| RAM blocks              | 526       | 553       | 95 %        |
+| DSP blocks              | 58        | 112       | 52 %        |
 | PLLs                    | 3         | 6         | 50 %        |
 | Pins                    | 145       | 314       | 46 %        |
 
-Timing: **+0.113 ns setup** (`pll_hdmi`), **+0.102 ns hold** (`emu`), TNS 0.000,
-no critical warnings. `make check-timing` is the gate, and `make release`
-refuses to assemble a distribution without it.
+Timing: **+0.190 ns setup** (`emu`, clk_ram), **+0.148 ns hold** (`sysmem`),
+TNS 0.000 on every clock, no critical warnings. `make check-timing` is the
+gate, and `make release` refuses to assemble a distribution without it.
 
-**RAM blocks are the binding resource, not logic.** 539 of 553 leaves 14 free,
-and the split matters: 70 % of the *bits* are used but 97 % of the *blocks*,
-because several arrays are wide and shallow and pack badly. Two figures set the
-budget — `spi_mainram` is 256 blocks on its own, 47 % of the device, for the
-386's 256 KB, and it is already optimally packed (an M10K holds 8,192 usable
+**Logic is the binding resource now, narrowly ahead of RAM blocks.** That is a
+change: it used to be RAM, and the two have nearly converged at 96 % ALM against
+95 % RAM. The YMF271 OPX rewrite is what moved them. It trades stored tables for
+computed logic, and the fit shows exactly that shape — ALMs up 37,569 → 40,078
+while RAM blocks fell 539 → 526 and DSPs 69 → 58.
+
+Neither resource has much left, and the RAM split still matters: 68 % of the
+*bits* are used but 95 % of the *blocks*, because several arrays are wide and
+shallow and pack badly. Two figures set that budget — `spi_mainram` is 256
+blocks on its own, 47 % of the device, for the 386's 256 KB, and it is already
+optimally packed (an M10K holds 8,192 usable
 bits, so 2 Mbit needs exactly 256); and CRT V-Size's line ring is 52. The ring
 is sized `RING_LINES=46` for |vsize| <= 21 while the OSD exposes +-8, so
 dropping it to 20 returns roughly 28 blocks if anything else ever needs them.
 
-The growth since the 2026-08-19 fit (81 % ALM / 88 % RAM) is almost entirely
-CRT Adjust and CRT V-Size, at ~1,200 ALM and 52 RAM blocks. The refresh-rate
-conversion and screen flip together cost less than the fit-to-fit noise.
+The growth since the 2026-08-19 fit (81 % ALM / 88 % RAM) was almost entirely
+CRT Adjust and CRT V-Size, at ~1,200 ALM and 52 RAM blocks; the refresh-rate
+conversion and screen flip together cost less than the fit-to-fit noise. The
+step from there to 96 % is the OPX rewrite described above.
+
+At this utilization the fitter is fighting, and which marginal path fails
+becomes seed-dependent — identical RTL failed hold on two entirely different
+paths at two different seeds. `SeibuSPI.sdc` answers that by constraining the
+class rather than chasing the seed; `PLAN.md` 56 is the record.

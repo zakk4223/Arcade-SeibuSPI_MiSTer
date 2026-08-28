@@ -4984,14 +4984,35 @@ and the section item counts did not change, so **a state written by the previous
 core loads as noise rather than being rejected**. There is no mechanism here to
 catch that.
 
-Worse, and pre-existing: **`SSIDX_YMF_REGS` does not restore at all.** Its write
-path acks and discards (`ymf271.sv`, the `ss_rg_acc` block), so the register
-file, the group sync modes, both timers, the end flags and the external-memory
-port are captured on save and thrown away on load. `fnum_latch` is new state in
-that same section and inherits the same gap. Fixing it means driving those
-registers from the restore path, and several of them -- `tick_acc` in
-particular -- live in other always blocks, so it is not a one-line change. It is
-unrelated to the OPX port and was left alone.
+**`SSIDX_YMF_REGS` did not restore at all**, which was pre-existing and is now
+fixed. Its write path acked and DISCARDED, so the register file, the group sync
+modes, both timers, the end flags and the external-memory port were captured on
+save and thrown away on load. The read side was complete, which is why it looked
+implemented.
+
+The section is 23 dwords now: the original eleven, plus twelve holding
+`fnum_latch`, which is new state the F-Number commit needs. Everything but
+`tick_acc` restores in the register block, placed last so it beats whatever the
+normal logic wrote that cycle; `tick_acc` is driven by the sample-tick block and
+restores there. `pause` is asserted throughout a restore so nothing should be
+racing, but none of this depends on that being true.
+
+**Confirmed on hardware, 2026-08-28.** Save in stage 1 with the music playing,
+play on until the music changes, restore: the stage 1 passage comes back with
+its own instruments and tempo rather than the later cue's. That is the case the
+testbench cannot reach -- it proves the 23 words round-trip, not that the
+machine those words describe is the one you hear -- and it is the case the bug
+actually broke, since a save and an immediate reload sounds correct either way.
+Core `94d7c599`, `BUILD_DATE 260828`, on the MiSTer at 192.168.1.125.
+
+`tb_ymf271`'s `savestate regs` check is the regression: it snapshots a
+distinctive machine -- two timers running, twelve different sync modes, a
+wave-memory address mid-read, a committed F-Number latch -- scribbles over all
+of it through the bus, restores, and requires every word back. Restore and
+readback happen inside ONE paused window, because `tick_acc` is a free-running
+accumulator and has legitimately moved on if you unpause between them. With the
+restore disabled the check reports 11 words still holding the scribbled value
+and says so in as many words.
 
 ### 14.6 What to check first when this is put on hardware
 
@@ -12087,3 +12108,95 @@ A `src_row != render_line` probe settled it in one run — the lesson in
   anything comparing frames across runs must use it.
 
 **Not fitted, not on hardware.** The sim proof is exact but it is a sim proof.
+
+## 56. The hold class that moves: handshake payloads on phase-aligned clocks (2026-08-28)
+
+`ea7c767` changed one file, `rtl/ymf271.sv`, and added 91 lines to it. The fit
+that followed failed HOLD by 0.798 ns on `spi_io|ss_dout[10] ->
+spi_ss_bridge:io_bridge|ssbus.data_out[10]` -- a path in neither the file that
+changed nor any file that depends on it. At 95% ALMs and 95% RAM blocks, adding
+logic anywhere moves placement everywhere.
+
+The instinct is to reach for the SEED. That is what the last three of these
+cost, and it is worth writing down why it does not work here. Two seeds, on
+identical RTL:
+
+| | seed 3 | seed 5 |
+|---|---|---|
+| Setup | -0.119 `flash_derive\|esi` | -0.189 `ds2404\|sptr->ack`, -0.164 `ascal` |
+| Hold  | **-0.798** `spi_io -> io_bridge` | **-0.286** `spi_sound -> ch3_arb` |
+
+Different victims, every time, and seed 5 left the bridge path that seed 3 died
+on at a comfortable +0.243 while breaking a different one. Chasing that with the
+seed is chasing which member of a family loses a coin toss.
+
+### What the family is
+
+`clk_ram`, `clk_sys` and `clk_cpu` are 4:2:1 off one PLL and phase aligned
+(`rtl/pll.v`). Every clk_sys edge coincides with a clk_ram edge. TimeQuest
+therefore checks HOLD between them on a **coincident launch/capture pair**: it
+assumes a datum launched on one domain can race into the other's flop on that
+very edge. Nothing in this design does that, because every one of these payloads
+is qualified by a handshake and is quasi-static across its capture:
+
+* **`spi_ss_bridge`.** The phase machine latches `ram_addr` and `ram_din` at
+  ph 0 and holds them through ph 6, then answers the ssbus with `ram_dout` at
+  ph 6 after a two-cycle settle window. Seven clk_sys cycles an item, with both
+  directions stable for six of them. The module header already argued this; it
+  was never stated to the analyser.
+* **`spi_sdr_arb4`.** `a_/b_/c_/d_` addr, din and be are set by the requester on
+  the same edge it flips its `req` toggle and held until the matching `ack`
+  returns -- a whole SDRAM round trip. The arbiter cannot capture a payload
+  before it has seen the toggle, which is one clk_ram period after that payload
+  settled at the earliest.
+
+Same shape, and the same shape as the DS2404 `arm` path already in the SDC.
+
+### The constraint, and what it deliberately does not cover
+
+Six statements, all `-hold -end 1`. **HOLD ONLY.** Setup on every one of these
+is genuinely single-cycle -- the payload really is expected by the next capture
+edge -- and stays fully checked. One destination period of relaxation claims far
+less than the hardware gives.
+
+Not relaxed, on purpose:
+
+* **The `req` toggles.** They are the qualifier that makes the payload
+  quasi-static. Their timing is what the whole argument rests on, so it has to
+  go on being checked.
+* **`m_rnw`.** The arbiter drives it from its own constants. It crosses nothing.
+* **`spi_flash_derive|esi`.** This nearly went in. The `have_byte` interlock
+  gives a clean two-cycle bound at the S_RUN write site, which would justify
+  `-setup -end 2`. But `esi` has **eight** write sites, and two of them are bare
+  `esi <= esi + 32'd1` in the header-scan loops -- gated by `sbyte_v`, but
+  bounding *its* re-assertion means tracing the byte-fetch path. A blanket
+  multicycle on `esi` would have covered those sites on an argument that only
+  holds for one of them. Left alone.
+
+### Measured
+
+Verify the collections match before believing any of it -- a `get_registers`
+pattern that matches nothing constrains nothing and says so nowhere. The six
+patterns match 114, 22, 8, 2, 39 and 112 registers.
+
+* **Seed 3, before:** setup -0.119 (TNS -0.266), hold **-0.798**.
+* **Seed 3, after:** setup -0.044 (TNS -0.044), hold **+0.245**, all clocks.
+* **Seed 5 netlist, STA only, no refit:** hold -0.286 -> **+0.243**. This is the
+  cross-check that matters. It clears a failure on a *different* path in a
+  *different* placement, which a lucky fit cannot fake.
+* **Seed 1, full fit:** setup +0.190, hold +0.148, TNS 0.000 everywhere, no
+  critical warnings. `check-timing` passes. 96% ALMs.
+
+The last 44 ps at seed 3 is `flash_derive|esi[3] -> esi[30]`, the module that
+derives the sample flash once at boot while the core is held in reset. It is not
+in the game's runtime path. It is the next thing to tip, and pipelining that
+adder is the durable answer if it does.
+
+**SEED is 1 now, not 3.** Note that `quartus_fit --seed=N` does not merely
+override the setting for one run -- it **writes the value back into the QSF**.
+The canonical seed moved because that is the seed the shipped bitstream was
+fitted at, and the QSF should reproduce what is on the board.
+
+**On hardware.** Core `94d7c599`, `BUILD_DATE 260828`, deployed to 192.168.1.125
+with the previous core kept as `SeibuSPI.rbf.pre-ymfregs-20260828-0250`. The
+savestate fix this build was made for is confirmed there (14.5).
