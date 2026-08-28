@@ -62,3 +62,62 @@ set_false_path -to [get_registers {*spi_nvram*|ioctl_dl_s1}]
 # the chronic-seed problem so the design closes on the canonical SEED again.
 set_multicycle_path -setup -end 2 -to [get_registers {*spi_ds2404*|arm[*]}]
 set_multicycle_path -hold  -end 1 -to [get_registers {*spi_ds2404*|arm[*]}]
+
+# ---------------------------------------------------------------------------
+# Handshake-qualified payloads across the phase-aligned domains
+# ---------------------------------------------------------------------------
+# clk_ram, clk_sys and clk_cpu are 4:2:1 off one PLL and phase aligned
+# (rtl/pll.v), so every clk_sys edge coincides with a clk_ram edge and every
+# clk_cpu edge with both. TimeQuest therefore checks HOLD between them on a
+# coincident launch/capture pair -- the pessimistic case, where a datum
+# launched on one domain is assumed to race into the other's flop on that very
+# edge. Nothing here actually does that: every payload below is qualified by a
+# handshake and is quasi-static across the capture.
+#
+# These are the paths that tip. Seed 3 fails HOLD by 0.798 ns on the ss_bridge
+# read return; seed 5 passes that one and fails by 0.286 ns on the ch3
+# arbiter's address instead, with the bridge's outbound address left at +0.200.
+# Same family, a different victim per fit, in a design at 95% ALMs and 95% RAM
+# blocks where placement alone decides which one loses. Chasing it with the
+# fitter SEED treats the symptom; this states the contract the RTL already
+# keeps.
+#
+# HOLD ONLY. Setup on every one of these is genuinely single-cycle -- the
+# payload really is expected by the next capture edge -- and is left fully
+# checked. One destination period of hold relaxation claims far less than the
+# hardware gives: both mechanisms hold their payload for a whole transaction.
+#
+# THIS IS IN TENSION WITH THE ioctl BLOCK ABOVE, which deliberately leaves
+# payload registers timed on the grounds that a strobe qualifies them and they
+# therefore have real setup and hold requirements. Read together the two are
+# consistent, and the line between them is worth stating so it is not
+# rediscovered as a contradiction. There the payload is cut from NOTHING: both
+# checks stay. Here only the hold check goes, and only by one period. A hold
+# check is real coverage when the payload can change near the capture edge --
+# the ioctl case, where the qualifying strobe is only two synchroniser stages
+# away. It is an artefact when the payload cannot change anywhere near it: the
+# bridge holds for six of its seven cycles and the arbiter for a whole SDRAM
+# round trip, so no edge exists at which new data could race the capture. What
+# the phase alignment produces there is a coincident launch/capture pair and a
+# check with nothing behind it. Setup is what still carries the coverage, and
+# setup is what is kept.
+#
+# ss_bridge (rtl/spi_ss_bridge.sv). The phase machine latches ram_addr and
+# ram_din at ph 0 and holds them through ph 6, and answers the ssbus with
+# ram_dout at ph 6 after a two-cycle settle window. Seven clk_sys cycles an
+# item, with both directions stable for six of them.
+#
+# spi_sdr_arb4 (rtl/spi_sdr_arb4.sv). a_/b_/c_/d_ addr, din and be are set by
+# the requester on the same edge it flips its `req` toggle, and held until the
+# matching `ack` comes back -- a whole SDRAM round trip. The arbiter cannot
+# capture a payload before it has seen the toggle, which is one clk_ram period
+# after that payload settled at the earliest. The `req` toggles themselves are
+# NOT relaxed: they are the qualifier that makes the payload quasi-static, and
+# their own timing has to go on being checked. Nor is m_rnw, which the arbiter
+# drives from its own constants and which crosses nothing.
+set_multicycle_path -hold -end 1 -to   [get_registers {*spi_ss_bridge*|ssbus.data_out[*]}]
+set_multicycle_path -hold -end 1 -from [get_registers {*spi_ss_bridge*|ram_addr[*]}]
+set_multicycle_path -hold -end 1 -from [get_registers {*spi_ss_bridge*|ram_din[*]}]
+set_multicycle_path -hold -end 1 -to   [get_registers {*spi_sdr_arb4*|m_addr[*]}]
+set_multicycle_path -hold -end 1 -to   [get_registers {*spi_sdr_arb4*|m_din[*]}]
+set_multicycle_path -hold -end 1 -to   [get_registers {*spi_sdr_arb4*|m_be[*]}]
