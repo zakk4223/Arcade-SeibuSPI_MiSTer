@@ -130,17 +130,49 @@ int main(int argc, char **argv)
     // what it did; the cartridge sets change the mod bits the same way the
     // MRA's mod byte does (rtl/spi_defs.vh).
     const char *setname = (argc > 3) ? argv[3] : "rdfts";
-    int  set_id    = !strcmp(setname, "rfjet") ? 3 : !strcmp(setname, "rdft2") ? 2
-                   : !strcmp(setname, "rdft")  ? 1 : 0;
-    bool set_sxx2c = set_id != 0;
-    // Sets whose Z80 program comes through the sound01 window rather than out
-    // of the already-loaded Z80 region.
-    bool from_snd01 = (set_id == 2) || (set_id == 3);
-    if (strcmp(setname, "rdfts") && strcmp(setname, "rdft") &&
-        strcmp(setname, "rdft2") && strcmp(setname, "rfjet")) {
-        printf("FAIL: unknown set %s (want rdfts, rdft, rdft2 or rfjet)\n", setname);
+    // The set table, numbered exactly as rtl/spi_defs.vh numbers SET_*.
+    // spi_top decodes set_id itself -- tile size, sprite codec, the sound01
+    // window, the PCM lane count -- so a number that disagrees with SET_*
+    // there quietly configures a DIFFERENT machine than the MRA would, and
+    // the bench would still run. On hardware set_id comes from the MRA's mod
+    // byte (SeibuSPI.sv set_id_of): bit 0 is SXX2C, bits 3:1 are the variant.
+    // The mod bytes are viprp1 0x17, senkyu 0x19, ejanhs 0x1B, rdft 0x11,
+    // which is where these numbers are from.
+    static const struct { const char *name; int id; } SETS[] = {
+        { "rdfts",  0 },   // SET_RDFTS -- the SXX2E single board, not a cart
+        { "rdft",   1 },   // SET_RDFT
+        { "rdft2",  2 },   // SET_RDFT2
+        { "rfjet",  3 },   // SET_RFJET
+        { "viprp1", 4 },   // SET_VIPRP1
+        { "senkyu", 5 },   // SET_SENKYU
+        { "ejanhs", 6 },   // SET_EJANHS
+    };
+    int set_id = -1;
+    for (const auto &e : SETS) if (!strcmp(setname, e.name)) set_id = e.id;
+    if (set_id < 0) {
+        printf("FAIL: unknown set %s (want", setname);
+        for (const auto &e : SETS) printf(" %s", e.name);
+        printf(")\n");
         return 2;
     }
+    // mod_byte[0] on hardware. rdfts is the only set with it clear.
+    bool set_sxx2c = set_id != 0;
+    // mod_byte[0] & mod_byte[4]. Every MRA this repo ships has bit 4 set, but
+    // that does NOT make set_upd=1 the right default here: spi_flash_derive
+    // lives in SeibuSPI.sv, above spi_top, so this bench does not contain it.
+    // On hardware the derive fills the flash at reset and the game's updater
+    // then finds it correct and skips; with set_upd=1 and no derive, the game
+    // would run the updater for real -- the six-minute path, not the shipped
+    // behaviour. The faithful model is a PRE-DERIVED flash in the image (which
+    // build_sdram_image.py without --upd produces) and set_upd=0.
+    // SET_UPD=1 opts in, for exercising the updater path deliberately.
+    const char *upd_env = getenv("SET_UPD");
+    bool set_upd = set_sxx2c && upd_env && strtoul(upd_env, nullptr, 0) != 0;
+    // Sets whose Z80 program comes through the sound01 window rather than out
+    // of the already-loaded Z80 region. Mirrors spi_top's snd01_en, less the
+    // (set_upd && RDFT) case this bench does not drive. Report only.
+    bool from_snd01 = (set_id == 2) || (set_id == 3) ||
+                      (set_id == 5) || (set_id == 6);
     printf("set: %s (set_id=%d, sxx2c=%d)\n", setname, set_id, set_sxx2c);
 
     FILE *f = fopen(argv[1], "rb");
@@ -172,6 +204,36 @@ int main(int argc, char **argv)
     dut->rom_ready = 0;
     dut->set_id    = set_id;
     dut->set_sxx2c = set_sxx2c;
+    dut->i_set_upd = set_upd;
+    // Z80_IMAGE=<file> preloads the Z80 program region of SDRAM.
+    //
+    // WHY THIS EXISTS. On SXX2C the Z80's program is not in the ROM set at
+    // all: the 386 pushes it a byte at a time to port 0x688 during boot, so
+    // the region only becomes correct once that download has finished. A
+    // savestate cannot supply it either -- SSIDX has no section for SDRAM, on
+    // the stated grounds that SDRAM "holds ROMs" (rtl/system_consts.sv) --
+    // which means a replayed state lands on whatever the replay run's OWN
+    // boot happened to have downloaded so far. Replay the Viper black-screen
+    // state at 6M cycles and the Z80 is running a 44 KB fragment of its
+    // program; nothing it then does is evidence about the board.
+    //
+    // The region is deterministic, so it can simply be CONSTRUCTED: cold-boot
+    // once with Z80_DUMP=<file> to capture it after the download completes,
+    // then replay with Z80_IMAGE=<file>. Pair it with the savestate and both
+    // halves of the machine are the hardware's.
+    if (const char *zi = getenv("Z80_IMAGE")) {
+        FILE *zf = fopen(zi, "rb");
+        if (!zf) { fprintf(stderr, "Z80_IMAGE: cannot open %s\n", zi); return 2; }
+        size_t zn = fread(&sdram[Z80_BASE], 1, Z80_SIZE, zf);
+        fclose(zf);
+        printf("Z80 image: preloaded %zu bytes at 0x%X\n", zn, Z80_BASE);
+        // The end-of-run compare is against the region as it was BEFORE the
+        // download; refresh it so a preload does not read as a mismatch.
+        z80_src.assign(sdram.begin() + Z80_BASE, sdram.begin() + Z80_BASE + Z80_SIZE);
+    }
+    dut->flash_sdr_ack = 0;
+    printf("set_upd: %d (%s sample flash)\n", (int)set_upd,
+           set_upd ? "derived at reset from the program image" : "pre-programmed");
     dut->clk_sys = dut->clk_cpu = dut->clk_ram = 0;
     dut->sdr_prg_ack = dut->sdr_gfx_ack = dut->sdr_spr_ack = 0;
     dut->sdr_prg_dout = dut->sdr_gfx_dout = dut->sdr_spr_dout = 0;
@@ -461,6 +523,32 @@ int main(int argc, char **argv)
         printf("  SS: replay: the blob's marker slot is %08X\n", ss_saved_esp);
     }
     uint32_t trail[24] = {0}; int trail_n = 0; bool trail_armed = false;
+    // IO_POLL=<hex byte address> measures how EXPENSIVE one status poll is.
+    // A 386 spin loop on a status port costs whatever a single I/O read costs,
+    // multiplied by the game's own retry count -- so a core that answers 0x684
+    // more slowly than the hardware turns a timeout the player never sees into
+    // one they wait through. Counting the reads and dividing gives the figure
+    // that comparison needs; nothing else in this bench measures I/O LATENCY.
+    // Z80_PC_MARK=<hex Z80 PC>: the cycle the sound CPU's PC FIRST reaches
+    // that address, alongside the cycle it came out of reset. The two together
+    // time a stretch of Z80 work against the 386's patience -- which is the
+    // only way to see a race between the two CPUs, since each one on its own
+    // looks like it is behaving.
+    const char *zpm_env = getenv("Z80_PC_MARK");
+    const uint32_t z80_pc_mark = zpm_env ? (uint32_t)strtoul(zpm_env, nullptr, 0) : 0;
+    uint64_t z80_release_cyc = 0, z80_mark_cyc = 0;
+    // ...and how many times it ENTERS that PC, which times a loop body without
+    // needing the loop to finish. The Viper checksum never finishes on this
+    // core -- the 386 resets the Z80 first -- so counting iterations and
+    // dividing is the only way to learn how long it WOULD have taken.
+    uint64_t z80_mark_hits = 0; uint32_t z80_pc_d = 0xFFFF;
+    // ce and stall ticks counted only while the Z80 is OUT OF RESET. The
+    // global counters include every tick of the divider, reset or not, so
+    // they cannot say how fast the Z80 actually ran.
+    uint64_t z80_ce_run = 0, z80_stall_run = 0;
+    const char *iop_env = getenv("IO_POLL");
+    const uint32_t io_poll_addr = iop_env ? (uint32_t)strtoul(iop_env, nullptr, 0) : 0;
+    uint64_t io_poll_n = 0, io_poll_first = 0, io_poll_last = 0, io_poll_min = 0;
     const size_t IO_RD_MAX = 400000; size_t io_rd_n = 0; bool io_rd_d = false;
     const char *iort = getenv("SS_IORD");
     uint32_t *io_rd_trail = iort ? new uint32_t[IO_RD_MAX] : nullptr;
@@ -1094,6 +1182,20 @@ int main(int argc, char **argv)
             // Does the game ever READ the input port that carries the
             // flip-screen switch? 0x604 is INPUTS (spi_io.sv), bit 15 the DIP.
             if (dut->p_io_rd && !io_rd_d && dut->p_io_raddr * 4 == 0x604) n_inp_rd++;
+            if (io_poll_addr && dut->p_io_rd && !io_rd_d
+                && dut->p_io_raddr * 4 == io_poll_addr) {
+                if (!io_poll_n) io_poll_first = cyc;
+                // The mean over first..last spans the gaps BETWEEN polling
+                // episodes (a boot that restarts polls, downloads, polls
+                // again), which inflates it. The minimum back-to-back spacing
+                // is the cost of one poll with nothing else in the way.
+                if (io_poll_last) {
+                    uint64_t gap = cyc - io_poll_last;
+                    if (!io_poll_min || gap < io_poll_min) io_poll_min = gap;
+                }
+                io_poll_last = cyc;
+                io_poll_n++;
+            }
             if (dut->p_flip_raw) n_flip_raw++;
             if (dut->p_flip_lat) n_flip_lat++;
             if (dut->p_flip_layers) n_flip_lay++;
@@ -1187,6 +1289,17 @@ int main(int argc, char **argv)
             if (dut->p_cpu_inta) inta_cycles++;
             if (dut->p_cpu_valid && !dut->p_cpu_ready) stall_cycles++;
             if (dut->p_z80_rst_n) z80_run_cycles++;
+            if (dut->p_z80_rst_n && !z80_rst_d && !z80_release_cyc)
+                z80_release_cyc = cyc;
+            if (z80_pc_mark && !z80_mark_cyc && dut->p_z80_rst_n
+                && dut->p_snd_pc == z80_pc_mark)
+                z80_mark_cyc = cyc;
+            if (z80_pc_mark && dut->p_z80_rst_n
+                && dut->p_snd_pc == z80_pc_mark && z80_pc_d != z80_pc_mark)
+                z80_mark_hits++;
+            if (dut->p_z80_rst_n) z80_pc_d = dut->p_snd_pc;
+            if (dut->p_z80_rst_n && dut->p_z80_ce)    z80_ce_run++;
+            if (dut->p_z80_rst_n && dut->p_z80_stall) z80_stall_run++;
             if (dut->p_z80_rst_n && !z80_rst_d)
                 printf("  [%.1fM] Z80 released from reset\n", t / 1e6);
             if (!dut->p_z80_rst_n && z80_rst_d)
@@ -1421,6 +1534,30 @@ int main(int argc, char **argv)
                              "cartridge set, the download is not done)");
     printf("Z80 out-of-reset cycles: %llu, last opcode fetch at %04X\n",
            (unsigned long long)z80_run_cycles, dut->p_snd_pc);
+    if (z80_pc_mark) {
+        printf("Z80 released at cycle  : %llu\n",
+               (unsigned long long)z80_release_cyc);
+        if (z80_mark_cyc)
+            printf("Z80 reached PC %04X    : cycle %llu, %.3f s after release\n",
+                   z80_pc_mark, (unsigned long long)z80_mark_cyc,
+                   (double)(z80_mark_cyc - z80_release_cyc) / 57.272727e6);
+        else
+            printf("Z80 reached PC %04X    : NEVER in this run\n", z80_pc_mark);
+        if (z80_mark_hits) {
+            uint64_t exec = z80_ce_run - z80_stall_run;
+            printf("Z80 entered PC %04X    : %llu times\n", z80_pc_mark,
+                   (unsigned long long)z80_mark_hits);
+            printf("Z80 T-states running   : %llu ce, %llu stalled (%.2f%%), "
+                   "%llu executed\n",
+                   (unsigned long long)z80_ce_run,
+                   (unsigned long long)z80_stall_run,
+                   100.0 * (double)z80_stall_run / (double)(z80_ce_run ? z80_ce_run : 1),
+                   (unsigned long long)exec);
+            printf("Z80 T-states per pass  : %.1f executed, %.1f incl. stalls\n",
+                   (double)exec / (double)z80_mark_hits,
+                   (double)z80_ce_run / (double)z80_mark_hits);
+        }
+    }
     printf("sound01 fetches        : %llu\n", (unsigned long long)snd01_fetches);
     printf("YMF271 PCM fetches     : %llu\n", (unsigned long long)cpcm.count);
     // What the sound CPU lost to SDRAM, which MAME does not model and the real
@@ -1429,6 +1566,24 @@ int main(int argc, char **argv)
     // by the YMF271's timer and the Z80 only has to arrive before the next
     // tick. PLAN.md 51.9 -- the first draft of that section got this wrong by
     // reasoning about it instead of counting.
+    if (io_poll_addr) {
+        printf("I/O poll of 0x%03X      : %llu reads", io_poll_addr,
+               (unsigned long long)io_poll_n);
+        if (io_poll_n > 1) {
+            double span = (double)(io_poll_last - io_poll_first);
+            double per  = span / (double)(io_poll_n - 1);
+            // cyc counts clk_sys, 57.272727 MHz: it is incremented under
+            // `(t & 3) == 2`, and with clk_sys = (t >> 1) & 1 that is once per
+            // clk_sys period, not per clk_cpu. Dividing by the CPU clock here
+            // reported every duration at half its true length.
+            printf(", mean %.1f clk_sys, min %llu = %.3f us back to back; "
+                   "a 1,000,000-iteration timeout would take %.2f s",
+                   per, (unsigned long long)io_poll_min,
+                   io_poll_min / 57.272727,
+                   io_poll_min * 1e6 / 57.272727e6);
+        }
+        printf("\n");
+    }
     printf("Z80 clock enables      : %llu, of which stalled on SDRAM %llu "
            "(%.3f%%)\n",
            (unsigned long long)z80_ce_ticks, (unsigned long long)z80_stall_ticks,
@@ -1666,6 +1821,14 @@ int main(int argc, char **argv)
         // after a few cycles, which is an instruction or two later.
         bool hit = false;
         for (int i = 0; i < trail_n; i++) if (trail[i] == ss_saved_eip) hit = true;
+        // The trail is armed on the SECOND exit from the stub, which is the
+        // load's exit on a save-then-load run. A replay (SS_LOAD_FILE) has no
+        // save of its own and so exits the stub only ONCE -- the trail is
+        // still empty here and this verdict read NO on a restore that had
+        // plainly worked, directly under a line showing the two EIPs equal.
+        // The settled EIP is the same evidence without the arming dependency.
+        if (!hit && ss_saved_eip && dut->p_ss_resume_eip == ss_saved_eip)
+            hit = true;
         printf("saved EIP / settled at : %08X / %08X\n",
                ss_saved_eip, dut->p_ss_resume_eip);
         printf("resumed at the saved EIP: %s\n",
@@ -1680,6 +1843,19 @@ int main(int argc, char **argv)
         if (ss_eip_matched)
             printf("  resumed at cycle     : %llu\n",
                    (unsigned long long)ss_eip_match_cyc);
+    }
+    // Z80_DUMP=<file> writes the Z80 program region out, for Z80_IMAGE above.
+    if (const char *zd = getenv("Z80_DUMP")) {
+        FILE *zf = fopen(zd, "wb");
+        if (zf) {
+            fwrite(&sdram[Z80_BASE], 1, Z80_SIZE, zf);
+            fclose(zf);
+            size_t nz = 0;
+            for (uint32_t i = 0; i < Z80_SIZE; i++)
+                if (sdram[Z80_BASE + i] != 0xFF) nz = i + 1;
+            printf("Z80 image: wrote %s, %u bytes, highest non-FF at 0x%zX\n",
+                   zd, Z80_SIZE, nz ? nz - 1 : 0);
+        }
     }
     if (io_rd_trail) {
         FILE *f = fopen(iort, "wb");

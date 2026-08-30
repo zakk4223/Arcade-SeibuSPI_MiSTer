@@ -389,7 +389,6 @@ module spi_cpu
 		end
 		else begin
 			vbl_tgl_d <= vbl_toggle;
-			if (vbl_toggle != vbl_tgl_d) irq_pending <= 1'b1;
 
 			case (istate)
 				I_IDLE: if (cpu_inta && !inta_responded) begin
@@ -412,6 +411,17 @@ module spi_cpu
 
 				default: istate <= I_IDLE;
 			endcase
+
+			// AFTER the case, so a SET beats the I_CYC2 clear. The two can
+			// coincide -- the toggle crosses from clk_sys and is true for one
+			// clk_cpu cycle, and the retire is one cycle a frame -- and MAME's
+			// HOLD_LINE re-asserts on a vblank that arrives during the
+			// acknowledge rather than dropping it. Written before the case the
+			// clear won, and the frame's interrupt went missing: about a
+			// 1-in-530,000 coincidence per frame, so roughly one lost vblank
+			// every few hours of play, with nothing to see but a single frame
+			// that skipped its DMA.
+			if (vbl_toggle != vbl_tgl_d) irq_pending <= 1'b1;
 
 			if (!cpu_inta) inta_responded <= 1'b0;
 		end

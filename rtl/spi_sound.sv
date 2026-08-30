@@ -311,17 +311,45 @@ module spi_sound
 	                                 : {5'd0,     z80_addr[12:0]};
 
 	// ------------------------------------------------------------------
-	// Program ROM fetch, with a one-line (8 byte) buffer.
+	// Program ROM fetch, with an N-line (8 byte each) fully associative
+	// buffer, round-robin replacement.
 	//
 	// The line tag covers the whole 18-bit region offset, bank bits included,
-	// so a bank switch invalidates the line by itself.
+	// so a bank switch invalidates a line by itself.
+	//
+	// WHY MORE THAN ONE LINE. With a single line the buffer thrashes on any
+	// loop that alternates opcode fetch with a data read, because both go
+	// through here and evict each other. Measured on viprp1's sound-CPU
+	// self-check -- a 12-instruction loop spanning four code lines plus one
+	// data line -- the Z80 issued 8.0 SDRAM line fetches PER PASS for the five
+	// distinct lines it touches, and paid 5.4 wait-state T-states on top of
+	// the 100 the instructions themselves take. That is a 5.1% speed error
+	// against a board whose Z80 reads its program with no wait states at all.
+	// Holding the working set removes it: tv80's own timing is already exact
+	// (measured 100.0 executed T-states a pass, matching the hand count).
 	// ------------------------------------------------------------------
-	reg [63:0] line_data;
-	reg [14:0] line_tag;
-	reg        line_valid;
+	localparam int LINES = 8;
 
-	wire line_hit = line_valid && (line_tag == rom_off[17:3]);
-	wire [7:0] line_byte = line_data[{rom_off[2:0], 3'b000} +: 8];
+	reg [63:0] line_data [LINES];
+	reg [14:0] line_tag  [LINES];
+	reg        line_valid[LINES];
+	reg [$clog2(LINES)-1:0] line_rr;      // round-robin victim
+
+	integer li;
+	reg               line_hit_any;
+	reg [63:0]        line_hit_data;
+	always @* begin
+		line_hit_any  = 1'b0;
+		line_hit_data = 64'd0;
+		for (li = 0; li < LINES; li = li + 1)
+			if (line_valid[li] && (line_tag[li] == rom_off[17:3])) begin
+				line_hit_any  = 1'b1;
+				line_hit_data = line_data[li];
+			end
+	end
+
+	wire line_hit = line_hit_any;
+	wire [7:0] line_byte = line_hit_data[{rom_off[2:0], 3'b000} +: 8];
 
 	// The region is 256 KB (MAME's :audiocpu region is 0x40000, eight 32 KB
 	// bank entries) and how much of it holds a program is per set. This used to
@@ -372,12 +400,17 @@ module spi_sound
 		end
 	end
 
+	integer lj;
 	always @(posedge clk) begin
-		if (reset) begin
-			sdr_req    <= 1'b0;
-			fetching   <= 1'b0;
-			line_valid <= 1'b0;
-			dbg_stall_c <= 16'd0;
+		// Held in reset the 386 is REWRITING this region through the download
+		// port, so nothing cached over that boundary can be trusted. One line
+		// survived it before too; with eight, more of it would.
+		if (reset || !z80_rst_n) begin
+			sdr_req     <= 1'b0;
+			fetching    <= 1'b0;
+			line_rr     <= '0;
+			for (lj = 0; lj < LINES; lj = lj + 1) line_valid[lj] <= 1'b0;
+			if (reset) dbg_stall_c <= 16'd0;
 		end
 		else if (!fetching) begin
 			if (fetch_miss) begin
@@ -389,10 +422,11 @@ module spi_sound
 			end
 		end
 		else if (sdr_ack == sdr_req) begin
-			line_data  <= sdr_dout;
-			line_tag   <= fetch_tag;
-			line_valid <= 1'b1;
-			fetching   <= 1'b0;
+			line_data [line_rr] <= sdr_dout;
+			line_tag  [line_rr] <= fetch_tag;
+			line_valid[line_rr] <= 1'b1;
+			line_rr             <= line_rr + 1'b1;
+			fetching            <= 1'b0;
 		end
 	end
 
