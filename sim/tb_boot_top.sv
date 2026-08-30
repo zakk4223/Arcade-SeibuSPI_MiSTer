@@ -29,6 +29,12 @@ module tb_boot_top
 	// spi_top's [2:0], which is a WIDTHEXPAND and, with the other 32 pins
 	// below, is why this testbench had stopped building at all.
 	input       [2:0] set_id,
+	// mod_byte[0] & mod_byte[4] on hardware. EVERY MRA this repo ships sets
+	// it (viprp1 0x17, senkyu 0x19, ejanhs 0x1B, rdft 0x11), because they all
+	// derive the sample flash rather than carrying a programmed one -- so with
+	// this tied to 0, as it was, the bench simulated a configuration that is
+	// not shipped and spi_flash_derive never ran at all.
+	input             i_set_upd,
 
 	// SDRAM services, driven by the C++ model
 	output     [25:0] sdr_prg_addr,
@@ -210,12 +216,19 @@ module tb_boot_top
 	output      [7:0] v_g,
 	output      [7:0] v_b,
 	output            v_hb,
-	output            v_vb
-);
+	output            v_vb,
 
-	/* verilator lint_off UNUSEDSIGNAL */
-	wire        flash_sdr_req;
-	/* verilator lint_on UNUSEDSIGNAL */
+	// The sample-flash write port. With i_set_upd set, spi_flash_derive walks
+	// the 386's program image at reset and PROGRAMS the flash region through
+	// here -- so these writes have to reach the C++ SDRAM model, or the region
+	// the sound hardware later reads stays blank. `ack` is a toggle.
+	output     [25:0] flash_sdr_addr,
+	output     [15:0] flash_sdr_din,
+	output      [1:0] flash_sdr_be,
+	output            flash_sdr_req,
+	input             flash_sdr_ack,
+	output            flash_dirty
+);
 
 	// The blob's trip to DDR3, exactly as SeibuSPI.sv wires it. `ddr_if` is an
 	// interface, so it is unrolled onto plain ports for the C++ model.
@@ -316,19 +329,19 @@ module tb_boot_top
 		// Z80-program check below is written against. The sound1 window that
 		// check reads through does not depend on it -- rdft2 and rfjet carry
 		// that ROM either way -- so what run-boot covers is unchanged.
-		.set_upd      (1'b0),
+		.set_upd      (i_set_upd),
 
 		// The sample-flash write port. Nothing programs it with set_upd low,
 		// but the ack is a TOGGLE handshake, so tying it low rather than to
 		// the request would stall the writer forever if anything ever did --
 		// silently, and in the same shape as the ch3 bug in PLAN.md 21.3.
 		// Looping it back models a memory that is always ready.
-		.flash_sdr_addr(),
-		.flash_sdr_din (),
-		.flash_sdr_be  (),
+		.flash_sdr_addr(flash_sdr_addr),
+		.flash_sdr_din (flash_sdr_din),
+		.flash_sdr_be  (flash_sdr_be),
 		.flash_sdr_req (flash_sdr_req),
-		.flash_sdr_ack (flash_sdr_req),
-		.flash_dirty   (),
+		.flash_sdr_ack (flash_sdr_ack),
+		.flash_dirty   (flash_dirty),
 
 		// The DS2404's SRAM port, which spi_nvram drives at the top level and
 		// nothing drives here. Tied off rather than left unconnected for the
