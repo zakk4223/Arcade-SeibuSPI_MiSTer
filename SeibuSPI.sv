@@ -1438,7 +1438,13 @@ wire       vga_de_mixer;
 //
 //  Gated on the scaler and the scandoubler (both double or retime the pixel CE,
 //  which invalidates the read generator's base), exactly as Raiden II does.
-wire crt_adj_on = status[45] & ~(|status[7:5]) & ~forced_scandoubler;
+//
+//  The range is status[7:3] and every bit of it matters: [7:6] is Scale and
+//  [5:3] is Scandoubler Fx, which has FIVE settings. Testing [7:5] caught only
+//  Fx = CRT 75% -- the one value with bit 5 set -- and left HQ2x, CRT 25% and
+//  CRT 50% running the chain, so arcade_video's scandoubler was handed
+//  `rd_tick`, the Bresenham read CE, instead of a uniform one.
+wire crt_adj_on = status[45] & ~(|status[7:3]) & ~forced_scandoubler;
 
 // H-Size: signed 5-bit, one step = an eighth of a clk out of the 64 the pixel
 // is worth, so 1/64 = 1.56% per step (Raiden II is 1/104 = 0.96%: its pixel is
