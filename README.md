@@ -32,7 +32,7 @@ current gaps:
    Luckily the games are all properly vsync throttled; there may be some
    instances where the faster cpu is able to do more work and remove 'slowdown'.
    I'm not 100% sure if it ever happens on hardware, and the fact some of the
-   single board variants replaced it with a 40Mhz cpu says maybe not...
+   single board variants replaced it with a 40Mhz cpu (but clocked it at 28, which is still faster) says maybe not...
 
 2. More investigation of the sound chip. It is functional but 'mame quality'
    which still clearly has some issues.
@@ -41,9 +41,6 @@ current gaps:
 
 4. real/better memory/sub-cpu access timings
 
-5. The core runs at 54Hz, investigate a 60hz mode (lol bullet speed)
-
-6. savestates maybe (core is kinda full, but mayyyyyybe)
 
 ## Core utilization
 
