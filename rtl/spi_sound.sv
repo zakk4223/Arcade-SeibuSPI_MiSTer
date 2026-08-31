@@ -328,7 +328,7 @@ module spi_sound
 	// Holding the working set removes it: tv80's own timing is already exact
 	// (measured 100.0 executed T-states a pass, matching the hand count).
 	// ------------------------------------------------------------------
-	localparam int LINES = 8;
+	localparam int LINES = 6;
 
 	reg [63:0] line_data [LINES];
 	reg [14:0] line_tag  [LINES];
@@ -404,7 +404,7 @@ module spi_sound
 	always @(posedge clk) begin
 		// Held in reset the 386 is REWRITING this region through the download
 		// port, so nothing cached over that boundary can be trusted. One line
-		// survived it before too; with eight, more of it would.
+		// survived it before too; with six, more of it would.
 		if (reset || !z80_rst_n) begin
 			sdr_req     <= 1'b0;
 			fetching    <= 1'b0;
@@ -425,7 +425,15 @@ module spi_sound
 			line_data [line_rr] <= sdr_dout;
 			line_tag  [line_rr] <= fetch_tag;
 			line_valid[line_rr] <= 1'b1;
-			line_rr             <= line_rr + 1'b1;
+			// Explicit wrap: LINES need not be a power of two, and $clog2
+			// rounds the counter UP. At LINES=6 a bare increment reaches 6
+			// and 7, where all three writes above are dropped on the floor --
+			// the line is stored nowhere, the hit never comes, and the same
+			// fetch is reissued with the Z80 held in wait until the counter
+			// walks back to 0. Two of every eight misses paid three SDRAM
+			// round trips for one line.
+			line_rr             <= (line_rr == ($clog2(LINES))'(LINES-1))
+			                       ? '0 : line_rr + 1'b1;
 			fetching            <= 1'b0;
 		end
 	end
