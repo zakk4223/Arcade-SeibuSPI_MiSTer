@@ -1955,6 +1955,73 @@ on 1024-column parts) and addr[26] (second chip), so that is a board
 requirement, not an RTL redesign — but it does mean the bigger sets cannot ride
 along as an MRA config bit on a build 32 MB users can run.
 
+#### Clocks, per board (2026-08-29)
+
+Read off `seibuspi.cpp` machine configs, line numbers in the last column. The
+Sound column of the table above says which chip; this says at what rate.
+
+| Board  | 386                        | Z80                                       | Pixel    | Refresh     | Sound chip                        | Backup            | Driver lines  |
+|--------|----------------------------|-------------------------------------------|----------|-------------|-----------------------------------|-------------------|---------------|
+| SXX2C  | 25 MHz (50/2)              | **7.15909** (28.63636/4), Z84C0008PEC     | 7.15909  | 53.9869 Hz  | YMF271 **16.9344**                | DS2404 @32.768 kHz| 1805, 1811, 1832 |
+| SXX2E  | 25 MHz (50/2)              | 7.15909, *"Unknown part number and clock"*| 7.15909  | 53.9869 Hz  | YMF271 16.9344, **mono**          | DS2404 @32.768 kHz| 1861, 1868, 1885 |
+| SXX2F  | 25 MHz (50/2)              | 7.15909, Z84C000**6**PCS, *"unknown, possibly slower"* | 7.15909 | 53.9869 Hz | YMF271 16.9344 | 93C46 | 1890, 1903 |
+| SXX2G  | **28.63636** (AM386DX-40)  | **4.9152**, Z84C000**4**PCS               | 7.15909  | 53.9869 Hz  | YMF271 **16.384**                 | 93C46             | 1906, 1912-1917 |
+| SYS386I| **40 MHz**                 | **none**                                  | 7.15909  | 53.9869 Hz  | **2x OKIM6295** @1.431818 (28.63636/20) | 93C46       | 1925, 1939    |
+| SYS386F| 25 MHz (50/2)              | **none**                                  | *n/a*    | **57.59 Hz**| **YMZ280B** @16.384               | 93C46             | 1969, 1980, 1998 |
+
+Video is one constant for every board but SYS386F: `PIXEL_CLOCK = 28.636363/4`
+at 448 x 296 total, 320 x 240 visible (`seibuspi.cpp:898-906`), so 53.9869 Hz
+and a 15980.11 Hz line rate. SYS386F has no Seibu CRTC at all -- it declares
+`set_refresh_hz(57.59)` flat with a 320 x 240 visarea, so its timing is not
+this core's `spi_video_timing` with different constants, it is a different
+generator.
+
+Sample rates, which are what actually reaches a mixer:
+
+| Chip                    | Master     | Divider          | Rate         |
+|-------------------------|------------|------------------|--------------|
+| YMF271 (SXX2C/E/F)      | 16.9344    | 384              | **44100 Hz** exactly |
+| YMF271 (SXX2G)          | 16.384     | 384              | 42666.67 Hz  |
+| OKIM6295 x2 (SYS386I)   | 1.431818   | 132 (PIN7_HIGH)  | 10847 Hz     |
+
+**Only three of the six Z80 clocks are actually known.** SXX2C's 7.15909 is
+measured -- the PCB notes give the part and the divider (`seibuspi.cpp:145`,
+`:208`). SXX2E's is a GUESS: `sxx2e()` inherits `spi()`'s rate under the comment
+`// Unknown part number and clock`, so the 7.159090 MHz this core clocks `rdfts`
+at is MAME's assumption inherited, not a verified rate. SXX2F is worse -- a
+slower-rated Z84C0006PCS with `// clock is unknown, possibly slower than
+7.159MHz`, left at 7.159 anyway. Only SXX2G's is both different and stated.
+
+**MAME's SXX2G Z80 constant is a typo.** `seibuspi.cpp:1913` writes
+`4.9512_MHz_XTAL` while its own comment on the same line says `4.9152MHz`.
+4.9152 MHz is a standard crystal (2048 x 2400), is in `src/emu/xtal.cpp:124`,
+and is used by 50 files; 4.9512 appears in exactly one file in all of MAME --
+this one -- and is not in the XTAL table. Digit transposition, +0.73%. Take
+4.9152 if SXX2G is ever built.
+
+##### What this core runs against those
+
+| Rate    | Hardware (SXX2E / SXX2C) | This core                                              | Error        |
+|---------|--------------------------|--------------------------------------------------------|--------------|
+| 386     | 25.000 MHz               | 28.636364 (`clk_sys`/2)                                | **+14.5%**   |
+| Z80     | 7.159090                 | 7.159090, `clk_sys`/8 (`spi_sound.sv` `ce_div`)        | exact        |
+| Pixel   | 7.159090                 | 7.159090, `ce_pix` = `clk_sys`/8 (`spi_video_timing.sv:183`) | exact  |
+| Refresh | 53.9869 Hz               | 53.9869 native, plus 49.94 / 57.07 / 60.08 by VTOTAL   | exact Normal |
+| YMF271  | 16.9344 MHz              | **no such clock** -- 44100 Hz fractional tick off 57.272727 (`ymf271.sv:103`) | exact on average |
+
+The 386 is the only rate that is wrong, and section 16.9 is where that is
+argued. Worth adding here: **SXX2G ran a real 386 at 28.63636 MHz**, which is
+exactly the rate this core runs, so the figure is not unprecedented on Seibu
+hardware -- it is the rate of a later board with the same video and the same
+sound topology.
+
+For a future SXX2G, the two sound rates split cleanly. The YMF271's 16.384
+crystal costs ONE constant, because `ymf271.sv` never synthesises a master
+clock -- it accumulates a 44100 Hz tick out of `clk_sys`, and 42666.67 Hz is the
+same accumulator with a different `RATE`. The Z80 is the awkward one:
+57.272727 / 4.9152 = 11.65, not an integer, so `ce_div` cannot produce it and it
+needs an accumulator of its own or a rate that admits it.
+
 **SXX2F / SXX2G are the closest siblings.** Same `base_video`, same CRTC, same
 tilemaps, same Z80 + YMF271 topology, same 386 core. What actually differs:
 
