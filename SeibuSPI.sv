@@ -272,6 +272,10 @@ localparam CONF_STR = {
 	// six minutes where they used to boot in seconds. It also means the
 	// common path does not depend on this option being touched at all.
 	"H1O[22],Sample Flash,Pre-built,Cart copy;",
+	// Bit 23 is virgin -- it is not one of the retired bits above, so no
+	// older .CFG can have it set. Default No, which is the behaviour every
+	// build so far has had: the Pause button stays the only way to freeze.
+	"O[23],Pause on OSD,No,Yes;",
 	"-;",
 	"DIP;",
 	"-;",
@@ -756,9 +760,24 @@ always @(posedge clk_sys) begin
 	if (reset) freeze_tgl <= 1'b0;
 end
 
+// "Pause on OSD" (O[23]) is the second way in. OSD_STATUS is a reg in
+// sys/osd.v clocked on SYS_TOP's clk_sys, which is not this core's clk_sys, so
+// it crosses a domain to get here. The synchroniser has to be on this side of
+// the OR: spi_top takes `freeze` as an already-clean clk_sys signal and
+// synchronises it into clk_cpu itself (rtl/spi_top.sv:220), so anything
+// metastable that got into `freeze` would be sampled by two domains, not one.
+//
+// It is a level, not a toggle, and it is deliberately independent of
+// freeze_tgl: opening the OSD while the button has already paused leaves the
+// core paused when the OSD closes, which is what the button was asked for.
+// Nothing clears it on reset either, because there is nothing to clear -- close
+// the OSD and it releases on its own.
+reg [1:0] osd_status_s;
+always @(posedge clk_sys) osd_status_s <= {osd_status_s[0], OSD_STATUS};
+
 // The JTAG source register used to OR into this; with spi_jtag_peek out of the
-// net the button is the only way to pause.
-wire freeze = freeze_tgl;
+// net the button and this option are the only ways to pause.
+wire freeze = freeze_tgl | (status[23] & osd_status_s[1]);
 
 wire [15:0] ldr_din;
 wire  [1:0] ldr_be;
