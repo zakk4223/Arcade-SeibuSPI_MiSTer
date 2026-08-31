@@ -36,7 +36,7 @@
 //  from the previous". That one-sample delay is part of the model.
 //
 //  So there is no live r1/r3/r2 network here any more. Every slot's output
-//  persists in `out_reg`, and a slot reads whichever of its own group's four
+//  persists in `out_mem*`, and a slot reads whichever of its own group's four
 //  outputs the algorithm says modulate it -- some written this pass, some
 //  last. The algorithm itself is latched per group off the head slot as the
 //  pass walks bank 0 (and bank 1, for the second pair of a sync-1 group),
@@ -290,7 +290,30 @@ module ymf271_synth
 	// 12-to-1 mux over the group's four entries because a slot's modulators
 	// are always in its own group.
 	// ------------------------------------------------------------------
-	reg signed [W_OUT-1:0] out_reg [0:47];
+	// FOUR COPIES of one single-port RAM, not 48 x 18 flops. The array needs
+	// four arbitrary reads at once, which one RAM cannot serve -- but four
+	// copies written together can, each holding the whole 48 and reading its
+	// own group entry. That is 864 flip-flops and a 48-way write decoder traded
+	// for four M10K blocks, the same trade fb_mem's comment above records
+	// making when the flop version wanted more LABs than the part has.
+	//
+	// The read latency is free. `group` is loaded once per slot and holds for
+	// the whole visit (see ngroup/nbank below), so a port clocked every cycle
+	// carries the right value from the slot's second cycle on -- long before
+	// in_sum is consumed. The write lands a cycle after S_MIX exactly as
+	// st_mem's does, and the next reader of that entry is twelve slots away.
+	//
+	// Copy 0's read port is shared with the savestate stream the way fb_q's is,
+	// which is safe for the same reason: the core is paused while the stream
+	// runs, so no slot is consuming gout0 then.
+	(* ramstyle = "M10K" *) reg signed [W_OUT-1:0] out_mem0 [0:47];
+	(* ramstyle = "M10K" *) reg signed [W_OUT-1:0] out_mem1 [0:47];
+	(* ramstyle = "M10K" *) reg signed [W_OUT-1:0] out_mem2 [0:47];
+	(* ramstyle = "M10K" *) reg signed [W_OUT-1:0] out_mem3 [0:47];
+	reg  [5:0] or_wa;
+	reg signed [W_OUT-1:0] or_wd;
+	reg        or_we;
+	reg signed [W_OUT-1:0] gout0, gout1, gout2, gout3;
 
 	// ------------------------------------------------------------------
 	// The savestate's three sections.
@@ -365,9 +388,9 @@ module ymf271_synth
 	end
 
 	// Two words a slot: the two feedback history words and the slot's own
-	// output, 54 bits in 64. All three are flops rather than RAM, so the stream
-	// reads them straight out of the arrays; the write side lives in the main
-	// block, where the arrays are driven.
+	// output, 54 bits in 64. fb_mem and out_mem* are RAM, read through their
+	// registered ports (fb_q, gout0) with ss_fb_d giving the port its cycle;
+	// fb_pend is still flops and is read straight out of the array.
 	wire        ss_fb_acc  = ssbus_fb.access(SSIDX_YMF_FB);
 	wire [31:0] ss_fb_idx  = ssbus_fb.addr;
 	wire  [5:0] ss_fb_slot = 6'(ss_fb_idx >> 1);
@@ -388,7 +411,7 @@ module ymf271_synth
 				if (ss_fb_d) ssbus_fb.read_response(SSIDX_YMF_FB, {32'd0,
 					(ss_fb_idx >= 32'd96)
 					  ? {14'd0, $unsigned(fb_pend[ss_fb_idx[4:0]])}
-					  : ss_fb_word ? {$unsigned(out_reg[ss_fb_slot]), 10'd0,
+					  : ss_fb_word ? {$unsigned(gout0), 10'd0,
 					                  fb_q[2*W_OUT-1:32]}
 					               : fb_q[31:0]});
 				ss_fb_d <= 1'b1;
@@ -814,10 +837,24 @@ module ymf271_synth
 	// The group's four outputs. A slot's modulators are always inside its own
 	// group, so this is one 12-to-1 mux over four entries rather than a 48-way
 	// read.
-	wire signed [W_OUT-1:0] gout0 = out_reg[{2'b00, group}];
-	wire signed [W_OUT-1:0] gout1 = out_reg[6'd12 + {2'b00, group}];
-	wire signed [W_OUT-1:0] gout2 = out_reg[6'd24 + {2'b00, group}];
-	wire signed [W_OUT-1:0] gout3 = out_reg[6'd36 + {2'b00, group}];
+	always @(posedge clk) begin
+		if (ss_fb_commit) begin
+			out_mem0[ss_fb_slot] <= $signed(ssbus_fb.data[31:14]);
+			out_mem1[ss_fb_slot] <= $signed(ssbus_fb.data[31:14]);
+			out_mem2[ss_fb_slot] <= $signed(ssbus_fb.data[31:14]);
+			out_mem3[ss_fb_slot] <= $signed(ssbus_fb.data[31:14]);
+		end
+		else if (or_we) begin
+			out_mem0[or_wa] <= or_wd;
+			out_mem1[or_wa] <= or_wd;
+			out_mem2[or_wa] <= or_wd;
+			out_mem3[or_wa] <= or_wd;
+		end
+		gout0 <= out_mem0[ss_fb_acc ? ss_fb_slot : {2'b00, group}];
+		gout1 <= out_mem1[6'd12 + {2'b00, group}];
+		gout2 <= out_mem2[6'd24 + {2'b00, group}];
+		gout3 <= out_mem3[6'd36 + {2'b00, group}];
+	end
 
 	wire signed [W_OUT+1:0] in_sum = (mod_mask[0] ? {{2{gout0[W_OUT-1]}}, gout0} : 20'sd0)
 	                               + (mod_mask[1] ? {{2{gout1[W_OUT-1]}}, gout1} : 20'sd0)
@@ -1080,6 +1117,7 @@ module ymf271_synth
 		end_set <= 1'b0;
 		st_we   <= 1'b0;
 		fb_we   <= 1'b0;
+		or_we   <= 1'b0;
 		cch_we  <= 1'b0;
 
 		if (sample_tick) begin
@@ -1394,7 +1432,9 @@ module ymf271_synth
 		// Mix, publish the output, write the feedback history and store the
 		// slot's state -- all independent, so one cycle.
 		S_MIX: begin
-			out_reg[slot] <= op_out;
+			or_wa <= slot;
+			or_wd <= op_out;
+			or_we <= 1'b1;
 
 			if (is_carrier) begin
 				acc_ch[0] <= acc_ch[0] + {{6{pan0[W_OUT-1]}}, pan0};
@@ -1510,7 +1550,9 @@ module ymf271_synth
 			st_wa  <= clr_cnt;
 			st_wd  <= ST_INIT;
 			st_we  <= 1'b1;
-			out_reg[clr_cnt] <= {W_OUT{1'b0}};
+			or_wa  <= clr_cnt;
+			or_wd  <= {W_OUT{1'b0}};
+			or_we  <= 1'b1;
 			fb_wa  <= clr_cnt;
 			fb_wd  <= {(2*W_OUT){1'b0}};
 			fb_we  <= 1'b1;
@@ -1547,7 +1589,6 @@ module ymf271_synth
 		// The feedback history lands in fb_mem through its own write port; the
 		// slot outputs and the hand-off file are flops, so they are written
 		// here. Items 96..119 of the section are the hand-off file.
-		if (ss_fb_commit) out_reg[ss_fb_slot] <= $signed(ssbus_fb.data[31:14]);
 		if (ss_fb_acc && ssbus_fb.write && (ss_fb_idx >= 32'd96))
 			fb_pend[ss_fb_idx[4:0]] <= $signed(ssbus_fb.data[W_OUT-1:0]);
 
@@ -1604,7 +1645,10 @@ module ymf271_synth
 			st_mem[i]   = ST_INIT;
 			cch_tag[i]  = 20'd0;
 			cch_data[i] = 128'd0;
-			out_reg[i]  = {W_OUT{1'b0}};
+			out_mem0[i] = {W_OUT{1'b0}};
+			out_mem1[i] = {W_OUT{1'b0}};
+			out_mem2[i] = {W_OUT{1'b0}};
+			out_mem3[i] = {W_OUT{1'b0}};
 			fb_mem[i]   = {(2*W_OUT){1'b0}};
 		end
 		for (i = 0; i < 12; i = i + 1) begin
