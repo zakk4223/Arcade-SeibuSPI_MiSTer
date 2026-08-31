@@ -46,30 +46,48 @@ current gaps:
 
 Quartus Prime 17.0.0 Lite, Cyclone V `5CSEBA6U23I7` (MiSTer DE10-Nano),
 top-level entity `sys_top`, `SEED 1`. From `output_files/SeibuSPI.fit.summary`,
-fit dated 2026-08-28.
+fit dated 2026-08-31 (`BUILD_DATE 260831`, bitstream `5a342091`).
 
 | Resource                | Used      | Available | Utilization |
 |-------------------------|-----------|-----------|-------------|
-| Logic utilization (ALMs)| 40,078    | 41,910    | 96 %        |
-| Total registers         | 39,073    | -         | -           |
-| Block memory bits       | 3,839,265 | 5,662,720 | 68 %        |
-| RAM blocks              | 526       | 553       | 95 %        |
+| Logic utilization (ALMs)| 39,217    | 41,910    | 94 %        |
+| Total registers         | 38,705    | -         | -           |
+| Block memory bits       | 3,841,857 | 5,662,720 | 68 %        |
+| RAM blocks              | 529       | 553       | 96 %        |
 | DSP blocks              | 58        | 112       | 52 %        |
 | PLLs                    | 3         | 6         | 50 %        |
 | Pins                    | 145       | 314       | 46 %        |
 
-Timing: **+0.190 ns setup** (`emu`, clk_ram), **+0.148 ns hold** (`sysmem`),
-TNS 0.000 on every clock, no critical warnings. `make check-timing` is the
-gate, and `make release` refuses to assemble a distribution without it.
+Timing: worst setup **+0.017 ns** on `pll_hdmi`, worst hold **+0.243 ns** on
+`emu` (clk_ram). The core's own clock has more room than that headline suggests
+— clk_ram is +0.120 setup — because the tightest path in the design belongs to
+the HDMI PLL, which is framework territory and not something this core's RTL
+moves. TNS 0.000 on every clock for setup, hold, recovery, removal and minimum
+pulse width; no critical warnings. `make check-timing` is the gate, and `make
+release` refuses to assemble a distribution without it.
 
-**Logic is the binding resource now, narrowly ahead of RAM blocks.** That is a
-change: it used to be RAM, and the two have nearly converged at 96 % ALM against
-95 % RAM. The YMF271 OPX rewrite is what moved them. It trades stored tables for
-computed logic, and the fit shows exactly that shape — ALMs up 37,569 → 40,078
-while RAM blocks fell 539 → 526 and DSPs 69 → 58.
+**RAM blocks are the binding resource again, narrowly ahead of logic**, at 96 %
+RAM against 94 % ALM. That is a reversal: the 2026-08-28 fit had them the other
+way round (96 % ALM / 95 % RAM) and this section said logic was binding. The
+YMF271 slot-output array is what turned it back. It was 48 x 18 flops read four
+ways at once, and it became four copies of one M10K each holding all 48 — the
+same trade `fb_mem` made earlier — which is 864 flip-flops and a 48-way write
+decoder handed back to the fabric in exchange for block memory.
+
+The fit-to-fit numbers across that change: ALMs 40,078 → 39,107 → 39,217 and RAM
+blocks 526 → 529 over the 08-28, 08-30 and 08-31 fits. The direction matches the
+intent, but the interval also contains the SDRAM grant register and the Z80
+cache dropping from eight lines to six, and none of the three was fitted alone —
+so the ALM saving is not attributable to any one of them here. The RAM cost came
+out at +3 blocks rather than the +4 four copies would imply; that was not
+isolated either.
+
+Before that, the step to 96 % ALM was the YMF271 OPX rewrite, which trades
+stored tables for computed logic — ALMs 37,569 → 40,078 while RAM blocks fell
+539 → 526 and DSPs 69 → 58.
 
 Neither resource has much left, and the RAM split still matters: 68 % of the
-*bits* are used but 95 % of the *blocks*, because several arrays are wide and
+*bits* are used but 96 % of the *blocks*, because several arrays are wide and
 shallow and pack badly. Two figures set that budget — `spi_mainram` is 256
 blocks on its own, 47 % of the device, for the 386's 256 KB, and it is already
 optimally packed (an M10K holds 8,192 usable
@@ -79,8 +97,7 @@ dropping it to 20 returns roughly 28 blocks if anything else ever needs them.
 
 The growth since the 2026-08-19 fit (81 % ALM / 88 % RAM) was almost entirely
 CRT Adjust and CRT V-Size, at ~1,200 ALM and 52 RAM blocks; the refresh-rate
-conversion and screen flip together cost less than the fit-to-fit noise. The
-step from there to 96 % is the OPX rewrite described above.
+conversion and screen flip together cost less than the fit-to-fit noise.
 
 At this utilization the fitter is fighting, and which marginal path fails
 becomes seed-dependent — identical RTL failed hold on two entirely different
