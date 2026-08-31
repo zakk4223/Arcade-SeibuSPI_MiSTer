@@ -121,3 +121,23 @@ set_multicycle_path -hold -end 1 -from [get_registers {*spi_ss_bridge*|ram_din[*
 set_multicycle_path -hold -end 1 -to   [get_registers {*spi_sdr_arb4*|m_addr[*]}]
 set_multicycle_path -hold -end 1 -to   [get_registers {*spi_sdr_arb4*|m_din[*]}]
 set_multicycle_path -hold -end 1 -to   [get_registers {*spi_sdr_arb4*|m_be[*]}]
+#
+# spi_sdr_arb2 (rtl/spi_sdr_arb2.sv), the ch5 PCM read channel. This one was
+# left out on purpose when the block was written -- it measured +0.630/+0.453/
+# +0.516 then, so it did not need saying -- with a note that if it ever tipped
+# the fix was to extend this block rather than touch the SEED. It tipped, at
+# -0.594 on `a_dout[21] -> ymf271_synth|ext_data[5]`, so here it is.
+#
+# It is the same shape as the arb4 payloads, read in the other direction. The
+# arbiter writes a_dout and flips a_ack ON THE SAME EDGE (S_A), and the
+# consumer captures only once it has observed the toggle -- ymf271_synth's
+# S_EXT waits for `sdr_ack == sdr_req` -- which cannot happen before the next
+# clk_sys edge. After that a_dout is quasi-static until the consumer itself
+# raises the next request, a whole SDRAM round trip away. So the coincident
+# launch/capture pair the phase alignment produces has nothing behind it.
+#
+# The ack/req toggles are NOT relaxed, for the same reason they are not on
+# arb4: they are the qualifier that makes the payload quasi-static, and their
+# own timing has to go on being checked.
+set_multicycle_path -hold -end 1 -from [get_registers {*spi_sdr_arb2*|a_dout[*]}]
+set_multicycle_path -hold -end 1 -from [get_registers {*spi_sdr_arb2*|b_dout[*]}]
