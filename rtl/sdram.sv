@@ -242,6 +242,35 @@ always @(posedge clk) begin
     reg       ch1_rq, ch2_rq, ch3_rq, ch4_rq, ch5_rq;
     reg [2:0] ch;
 
+    // The arbitration, resolved ONE CYCLE EARLY.
+    //
+    // The rq flags sit next to their own channel logic all over the die, and
+    // the priority chain that picks between them used to resolve inside the
+    // same cycle that drives SDRAM_A -- so `ch*_rq -> SDRAM_A[7]` carried the
+    // convergence of five far-apart flops AND the address mux. It was the
+    // worst path in three of four fits (-0.142, -0.024).
+    //
+    // Note what is NOT being done here: the cascade is not flattened. The
+    // 2026-08-17 note below records that flattening made it far worse, because
+    // this is routing, not depth. Giving the same cascade its own cycle costs
+    // no depth anywhere and lets the five flags converge on a flop that then
+    // sits beside the address mux it steers.
+    //
+    // Staleness is bounded and harmless. The rq flags are STICKY -- set on a
+    // request toggle, cleared only in STATE_IDLE -- so a grant computed last
+    // cycle always names a channel that still wants service. The controller
+    // cannot re-enter STATE_IDLE in under three cycles (WAIT, RW1, ...), which
+    // is long enough for the clear to be reflected. A request that arrives at
+    // an IDLE controller waits one extra cycle; one that arrives while a
+    // transfer is in flight waits none, because the grant is recomputed every
+    // cycle and is already correct when STATE_IDLE comes round. Back-to-back
+    // throughput -- the case the layer renderer's line budget depends on -- is
+    // therefore unchanged.
+    localparam [2:0] GR_NONE = 3'd0, GR_RFSH = 3'd1, GR_CH2  = 3'd2,
+                     GR_CH1  = 3'd3, GR_CH4  = 3'd4, GR_CH5  = 3'd5,
+                     GR_CH3  = 3'd6, GR_DREF = 3'd7;
+    reg [2:0] grant = GR_NONE;
+
     reg [26:1] ch1_addr_1, ch2_addr_1, ch3_addr_1, ch4_addr_1, ch5_addr_1;
 
     reg        ch3_rnw_1;
@@ -298,6 +327,15 @@ always @(posedge clk) begin
 
     refresh_count <= refresh_count+1'b1;
     refresh_due   <= (refresh_count > cycles_per_refresh);
+
+    grant <= refresh_due         ? GR_RFSH
+           : ch2_rq              ? GR_CH2
+           : ch1_rq              ? GR_CH1
+           : ch4_rq              ? GR_CH4
+           : (USE_CH5 && ch5_rq) ? GR_CH5
+           : ch3_rq              ? GR_CH3
+           : doRefresh_1         ? GR_DREF
+           :                       GR_NONE;
 
     data_ready_delay1 <= data_ready_delay1>>1;
     data_ready_delay2 <= data_ready_delay2>>1;
@@ -443,14 +481,15 @@ always @(posedge clk) begin
             // at one gate in one level, where the cascade lets the fitter spread
             // their arrival across levels. Flattening a cascade helps only when
             // the depth is the cost. PLAN.md 28.3.
-            if (refresh_due) begin // emergency refresh, mainly for downloading rom/paused core
+            case (grant)
+            GR_RFSH: begin // emergency refresh, mainly for downloading rom/paused core
                 state         <= STATE_RFSH;
                 command       <= CMD_AUTO_REFRESH;
                 refresh_count <= refresh_count - cycles_per_refresh + 1'd1;
                 refresh_due   <= 1'b0;
                 chip          <= 0;
             end
-            else if(ch2_rq) begin
+            GR_CH2: begin
                 {cas_addr[12:9],SDRAM_BA,SDRAM_A,cas_addr[8:0]} <= {2'b00, 1'b1, ch2_addr_1[25:1]};
                 chip       <= ch2_addr_1[26];
                 saved_wr   <= 0;
@@ -459,7 +498,7 @@ always @(posedge clk) begin
                 command    <= CMD_ACTIVE;
                 state      <= STATE_WAIT;
             end
-            else if(ch1_rq) begin
+            GR_CH1: begin
                 {cas_addr[12:9],SDRAM_BA,SDRAM_A,cas_addr[8:0]} <= {2'b00, 1'b1, ch1_addr_1[25:1]};
                 chip       <= ch1_addr_1[26];
                 saved_wr   <= 0;
@@ -468,7 +507,7 @@ always @(posedge clk) begin
                 command    <= CMD_ACTIVE;
                 state      <= STATE_WAIT;
             end
-            else if(ch4_rq) begin
+            GR_CH4: begin
                 {cas_addr[12:9],SDRAM_BA,SDRAM_A,cas_addr[8:0]} <= {2'b00, 1'b1, ch4_addr_1[25:1]};
                 chip       <= ch4_addr_1[26];
                 saved_wr   <= 0;
@@ -477,7 +516,7 @@ always @(posedge clk) begin
                 command    <= CMD_ACTIVE;
                 state      <= STATE_WAIT;
             end
-            else if(ch5_rq) begin
+            GR_CH5: begin
                 {cas_addr[12:9],SDRAM_BA,SDRAM_A,cas_addr[8:0]} <= {2'b00, 1'b1, ch5_addr_1[25:1]};
                 chip       <= ch5_addr_1[26];
                 saved_wr   <= 0;
@@ -486,7 +525,7 @@ always @(posedge clk) begin
                 command    <= CMD_ACTIVE;
                 state      <= STATE_WAIT;
             end
-            else if(ch3_rq) begin
+            GR_CH3: begin
                 chip       <= ch3_addr_1[26];
                 saved_data <= ch3_din_1;
                 saved_wr   <= ~ch3_rnw_1;
@@ -505,13 +544,15 @@ always @(posedge clk) begin
                 command    <= CMD_ACTIVE;
                 state      <= STATE_WAIT;
             end
-            else if (doRefresh_1) begin
+            GR_DREF: begin
                 state         <= STATE_RFSH;
                 command       <= CMD_AUTO_REFRESH;
                 refresh_count <= 0;
                 refresh_due   <= 1'b0;
                 chip          <= 0;
             end
+            default: ;
+            endcase
         end
 
         STATE_WAIT: state <= STATE_RW1;
