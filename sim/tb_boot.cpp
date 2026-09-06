@@ -272,6 +272,9 @@ int main(int argc, char **argv)
     std::vector<LateIO2> vid_pb;
     std::map<uint32_t, std::pair<uint64_t, uint32_t>> io_writes; // addr -> (count, last value)
     uint64_t io_wr_total = 0;
+    // bench/ doorbell reassembly: see the 0x4F0 handler below.
+    int      bench_idx = -1, bench_n = 0;
+    uint32_t bench_word[7] = {0};
 
     // Byte-merged shadow of the Seibu CRTC window (0x400-0x44F, 20 dwords),
     // reconstructed exactly the way spi_io.sv merges it: per byte, gated by the
@@ -1208,6 +1211,35 @@ int main(int argc, char **argv)
                 auto &e = io_writes[dut->p_io_addr];
                 e.first++;
                 e.second = dut->p_io_wdata;
+
+                // bench/ doorbell. The benchmark ROM streams each finished
+                // result as eight dwords to 0x4F0, an address nothing decodes:
+                // spi_io drops the write but spi_cpu still raises io_wr, so the
+                // Verilator run gets its numbers out with no RTL change at all.
+                // Frame: marker('SP' | 0xB000 | index), 12 name bytes as three
+                // dwords, iters_lo, iters_hi, delta, window.
+                if (dut->p_io_addr * 4 == 0x4F0) {
+                    uint32_t w = dut->p_io_wdata;
+                    if ((w & 0xFFFFF000u) == 0x5350B000u) {
+                        bench_idx = w & 0xFFF;
+                        bench_n = 0;
+                    } else if (bench_idx >= 0 && bench_n < 7) {
+                        bench_word[bench_n++] = w;
+                        if (bench_n == 7) {
+                            char nm[13];
+                            for (int k = 0; k < 3; k++)
+                                memcpy(nm + k * 4, &bench_word[k], 4);
+                            nm[12] = 0;
+                            for (int k = 11; k >= 0 && nm[k] == ' '; k--) nm[k] = 0;
+                            printf("BENCH idx=%d name=\"%s\" lo=%u hi=%u "
+                                   "delta=%u window=%u\n",
+                                   bench_idx, nm, bench_word[3], bench_word[4],
+                                   bench_word[5], bench_word[6]);
+                            fflush(stdout);
+                            bench_idx = -1;
+                        }
+                    }
+                }
 
                 // CRTC window: 0x400-0x44F is io_addr 0x100-0x113. Merge the
                 // enabled bytes into the shadow, mirroring spi_io.sv exactly.

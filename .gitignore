@@ -43,3 +43,18 @@ sim/spi_ref.h
 # so it does not belong in a public repo. Keep them locally; PLAN.md 45 and 50
 # describe the one this project debugged with.
 *.ss
+
+# bench/ build products. bench.bin is 2 MB of mostly 0xFF, the split ROMs and
+# the zip are derived from it, and blocks.inc/table.inc/tests.json come out of
+# gen_tests.py -- all of it rebuilds with `make bench`. The captured video-init
+# trace and the .inc it generates ARE checked in, because recapturing them needs
+# MAME and a real ROM set.
+bench/bench.bin
+bench/blocks.inc
+bench/table.inc
+bench/tests.json
+bench/out/
+bench/out-quick/
+bench/dist/
+bench/__pycache__/
+bench/tools/__pycache__/

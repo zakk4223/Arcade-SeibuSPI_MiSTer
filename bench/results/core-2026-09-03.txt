@@ -1,0 +1,37 @@
+BENCH idx=0 name="NULL" lo=212091 hi=212098 delta=100 window=2
+BENCH idx=10 name="STORE" lo=48202 hi=4777 delta=100 window=2
+BENCH idx=11 name="ADD R,[M]" lo=31191 hi=3175 delta=100 window=2
+BENCH idx=12 name="ADD [M],R" lo=20009 hi=1917 delta=100 window=2
+BENCH idx=13 name="LOAD MISAL" lo=12331 hi=1197 delta=100 window=2
+BENCH idx=14 name="STORE MISA" lo=17674 hi=1607 delta=100 window=2
+BENCH idx=15 name="CHASE 4K" lo=32136 hi=3184 delta=100 window=2
+BENCH idx=16 name="CHASE 32K" lo=9469 hi=874 delta=100 window=2
+BENCH idx=17 name="PUSH+POP" lo=20009 hi=1917 delta=200 window=2
+BENCH idx=18 name="PUSH+ADDSP" lo=31191 hi=3166 delta=200 window=2
+BENCH idx=19 name="SUBSP+POP" lo=24102 hi=2389 delta=200 window=2
+BENCH idx=1 name="ADD R,R" lo=70699 hi=9142 delta=100 window=2
+BENCH idx=20 name="JCC TAKEN" lo=24102 hi=2612 delta=100 window=2
+BENCH idx=21 name="JCC NOTTKN" lo=58916 hi=6712 delta=100 window=2
+BENCH idx=22 name="LOOP X2" lo=4979 hi=467 delta=100 window=2
+BENCH idx=23 name="DECJNZ X2" lo=11527 hi=1127 delta=100 window=2
+BENCH idx=24 name="CALL+RET" lo=8912 hi=835 delta=100 window=2
+BENCH idx=25 name="MUL M=0" lo=6095 hi=566 delta=100 window=2
+BENCH idx=26 name="MUL M=1" lo=6094 hi=566 delta=100 window=2
+BENCH idx=27 name="MUL M=FF" lo=6094 hi=566 delta=100 window=2
+BENCH idx=28 name="MUL M=FFFF" lo=6095 hi=566 delta=100 window=2
+BENCH idx=29 name="MUL M=7FFF" lo=6094 hi=566 delta=100 window=2
+BENCH idx=2 name="ADD R,I X4" lo=22563 hi=2242 delta=400 window=2
+BENCH idx=30 name="DIV SMALL" lo=2495 hi=229 delta=100 window=2
+BENCH idx=31 name="DIV LARGE" lo=2495 hi=229 delta=100 window=2
+BENCH idx=32 name="REP MOVSD" lo=11047 hi=1779 delta=100 window=2
+BENCH idx=33 name="REP STOSD" lo=11400 hi=1784 delta=100 window=2
+BENCH idx=34 name="FETCH 40K" lo=345 hi=29 delta=6144 window=2
+BENCH idx=35 name="ROM ADD" lo=70699 hi=9142 delta=100 window=2
+BENCH idx=36 name="GAME MIX" lo=3595 hi=332 delta=800 window=2
+BENCH idx=3 name="MOV R,R" lo=70699 hi=9142 delta=100 window=2
+BENCH idx=4 name="MOV R,IMM" lo=50500 hi=6238 delta=100 window=2
+BENCH idx=5 name="LEA" lo=42419 hi=4693 delta=100 window=2
+BENCH idx=6 name="NOP" lo=31191 hi=3175 delta=100 window=2
+BENCH idx=7 name="SHL R,IMM" lo=32136 hi=3185 delta=100 window=2
+BENCH idx=8 name="SHL R,CL" lo=32137 hi=3185 delta=100 window=2
+BENCH idx=9 name="LOAD" lo=42420 hi=4713 delta=100 window=2

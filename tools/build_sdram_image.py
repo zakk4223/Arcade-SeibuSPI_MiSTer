@@ -25,6 +25,11 @@ the image an `-update` MRA produces, and the only one with anything behind the
 Usage:
     tools/build_sdram_image.py rdft.zip out.bin [--region tiles,chars] [--sums]
     tools/build_sdram_image.py rdft.zip upd.bin --upd
+    tools/build_sdram_image.py rfjet.zip bench.bin --prg bench/out/bench_patched.bin
+
+--prg substitutes a flat 2 MB program image for the set's own, leaving every
+other region alone. That is how bench/ runs a custom 386 ROM through the real
+core in sim/tb_boot -- graphics and sound still come from the genuine set.
 
 --sums prints the four region checksums in the exact form rtl/spi_romcheck.sv
 declares them, so the hardware checker's constants can be re-derived rather than
@@ -506,6 +511,22 @@ def main():
             f.write(blob)
         print("wrote %s (concatenated stream, %d bytes)" % (outpath, len(blob)))
         return
+
+    # --prg replaces the assembled program region with a flat 2 MB image. The
+    # four prg parts are still loaded and CRC-checked above and then overwritten
+    # here, which is deliberate: it keeps the substitution honest about needing
+    # a real set for everything else (chars, tiles, sprites, sound), and it is
+    # the same bytes the byte-interleave would have produced from the four
+    # split files. bench/ uses this to run its 386 ROM under sim/tb_boot.
+    if "--prg" in sys.argv:
+        prg_path = sys.argv[sys.argv.index("--prg") + 1]
+        prg = open(prg_path, "rb").read()
+        span = 0x200000
+        if len(prg) != span:
+            raise SystemExit("%s is %d bytes, expected %d"
+                             % (prg_path, len(prg), span))
+        image[BASE["prg"]:BASE["prg"] + span] = prg
+        print("  %-8s %-28s %8d  OVERRIDE" % ("prg", os.path.basename(prg_path), span))
 
     with open(outpath, "wb") as f:
         f.write(image)

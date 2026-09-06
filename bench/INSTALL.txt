@@ -1,0 +1,83 @@
+SPI 386 BENCHMARK - MiSTer install
+==================================
+
+This is not a game. It is a 386 IPC benchmark that boots on the SeibuSPI core
+and prints its results on the game's own text layer.
+
+WHAT TO COPY
+------------
+
+  _Arcade/Raiden Fighters Jet (386 Benchmark).mra   ->  /media/fat/_Arcade/
+  _Arcade/mame/bench.zip                            ->  /media/fat/_Arcade/mame/
+
+You must already have, unchanged and in the same places as usual:
+
+  /media/fat/_Arcade/cores/SeibuSPI_*.rbf           the core itself
+  /media/fat/_Arcade/mame/rfjet.zip                 the genuine rfjet set
+
+The MRA lists both zips. Only the four program ROMs come from bench.zip -- they
+are named bprg0.u0211 ... bprg3.u0220 rather than prg0.u0211 ... so that the
+loader cannot pick up the game's own program by mistake. Graphics and sound come
+from rfjet.zip exactly as they always do.
+
+BEFORE YOU TRUST A NUMBER
+-------------------------
+
+In the core's OSD, set:
+
+    Refresh Rate = Normal
+    CRT V-Size   = 0
+    Orientation  = Vert     (the default)
+    Rotation     = CCW      (the default)
+
+The first two change VTOTAL. The benchmark's measurement window is counted in
+video frames, so a non-standard raster rescales every figure on the screen.
+
+The last two are why the table is readable at all. rfjet is a ROT270 game: its
+character ROM stores the glyphs already rotated, and the benchmark lays its
+lines out to match, so the text comes out upright through the core's normal
+rotation. With Orientation = Horz you get the raw framebuffer and the whole
+table reads sideways.
+
+Nothing else in the OSD matters. Sound is silent by design: the benchmark never
+starts the Z80.
+
+WHAT YOU SHOULD SEE
+-------------------
+
+Within a second or two, a 30-character by 40-line table:
+
+    SPI 386 BENCH   W=  8
+    TEST            ITERS     CYC
+    NULL           411526    0.00
+    ADD R,R         16173    2.00
+    ADD R,I X4       4167    2.00
+    ...
+    GAME MIX          570    7.37
+    COMPLETE
+
+All 37 tests fit on one screen, so there is nothing to page. The lines fill in
+one at a time over about 90 seconds and the bottom line reads COMPLETE when the
+last one lands. Photograph it.
+
+READING IT
+----------
+
+ITERS is the raw measurement: how many iterations of the longer of the two test
+blocks completed inside one window of W video frames. That is the number
+that actually matters, and the one to type back into bench/analyze.py.
+
+CYC is convenience arithmetic, derived ASSUMING the real board's 25.000 MHz. The
+core currently runs the 386 at 28.636364 MHz, so every CYC on screen reads about
+12.5 % low. Feed the raw numbers to
+
+    python3 bench/analyze.py core=<file>:28636364
+
+to redo it with the right clock, or 25056818 once the 7/8 clock gate lands.
+
+A BLANK SCREEN
+--------------
+
+means the ROM died before it could bring the text layer up. A screen reading
+UNEXPECTED EXCEPTION at the bottom means it faulted after that. Either is a bug
+worth reporting; neither should happen.

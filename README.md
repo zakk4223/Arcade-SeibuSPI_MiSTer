@@ -24,10 +24,46 @@ The cpu is implemented via nand2mario's z386.
 I _do_ own some SPI hardware and plan on doing hardware validation of the core,
 current gaps:
 
-1. z386 is not running at the proper clock speed, and it is unlikely to be
-   accurate even at the correct speed (z386 has performance enhancements).
-   This will need some custom test roms to do comparison benchmarks to dial in
-   the performance.
+1. z386 is not accurate at the correct speed. **Both halves of that were
+   measured**, by a custom 386 benchmark ROM in `bench/` that runs unmodified on
+   MAME, on the core in Verilator, on the MiSTer core and on a real cartridge,
+   and prints its results on the game's own text layer. The clock half is now
+   fixed; the per-clock half is not.
+
+   The clock **was** 28.636364 MHz against the board's 25.000 MHz, +14.5 %. It is
+   25.000000 MHz exactly as of this build: `rtl/spi_clk_throttle.sv` gates the
+   PLL's 28.636364 output and drops 8 edges in every 63, which is the board's
+   rate with zero error. The PLL cannot make 25 MHz directly (its VCO is 1260 MHz
+   and 1260/25 = 50.4), and a second PLL would have made the 386 asynchronous to
+   clk_sys and clk_ram; removing edges keeps every surviving one phase aligned,
+   so no crossing in the core became a CDC and the SDC did not change.
+
+   What that leaves is the per-clock half. On RAM-resident code z386x turns in
+   **about twice the work per clock**
+   that Intel's published 386 counts allow -- 1.01 clocks for `ADD r32,r32`
+   against 2, 2.00 for a load against 4, 3.62 for a taken `Jcc` against 7+m, and
+   **3.63 against 7.38 on a game-shaped instruction mix**. Together that was
+   roughly **2.3x the throughput per frame** the board had; with the clock now
+   correct it is **2.03x**, all of it per-clock. No clock rate can close that --
+   matching throughput by frequency alone would mean 12.3 MHz, which would be
+   wrong in the other direction everywhere the caches miss.
+
+   The caches are the mechanism, and they cut both ways. A pointer chase inside
+   4 KB costs 3.00 clocks; the same chase over 32 KB costs **11.02**, against 4
+   on a machine with no cache at all. Straight-line code past the 16 KB I-cache
+   costs 5.45 clocks an instruction against 2. Misaligned accesses are slower
+   than the real part too (8.00 and 6.00 against 4+2 and 2+2). So the honest
+   summary is: **twice as fast where a game's working set fits, two to three
+   times slower where it does not.**
+
+   `MUL` is flat at 15 clocks whatever the multiplier is, where a 386 has an
+   early-out staircase from 9 to 38 -- faster on big multipliers, slower on
+   small ones. (MAME is flat too, at 41, and models no bus at all, so it is a
+   third data point rather than a reference.)
+
+   Still open: the real-cartridge run, which is the only thing that can settle
+   the cartridge ROM's wait states and confirm the misalignment penalty. See
+   `bench/README.md`.
 
    Luckily the games are all properly vsync throttled; there may be some
    instances where the faster cpu is able to do more work and remove 'slowdown'.

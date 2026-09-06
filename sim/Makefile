@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-sound run-sdram run-timing
+.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-bench run-sound run-sdram run-timing
 
 SLOP_BIAS ?= 1
 
@@ -361,6 +361,22 @@ STEPS ?= 40000000
 run-boot: obj_dir/Vtb_boot_top
 	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS) $(GAME)
 
+
+# The 386 IPC benchmark ROM, run through the real core. The image is built by
+# bench/, which substitutes only the 2 MB program region -- graphics and sound
+# still come from the genuine rfjet set. Results arrive as writes to the 0x4F0
+# doorbell, which nothing decodes but spi_cpu still raises io_wr for, so this
+# needs no RTL change at all.
+#
+#   make -C bench roms
+#   make run-bench SDRAM=/tmp/spi_bench/sdram_bench.bin STEPS=1400000000
+#
+# About 4.24M clk_ram half-steps per video frame, and the quick build uses
+# 2-frame windows, so budget ~10 frames per test. The "BR TARGET MISMATCH"
+# lines are this bench's own branch check noticing the vblank interrupt landing
+# on a branch -- expected here, since the ISR is what ends every measurement.
+run-bench: obj_dir/Vtb_boot_top
+	@./obj_dir/Vtb_boot_top $(SDRAM) $(STEPS) $(GAME) | grep '^BENCH '
 
 # The sound path against MAME, in simulation, end to end (PLAN.md 51).
 #

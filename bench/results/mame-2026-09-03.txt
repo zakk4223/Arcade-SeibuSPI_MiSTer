@@ -1,0 +1,43 @@
+BENCHINFO rom=/home/zakk/proj/Arcade-SeibuSPI_MiSTer/bench/out/bench_patched.bin bytes=2097152 cpu_hz=25000000
+BENCHINFO image already resident, polling
+BENCHINFO window=8 ntests=37
+BENCH idx=0 name="NULL" lo=411526 hi=411526 delta=100 window=8
+BENCH idx=1 name="ADD R,R" lo=127715 hi=16173 delta=100 window=8
+BENCH idx=2 name="ADD R,I X4" lo=41615 hi=4167 delta=400 window=8
+BENCH idx=3 name="MOV R,R" lo=127716 hi=16173 delta=100 window=8
+BENCH idx=4 name="MOV R,IMM" lo=127715 hi=16173 delta=100 window=8
+BENCH idx=5 name="LEA" lo=127715 hi=16174 delta=100 window=8
+BENCH idx=6 name="NOP" lo=94967 hi=10925 delta=100 window=8
+BENCH idx=7 name="SHL R,IMM" lo=94967 hi=10925 delta=100 window=8
+BENCH idx=8 name="SHL R,CL" lo=94968 hi=10926 delta=100 window=8
+BENCH idx=9 name="LOAD" lo=75587 hi=8249 delta=100 window=8
+BENCH idx=10 name="STORE" lo=127715 hi=16173 delta=100 window=8
+BENCH idx=11 name="ADD R,MEM" lo=53678 hi=5536 delta=100 window=8
+BENCH idx=12 name="ADD MEM,R" lo=46883 hi=4755 delta=100 window=8
+BENCH idx=13 name="LOAD MISAL" lo=75586 hi=8249 delta=100 window=8
+BENCH idx=14 name="STORE MISA" lo=127715 hi=16174 delta=100 window=8
+BENCH idx=15 name="CHASE 4K" lo=75586 hi=8249 delta=100 window=8
+BENCH idx=16 name="CHASE 32K" lo=75587 hi=8249 delta=100 window=8
+BENCH idx=17 name="PUSH+POP" lo=53677 hi=5536 delta=200 window=8
+BENCH idx=18 name="PUSH+ADDSP" lo=75587 hi=8249 delta=200 window=8
+BENCH idx=19 name="SUBSP+POP" lo=53678 hi=5537 delta=200 window=8
+BENCH idx=20 name="JCC TAKEN" lo=45725 hi=4743 delta=100 window=8
+BENCH idx=21 name="JCC NOTTKN" lo=90335 hi=10862 delta=100 window=8
+BENCH idx=22 name="LOOP X2" lo=14875 hi=1398 delta=100 window=8
+BENCH idx=23 name="DECJNZ X2" lo=21916 hi=2093 delta=100 window=8
+BENCH idx=24 name="CALL+RET" lo=20691 hi=1971 delta=100 window=8
+BENCH idx=25 name="MUL M=0" lo=8437 hi=782 delta=100 window=8
+BENCH idx=26 name="MUL M=1" lo=8437 hi=782 delta=100 window=8
+BENCH idx=27 name="MUL M=FF" lo=8437 hi=782 delta=100 window=8
+BENCH idx=28 name="MUL M=FFFF" lo=8436 hi=782 delta=100 window=8
+BENCH idx=29 name="MUL M=7FFF" lo=8437 hi=782 delta=100 window=8
+BENCH idx=30 name="DIV SMALL" lo=8634 hi=800 delta=100 window=8
+BENCH idx=31 name="DIV LARGE" lo=8633 hi=800 delta=100 window=8
+BENCH idx=32 name="REP MOVSD" lo=42572 hi=7605 delta=100 window=8
+BENCH idx=33 name="REP STOSD" lo=37794 hi=6194 delta=100 window=8
+BENCH idx=34 name="FETCH 40K" lo=903 hi=226 delta=6144 window=8
+BENCH idx=35 name="ROM ADD" lo=127715 hi=16174 delta=100 window=8
+BENCH idx=36 name="GAME MIX" lo=6183 hi=570 delta=800 window=8
+BENCHINFO frame_period=0.018523025 frame_hz=53.9869 cpf=463075.6
+BENCHINFO reported=37 of 37 exc=0
+BENCHINFO screen dumped to /tmp/claude-1000/-home-zakk-proj-Arcade-SeibuSPI-MiSTer/3e82bd79-21fb-4330-b8cb-d3c00c2673f5/scratchpad/screen4.txt

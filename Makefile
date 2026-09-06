@@ -4,7 +4,8 @@ QUARTUS_DIR ?= $(HOME)/intelFPGA_lite/17.0/quartus/bin
 PROJECT     := SeibuSPI
 
 .PHONY: all build map fit asm sta timing clean lint test check-mra check-snd01 \
-        check-derive check-tb check-timing mras check-clones release release-zip verify
+        check-derive check-tb check-timing mras check-clones release release-zip verify \
+        bench bench-mame bench-sim bench-report
 
 all: build
 
@@ -87,6 +88,26 @@ check-derive:
 #   make mras MRAFLAGS=--list      # what is supported, and why the rest is not
 mras:
 	@python3 tools/gen_mras.py $(MRAFLAGS)
+
+# The 386 IPC benchmark ROM (bench/). One 2 MB image that runs on MAME, on the
+# core in Verilator, on the MiSTer core and on a real cartridge, and puts its
+# results on the game's text layer. `bench` only builds; the run targets need
+# a ROM set.
+#   make bench
+#   make bench-mame ROMS=~/Downloads/roms
+#   make bench-sim  ROMS=~/Downloads/roms
+#   make bench-report
+bench:
+	@$(MAKE) -C bench all
+
+bench-mame:
+	@$(MAKE) -C bench mame ROMS="$(ROMS)"
+
+bench-sim:
+	@$(MAKE) -C bench sim ROMS="$(ROMS)"
+
+bench-report:
+	@$(MAKE) -C bench report
 
 # The clone MRAs' one per-set constant, re-derived from the ROMs: find each job
 # table two independent ways, check the region code three ways, then build the
