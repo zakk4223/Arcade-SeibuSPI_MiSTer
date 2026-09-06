@@ -5785,6 +5785,83 @@ has to be measured, and 16.8's EIP profiler is the instrument for our half of it
    slowing the CPU rather than having been optimised away.
 5. Only then, the throughput calibration 16.7 owes.
 
+### 16.10 Built: 25.000000 MHz exactly, and why not 7/8 (2026-09-06)
+
+16.9's mechanism, with one change to its number. `rtl/spi_clk_throttle.sv` gates
+the PLL's 28.636364 MHz clk_cpu with a Bresenham accumulator; `SeibuSPI.sv`
+instantiates it at 55/63 and everything that was on clk_cpu is on the gated
+version now.
+
+**The ratio should never have been 7/8.** clk_cpu is 1260/44 = 315/11 MHz, and
+25 / (315/11) = 275/315 = **55/63** exactly. So 55 live edges in every 63 lands
+on 25.000000 MHz with ZERO error, where 7/8 leaves 25.0568 and +0.23%. It costs
+nothing to prefer it: the accumulator is the same seven flops either way, and
+the emitted pattern is 7/8 with one correction per 63 cycles -- kills at a gap of
+8, except one gap of 7 per period. Never two kills in a row, so the longest
+clk_cpu period is 2x nominal and the shortest is 1x. Measured in Verilator,
+55,000 output edges per 63,000 input, min gap 1, max gap 2.
+
+**That max gap of 1 is the whole SDC argument.** Two live edges can still be
+adjacent, so the tightest launch/capture pair TimeQuest can find is still one
+full 34.9 ns period -- the constraint `derive_pll_clocks` already writes. The
+gate cannot make any path tighter, only looser, which is why `SeibuSPI.sdc` is
+untouched and why clk_cpu stays in the framework's clock group: the clkena is a
+buffer on the PLL output, not a new clock.
+
+**`cyclonev_clkena`, not `altclkctrl`.** Both exist in Quartus 17.0 Lite;
+altclkctrl is a TDF megafunction whose Verilog parameter names have to be
+guessed, and it compiles to this atom anyway. `cyclonev_atoms.v:2488` states the
+ports and parameters exactly, the same reason `sdram.sv` instantiates
+`altddio_out` directly. `ena_register_mode = "falling edge"` is what makes it
+glitch free -- the block latches `ena` on the falling edge and ANDs it with the
+clock, so a decision taken on rising edge N suppresses the high phase of N+1
+whole. Synthesis maps it to one `arriav_clkena` (Quartus's back-end name for the
+Cyclone V block); the accumulator is 7 registers.
+
+**The generator runs on the UNGATED clock,** which is the one trap in the module:
+clocked on its own output it would stop the first time it stopped itself. `ena`
+drives nothing but the clkena block, so no data path exists between the gated and
+ungated copies of the clock and there is nothing for the analyser to time
+between them.
+
+**What this does NOT fix is now a number, not a worry.** 16.9 wrote "at 1.5x the
+IPC a 25 MHz clock is still 50% fast" as a hypothetical; bench/ has since
+measured it at 3.63 clocks against a real 386's 7.38 on a game-shaped mix, so:
+
+| | |
+|---|---|
+| before | 2.03 (IPC) x 1.145 (clock) = **2.33x** the board's throughput |
+| after  | 2.03 (IPC) x 1.000          = **2.03x** |
+
+The frequency error is gone and every bit of what remains is per-clock. It is
+NOT closable by clock rate -- matching throughput by frequency alone means
+running at 12.3 MHz, which is wrong in the other direction on everything that
+misses cache (a 32 KB pointer chase is 11.02 clocks here against 4 on the real
+part). Bus and cache timing own the rest; `NUM`/`DEN` stay parameters so a
+measured correction is a constant, and so the OSD speed control of section 6 is
+a mux away.
+
+**Fitted, SEED 1, timing met.** ALMs 39,217 -> 39,326 (+109, still 94%), RAM
+blocks unchanged at 529. Every clock positive with TNS 0.000: setup +0.149
+pll_hdmi, +0.269 clk_ram, +0.398 clk_sys, +1.991 clk_cpu; hold +0.243 worst.
+The fitter placed `clkena_inst` in clock control block CLKCTRL_G11 driving
+12,021 loads on GCLK11 -- the device's own clock-enable hardware, not fabric --
+and the PLL's ungated output kept a global with a fanout of exactly 7, the
+accumulator and nothing else. clk_cpu's minimum-pulse-width slack is +16.017
+against +16.008 before, which is the evidence the analyser still sees the
+full-rate waveform. 16.9 predicted the slack would be UNCHANGED and warned that
+movement meant the gate was in the wrong place; the setup number moved +0.9 ns,
+but so did pll_hdmi (+0.13) and clk_ram (+0.15) on paths the gate cannot touch,
+so that is fit-to-fit placement noise in a design at 94%, not the gate. The
+pulse-width number is the one that would have caught a moved constraint, and it
+did not move.
+
+**Unverified.** Nothing has run on hardware. The observable is that everything
+CPU-paced slows by 12.5% while the raster does not move at all -- video timing
+is on clk_sys and untouched, so refresh stays 53.9869 Hz. The sharp check is
+16.8's EIP profiler on rfjet attract: the busy fraction must scale by 63/55,
+35.1% peak becoming ~40%. If it does not move, the gate was optimised away.
+
 ---
 
 ## 17. The authentic boot-up flash: what the core still needs (2026-08-15)

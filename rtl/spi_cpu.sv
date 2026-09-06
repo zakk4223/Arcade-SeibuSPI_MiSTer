@@ -846,7 +846,8 @@ module spi_cpu
 			// before the vector is offered -- the same reason SS_IDLE does it in
 			// that order.
 			//
-			// 2^23 clk_cpu cycles is ~293 ms, against a worst measured wait of
+			// 2^23 clk_cpu cycles is ~336 ms at the gated 25 MHz (~293 before the
+			// throttle landed), against a worst measured wait of
 			// 1,042,924 for the 386 to reach the stub on a save. Eight times the
 			// slowest real case, so a healthy operation can never trip it.
 			SS_RUN: if (!ss_hold && ss_retry_cnt[23]) begin

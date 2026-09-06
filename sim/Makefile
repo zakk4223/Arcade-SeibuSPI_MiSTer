@@ -340,6 +340,7 @@ lint: lint-derive
 lint-top:
 	$(VERILATOR) --lint-only -Wall -DMISTER_FB -I$(RTL) -I$(RTL)/z386 -I.. lint.vlt \
 	    --top-module emu ../SeibuSPI.sv $(CORE_SRCS) $(Z386_SRCS) \
+	    $(RTL)/spi_clk_throttle.sv cyclonev_clkena.sv \
 	    $(RTL)/spi_sprite.sv $(RTL)/spi_spr_decrypt.sv \
 	    $(RTL)/sdram.sv $(RTL)/rom_loader.sv $(RTL)/spi_flash_derive.sv \
 	    $(RTL)/spi_sdr_arb2.sv $(RTL)/spi_sdr_arb4.sv $(RTL)/spi_soundflash.sv $(RTL)/spi_nvram.sv $(RTL)/spi_rom_decode.sv $(RTL)/ddr_rom_reader.sv \

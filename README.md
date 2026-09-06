@@ -46,25 +46,34 @@ current gaps:
 
 Quartus Prime 17.0.0 Lite, Cyclone V `5CSEBA6U23I7` (MiSTer DE10-Nano),
 top-level entity `sys_top`, `SEED 1`. From `output_files/SeibuSPI.fit.summary`,
-fit dated 2026-08-31 (`BUILD_DATE 260831`, bitstream `5a342091`).
+fit dated 2026-09-06 (`BUILD_DATE 260906`, bitstream `b8f07077`).
 
 | Resource                | Used      | Available | Utilization |
 |-------------------------|-----------|-----------|-------------|
-| Logic utilization (ALMs)| 39,217    | 41,910    | 94 %        |
-| Total registers         | 38,705    | -         | -           |
+| Logic utilization (ALMs)| 39,326    | 41,910    | 94 %        |
+| Total registers         | 38,638    | -         | -           |
 | Block memory bits       | 3,841,857 | 5,662,720 | 68 %        |
 | RAM blocks              | 529       | 553       | 96 %        |
 | DSP blocks              | 58        | 112       | 52 %        |
 | PLLs                    | 3         | 6         | 50 %        |
 | Pins                    | 145       | 314       | 46 %        |
 
-Timing: worst setup **+0.017 ns** on `pll_hdmi`, worst hold **+0.243 ns** on
+Timing: worst setup **+0.149 ns** on `pll_hdmi`, worst hold **+0.243 ns** on
 `emu` (clk_ram). The core's own clock has more room than that headline suggests
-— clk_ram is +0.120 setup — because the tightest path in the design belongs to
-the HDMI PLL, which is framework territory and not something this core's RTL
-moves. TNS 0.000 on every clock for setup, hold, recovery, removal and minimum
-pulse width; no critical warnings. `make check-timing` is the gate, and `make
-release` refuses to assemble a distribution without it.
+— clk_ram is +0.269 setup and clk_cpu +1.991 — because the tightest path in the
+design belongs to the HDMI PLL, which is framework territory and not something
+this core's RTL moves. TNS 0.000 on every clock for setup, hold, recovery,
+removal and minimum pulse width; no critical warnings. `make check-timing` is
+the gate, and `make release` refuses to assemble a distribution without it.
+
+The clk_cpu gate costs 4.5 ALMs and 7 registers, and the fitter put it where it
+belongs: `spi_clk_throttle|clkena_inst` occupies clock control block
+`CLKCTRL_G11` driving 12,021 loads on global clock GCLK11, so the gating is done
+by the device's own clock-enable hardware rather than in the fabric. The PLL's
+ungated 28.636364 output keeps a global of its own with a fanout of exactly 7 —
+the accumulator, and nothing else. clk_cpu's minimum-pulse-width slack is
+unchanged at +16.017 ns, which is the check that the analyser still sees the
+full-rate waveform and that no constraint got quietly relaxed.
 
 **RAM blocks are the binding resource again, narrowly ahead of logic**, at 96 %
 RAM against 94 % ALM. That is a reversal: the 2026-08-28 fit had them the other

@@ -407,9 +407,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 ///////////////////////   CLOCKS   ///////////////////////////////
 
-wire clk_sys;   //  57.272727 MHz - video, I/O, sound
-wire clk_cpu;   //  28.636364 MHz - the 386
-wire clk_ram;   // 114.545455 MHz - SDRAM controller
+wire clk_sys;     //  57.272727 MHz - video, I/O, sound
+wire clk_cpu_src; //  28.636364 MHz - the PLL's raw 386 clock, before the gate
+wire clk_ram;     // 114.545455 MHz - SDRAM controller
 wire pll_locked;
 
 pll pll
@@ -418,8 +418,27 @@ pll pll
 	.rst     (1'b0),
 	.outclk_0(clk_ram),
 	.outclk_1(clk_sys),
-	.outclk_2(clk_cpu),
+	.outclk_2(clk_cpu_src),
 	.locked  (pll_locked)
+);
+
+// The 386 runs at 25 MHz on every board this core supports -- SXX2C and SXX2E
+// alike take 50 MHz / 2 (PLAN.md's per-board clock table). The PLL cannot make
+// 25 from a 1260 MHz VCO, so the rate comes from removing edges instead:
+// 28.636364 x 55/63 = 25.000000 MHz exactly, with the surviving edges still a
+// subset of the PLL's, so clk_cpu stays phase aligned with clk_sys and clk_ram
+// and no crossing in spi_top becomes a CDC. rtl/spi_clk_throttle.sv carries the
+// full argument, including why this is not a clock enable on z386.
+//
+// clk_cpu_src is the accumulator's clock and goes nowhere else. Everything that
+// was on clk_cpu before is on the gated version now, so the domain slows as one
+// piece and stays internally coherent.
+wire clk_cpu;
+
+spi_clk_throttle #(.NUM(55), .DEN(63)) cpu_throttle
+(
+	.clk_in (clk_cpu_src),
+	.clk_out(clk_cpu)
 );
 
 // Only the ROM download (index 0) holds the board in reset. The DIP transfer

@@ -6,7 +6,14 @@
 //  50 MHz reference -> VCO 1260 MHz (n=5, m=126)
 //    outclk_0 = 1260 / 11 = 114.545455 MHz   clk_ram  (SDRAM controller)
 //    outclk_1 = 1260 / 22 =  57.272727 MHz   clk_sys  (video, I/O, sound)
-//    outclk_2 = 1260 / 44 =  28.636364 MHz   clk_cpu  (the 386)
+//    outclk_2 = 1260 / 44 =  28.636364 MHz   clk_cpu  (the 386, then GATED)
+//
+//  outclk_2 is not the 386's final rate. The board runs its 386DX at 25 MHz
+//  and 1260/25 = 50.4, so no counter on this VCO can make it; SeibuSPI.sv puts
+//  a fractional clock gate on this output instead and removes 8 edges in every
+//  63, which is 25.000000 MHz exactly. See rtl/spi_clk_throttle.sv. Nothing
+//  below changes: the gate's surviving edges are a subset of this output's, so
+//  the phase alignment and the single clock group described here still hold.
 //
 //  114.545455 IS the working frequency, on this board, with all four sets
 //  byte-exact. An earlier version of this comment said it was unreachable here

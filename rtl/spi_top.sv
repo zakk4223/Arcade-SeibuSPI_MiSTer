@@ -11,7 +11,12 @@ module spi_top
 	import system_consts::*;
 (
 	input             clk_sys,     // 57.272727 MHz - video, I/O, sound
-	input             clk_cpu,     // 28.636364 MHz - the 386 (clk_sys / 2)
+	// 25.000000 MHz - the 386. A GATED clk_sys/2: SeibuSPI.sv drops 8 edges in
+	// every 63 (rtl/spi_clk_throttle.sv) to hit the board's 25 MHz exactly, so
+	// the surviving edges are a subset of clk_sys/2 and stay phase aligned with
+	// clk_sys and clk_ram. Pulses that leave this domain are two OR four clk_sys
+	// cycles wide now rather than always two; every consumer edge-detects.
+	input             clk_cpu,
 	input             clk_ram,     // 114.545455 MHz - SDRAM
 	input             reset,
 	input             rom_ready,

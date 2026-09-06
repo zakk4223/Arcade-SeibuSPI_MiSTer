@@ -442,20 +442,31 @@ described -- but a fit is still worth CHECKING rather than assuming.
   video-info page reading ~50 Hz, and H/V-Pos moving the picture on analog or
   direct video while doing nothing over HDMI (that last one is by design).
 
-* **The 386 clock: decided, not built.** The board is a 386DX-25; `clk_cpu` is
-  28.636364 MHz, 14.5% fast. `PLAN.md` 16.9 settles the approach -- an
-  `altclkctrl` gate on clk_cpu killing one edge in eight, giving 25.0568 MHz
-  (+0.23%), with the divider parameterised so it doubles as the OSD CPU-speed
-  throttle. No second PLL, no asynchronous clock group, and STA is untouched
-  because TimeQuest still sees 28.636 MHz on a gated output. Nothing is written
-  yet; 16.9 has the five-step order of work, and step 4 (the EIP profiler's busy
-  fraction scaling by 8/7) is the check that the gate is real.
+* **The 386 clock: BUILT, not yet run on hardware.** The board is a 386DX-25 and
+  `clk_cpu` was 28.636364 MHz, 14.5% fast. `rtl/spi_clk_throttle.sv` now gates
+  the PLL output with a fractional accumulator and 55 of every 63 edges survive:
+  28.636364 x 55/63 = **25.000000 MHz exactly**, not the +0.23% that 16.9's
+  one-edge-in-eight would have left. Measured in Verilator at 55,000 output
+  edges per 63,000 input, longest gap 2 input periods -- so no runt, and the
+  single-period constraint TimeQuest derives from the PLL is still the worst
+  case, which is why the SDC did not change.
 
-  Two traps recorded there: `cpu_en` (`spi_cpu.sv:84`) is NOT a throttle -- it
-  gates the bus only and the L1 caches run straight through it -- and z386 has no
-  CE port, so a hand-threaded clock enable would mean ~90 `always_ff` blocks in a
-  vendored core. What is still unmeasured, and what actually decides accuracy, is
-  z386x's IPC against a real 386DX (`PLAN.md` 16.7).
+  Two traps recorded in 16.9 and still worth having: `cpu_en` (`spi_cpu.sv:84`)
+  is NOT a throttle -- it gates the bus only and the L1 caches run straight
+  through it -- and z386 has no CE port, so a hand-threaded clock enable would
+  mean ~90 `always_ff` blocks in a vendored core. Hence gate, don't CE.
+
+  **What the gate does not fix, now measured.** bench/ puts z386x at 3.63 clocks
+  on a game-shaped mix against a real 386's 7.38, so the board's margin was
+  2.03 x 1.145 = 2.33x and what is left after this is 2.03x, all of it IPC.
+  Frequency cannot close it: matching by clock alone would mean 12.3 MHz, which
+  would be wrong in the other direction everywhere the caches miss.
+
+  **To confirm on hardware:** the observable is that everything CPU-paced gets
+  12.5% slower while the raster does not move at all -- refresh stays 53.9869 Hz
+  because the video timing is on clk_sys and untouched. The sharper check is
+  16.8's EIP profiler on rfjet attract: the busy fraction has to scale by 63/55,
+  35.1% peak becoming ~40%. If it does not move, the gate was optimised away.
 * **The OSD toggle itself is unverified.** `/dev/MiSTer_cmd` has no menu
   command, and Main's `.CFG` is not the raw status word (writing byte 2 bit 6 of
   a 16-byte file did nothing). Everything downstream of `derive_sel` was proved
