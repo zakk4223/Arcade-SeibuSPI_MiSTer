@@ -462,11 +462,14 @@ described -- but a fit is still worth CHECKING rather than assuming.
   Frequency cannot close it: matching by clock alone would mean 12.3 MHz, which
   would be wrong in the other direction everywhere the caches miss.
 
-  **To confirm on hardware:** the observable is that everything CPU-paced gets
-  12.5% slower while the raster does not move at all -- refresh stays 53.9869 Hz
-  because the video timing is on clk_sys and untouched. The sharper check is
-  16.8's EIP profiler on rfjet attract: the busy fraction has to scale by 63/55,
-  35.1% peak becoming ~40%. If it does not move, the gate was optimised away.
+  **CONFIRMED ON HARDWARE 2026-09-06**, with `bench/` rather than the EIP
+  profiler -- the benchmark ROM hardcodes the real board's 25 MHz clocks-per-frame
+  (`bench/spi.inc:63`), so one run of it measures the gate directly. Work per
+  frame fell to 0.872971 of the pre-gate Verilator run against a predicted
+  55/63 = 0.873016, implying **24.99870 MHz**, and the CYC column at 25 MHz
+  reproduces Verilator at 28.636364 on 35 of 37 rows. GAME MIX 3.62 against
+  MAME's 7.38, so the 2.03x residual is now a board measurement.
+  `bench/results/hw-2026-09-06.md`.
 * **The OSD toggle itself is unverified.** `/dev/MiSTer_cmd` has no menu
   command, and Main's `.CFG` is not the raw status word (writing byte 2 bit 6 of
   a 16-byte file did nothing). Everything downstream of `derive_sel` was proved

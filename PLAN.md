@@ -5856,11 +5856,44 @@ so that is fit-to-fit placement noise in a design at 94%, not the gate. The
 pulse-width number is the one that would have caught a moved constraint, and it
 did not move.
 
-**Unverified.** Nothing has run on hardware. The observable is that everything
-CPU-paced slows by 12.5% while the raster does not move at all -- video timing
-is on clk_sys and untouched, so refresh stays 53.9869 Hz. The sharp check is
-16.8's EIP profiler on rfjet attract: the busy fraction must scale by 63/55,
-35.1% peak becoming ~40%. If it does not move, the gate was optimised away.
+**CONFIRMED ON HARDWARE, 2026-09-06.** Deployed to the MiSTer at 192.168.1.125
+and measured with `bench/` rather than with 16.8's profiler, which turned out to
+be the better instrument by some distance: the benchmark ROM computes its CYC
+column from `CPU_CLOCKS_PER_FRAME equ 463072` (`bench/spi.inc:63`), the real
+board's 25 MHz constant, HARDCODED. So it has always been asking what the clocks
+would be if the CPU ran at 25 MHz, and before the gate the answer was wrong by
+exactly the clock error. That makes one run of it a direct measurement of the
+gate, twice over.
+
+Full table, W=8, 37 tests, one pass to COMPLETE. Against `core-2026-09-03.txt`
+-- the same core in Verilator before the gate -- work per frame fell by:
+
+    mean of 37 rows                   0.872873   (stdev 0.000495)
+    pooled, weighted by iterations    0.872971
+    ten largest-N rows                0.872961   (stdev 0.000050)
+    predicted 55/63                   0.873016
+    error                            -0.0052 %
+    "the gate did nothing" would be   1.000000
+
+    implied clk_cpu = 28.636364 x 0.872971 = 24.99870 MHz
+
+The scatter is quantization and tracks 1/N exactly -- FETCH 40K at 101 iterations
+is the worst row (0.87069), every row above ten thousand lands on 0.87300 +-
+0.00002. And the second, independent check: clocks per instruction is invariant
+to clock rate, so the hardware analysed at 25 MHz must reproduce Verilator
+analysed at 28.636364, and 35 of 37 rows agree to within 0.02.
+
+**GAME MIX 3.62 on hardware against MAME's 7.38.** The clock is right; the 2.03x
+is now measured on the board rather than inferred from simulation, and it is all
+microarchitecture.
+
+**One row disagrees with simulation, and it is not the clock.** `ROM ADD` reads
+0.98 on hardware against 1.01 in Verilator -- the only test that runs in place
+out of cartridge ROM instead of being copied to RAM, so it is the only one whose
+path is the real SDRAM chip through the arbiter rather than the model. A gate
+cannot produce a per-test difference. Recorded in `bench/results/hw-2026-09-06.md`
+because the real-cartridge run still owes an answer on ROM wait states and this
+is the row to watch.
 
 ---
 
