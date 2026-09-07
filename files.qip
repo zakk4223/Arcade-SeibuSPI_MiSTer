@@ -32,6 +32,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_sdr_arb4.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_soundflash.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_nvram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_ds2404.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/spi_93c46.sv
+
 
 # Save states. system_consts.sv must come first: it is the package the rest
 # import. savestates.sv declares the ssbus_if interface every slave takes as a

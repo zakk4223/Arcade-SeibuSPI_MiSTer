@@ -74,6 +74,12 @@ module spi_clk_throttle
 )
 (
 	input  wire clk_in,
+	// Pass the clock through ungated. SXX2G ran a real AM386DX-40 at 28.63636
+	// MHz (seibuspi.cpp:1908) -- which is exactly this PLL output -- so that
+	// board wants no gate at all, and the 55/63 below is for the 25 MHz ones.
+	// The header promised this would be "a mux on the two constants"; it turned
+	// out cheaper, because full speed is just every edge surviving.
+	input  wire full_speed,
 	output wire clk_out
 );
 
@@ -125,6 +131,8 @@ module spi_clk_throttle
 	// value with the clock, so a decision made on rising edge N is captured
 	// mid-cycle and suppresses the high phase of cycle N+1 in one piece. The
 	// output never produces a runt.
+	wire ena_out = ena | full_speed;
+
 	cyclonev_clkena #(
 		.clock_type            ("auto"),
 		.ena_register_mode     ("falling edge"),
@@ -132,7 +140,7 @@ module spi_clk_throttle
 		.disable_mode          ("low")
 	) clkena_inst (
 		.inclk  (clk_in),
-		.ena    (ena),
+		.ena    (ena_out),
 		.outclk (clk_out),
 		.enaout ()
 	);

@@ -51,6 +51,8 @@ module tb_sdram_top
 
 	rom_loader loader
 	(
+		// M_EEDEF's side channel; this bench does not exercise it.
+		.ee_addr (), .ee_din (), .ee_we (),
 		.clk            (clk),
 		.reset          (init),
 		.ioctl_download (ioctl_download),
@@ -58,7 +60,7 @@ module tb_sdram_top
 		.ioctl_index    (8'd0),
 		.ioctl_dout     (ioctl_dout),
 		.ioctl_wait     (ioctl_wait),
-		.set_id         (3'd0),
+		.set_id         (4'd0),
 	// Grew on rom_loader when the authentic-flash variants landed; 0 is the
 	// pre-flashed tail, which is what this testbench streams.
 	.set_upd        (1'b0),      // this bench drives the rdfts layout

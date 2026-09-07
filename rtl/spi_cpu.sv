@@ -135,6 +135,10 @@ module spi_cpu
 	//   [3] an interrupt acknowledge cycle is in progress
 	output      [3:0] dbg_why,
 	output     [31:0] dbg_eip,
+	// Why an interrupt is or is not being taken -- see z386's own comment.
+	output            dbg_if,
+	output            dbg_intr_pending,
+	output            dbg_intr_inhibit,
 	output     [15:0] dbg_cs,
 	// Where the 386 has put its IDT, and how big it is. The savestate needs
 	// this to overlay one gate; nothing else reads it.
@@ -336,6 +340,9 @@ module spi_cpu
 
 		.dbg_CS             (dbg_cs),
 		.dbg_EIP            (dbg_eip),
+		.dbg_IF             (dbg_if),
+		.dbg_intr_pending   (dbg_intr_pending),
+		.dbg_intr_inhibit   (dbg_intr_inhibit),
 		.dbg_CS_base        (dbg_cs_base),
 		.dbg_IDT_base       (dbg_idt_base),
 		.dbg_IDT_limit      (dbg_idt_limit),

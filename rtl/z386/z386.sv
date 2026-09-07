@@ -60,6 +60,15 @@ module z386
     output     [15:0]  dbg_CS,
     output     [31:0]  dbg_EIP,
     output     [31:0]  dbg_CS_base,
+    // -- SeibuSPI: why an interrupt is or is not being taken. Read-only taps;
+    //    no logic altered. `intr_pending && dbg_IF && !dbg_intr_inhibit` is
+    //    exactly the core's own `interrupt_deliverable` term for INTR, so these
+    //    three separate "the game has not run STI" from "the request never
+    //    arrived" from "the STI shadow is stuck" -- which from outside all look
+    //    identical: a pending IRQ that is never acknowledged.
+    output             dbg_IF,
+    output             dbg_intr_pending,
+    output             dbg_intr_inhibit,
     // -- SeibuSPI: the IDT's base and limit, so the board can overlay one
     //    interrupt gate while a savestate is being taken. Read-only taps on
     //    the descriptor cache; nothing else about the core changes.
@@ -167,6 +176,9 @@ wire       vm = EFLAGS[17];         // Virtual 8086 mode
 
 assign dbg_CS  = CS;
 assign dbg_EIP = EIP;
+assign dbg_IF           = EFLAGS[9];
+assign dbg_intr_pending = intr_pending;
+assign dbg_intr_inhibit = inhibit_interrupts;
 assign dbg_CS_base = CS_base;
 assign dbg_IDT_base  = seg_cache[SEG_IDT].base;
 assign dbg_IDT_limit = seg_cache[SEG_IDT].limit;

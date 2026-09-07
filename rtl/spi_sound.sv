@@ -133,6 +133,16 @@ module spi_sound
 
 	// ---- SXX2C cartridge -------------------------------------------------
 	input             set_sxx2c,
+	// The set's YMF271 sample region is 2.5 MB, not 2 MB. rdft2us and rfjets;
+	// see SET_HAS_25MB_PCM in spi_defs.vh and the mask in ymf271_synth.sv.
+	input             pcm_25mb,
+	// SXX2G clocks the YMF271 from a 16.384 MHz crystal instead of 16.9344, so
+	// its sample rate is 42666.67 Hz rather than 44100.
+	input             ymf_16384,
+	// SXX2G's Z80 runs at 4.9152 MHz instead of 7.1590909.
+	input             z80_slow,
+	// ...and its program ROM is the full 256 KB region, not 128 KB.
+	input             z80_rom_256k,
 	input       [7:0] jumpers,      // Z80 0x400a, update-mode select on SXX2C
 	output reg  [7:0] fifo2_q,      // Z80 -> 386 FIFO head, read by 0x680
 	output            fifo2_empty,
@@ -161,12 +171,15 @@ module spi_sound
 `include "spi_defs.vh"
 
 	// ------------------------------------------------------------------
-	// Z80 clock enable: 28.63636 / 4 = 7.1590909 MHz = clk_sys / 8, exact.
+	// Z80 clock enable: 7.1590909 MHz, or 4.9152 MHz on SXX2G.
 	// ------------------------------------------------------------------
 	// The divider's PHASE is part of the machine's state: the Z80 steps one
 	// clk_sys cycle in eight, and which one decides exactly when it consumes a
 	// FIFO byte relative to the 386. Restore it wrong and a poll loop in the
 	// sound driver comes out the other way.
+	//
+	// 28.63636 / 4 = 7.1590909 = clk_sys / 8, exact, and that counter is left
+	// exactly as it was because every existing set depends on it.
 	reg [2:0] ce_div;
 	always @(posedge clk) begin
 		if (reset) ce_div <= 3'd0;
@@ -174,9 +187,40 @@ module spi_sound
 			ce_div <= ssbus_regs.data[5:3];
 		else ce_div <= ce_div + 3'd1;
 	end
+
+	// SXX2G runs a Z84C0004PCS at 4.9152 MHz (seibuspi.cpp:1913), and
+	// 57.272727 / 4.9152 = 11.652 -- not an integer, so no counter can produce
+	// it and this is the one clock on that board that needs an accumulator.
+	// The ratio IS exact as a fraction: clk_sys is 630/11 MHz, and
+	//
+	//     4.9152 / (630/11) = 5632 / 65625
+	//
+	// so 5632 enables in every 65625 clk_sys cycles is the rate on the nose,
+	// the same trick spi_clk_throttle uses on the 386 and ymf271 uses on its
+	// sample tick.
+	//
+	// MAME's own constant on that line is 4.9512_MHz_XTAL while its comment
+	// says 4.9152MHz. 4.9152 is the standard crystal -- it is in xtal.cpp and
+	// used by 50 files, where 4.9512 appears once in all of MAME and is not in
+	// the table at all. A digit transposition, and 4.9152 is what is used here.
+	// PLAN.md has the argument.
+	localparam [16:0] Z80_NUM = 17'd5632;
+	localparam [16:0] Z80_DEN = 17'd65625;
+
+	reg  [16:0] z80_acc;
+	wire [17:0] z80_next = {1'b0, z80_acc} + {1'b0, Z80_NUM};
+	wire        z80_bres = (z80_next >= {1'b0, Z80_DEN});
+
+	always @(posedge clk) begin
+		if (reset) z80_acc <= 17'd0;
+		else if (ss_rg_acc && ssbus_regs.write && (ssbus_regs.addr == 32'd1))
+			z80_acc <= ssbus_regs.data[46:30];
+		else z80_acc <= z80_bres ? z80_next[16:0] - Z80_DEN : z80_next[16:0];
+	end
+
 	// `pause` stops the sound board with the rest of it. The divider keeps
 	// running so the Z80 comes back on its own phase rather than a new one.
-	wire ce_z80 = (ce_div == 3'd7) && !pause;
+	wire ce_z80 = (z80_slow ? z80_bres : (ce_div == 3'd7)) && !pause;
 
 	// ------------------------------------------------------------------
 	// Z80
@@ -367,8 +411,14 @@ module spi_sound
 	// boundary keeps the valid bytes of its last line.
 	reg [15:0] rom_lim;    // first line with no data behind it
 	always @(posedge clk)
+		// On SXX2C the 386 downloads the program and z80dl_end says how much.
+		// On a single board it is a ROM in SDRAM and the size is the set's:
+		// 128 KB for rdfts and rdft2us, but 256 KB for rfjets, whose rfj-05.u091
+		// fills its whole audiocpu region. Hardcoding 128 KB here left rfjets'
+		// Z80 seeing half its program, everything above reading as `beyond_prg`.
 		rom_lim <= set_sxx2c ? (z80dl_end[18:3] + {15'd0, |z80dl_end[2:0]})
-		                     : 16'h4000;   // 0x20000 >> 3
+		         : z80_rom_256k ? 16'h8000    // 0x40000 >> 3
+		                        : 16'h4000;   // 0x20000 >> 3
 
 	wire beyond_prg = ({1'b0, rom_off[17:3]} >= rom_lim);
 
@@ -734,7 +784,7 @@ module spi_sound
 				ssbus_regs.read_response(SSIDX_SND_REGS,
 					(ssbus_regs.addr == 32'd0)
 						? {46'd0, fifo_wp, fifo_rp}
-						: {34'd0, f2_rp, f2_wp, 6'd0, ce_div, rom_bank});
+						: {17'd0, z80_acc, f2_rp, f2_wp, 6'd0, ce_div, rom_bank});
 			else if (ssbus_regs.write) ssbus_regs.write_ack(SSIDX_SND_REGS);
 		end
 	end
@@ -763,6 +813,8 @@ module spi_sound
 		// outputs to one speaker, the cartridge splits 0 and 1 left/right.
 		// That is exactly the mod byte's bit 0, which is already here.
 		.stereo   (set_sxx2c),
+		.pcm_25mb (pcm_25mb),
+		.ymf_16384(ymf_16384),
 		.addr     (ymf_addr),
 		.din      (bus_data),
 		.dout     (ymf_dout),

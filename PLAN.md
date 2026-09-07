@@ -12377,3 +12377,335 @@ fitted at, and the QSF should reproduce what is on the board.
 **On hardware.** Core `94d7c599`, `BUILD_DATE 260828`, deployed to 192.168.1.125
 with the previous core kept as `SeibuSPI.rbf.pre-ymfregs-20260828-0250`. The
 savestate fix this build was made for is confirmed there (14.5).
+
+---
+
+## 57. SXX2F: rdft2us, and what a second board actually cost (2026-09-06)
+
+The seventh set and the second board. `rdft2us` is **rdft2's game on rdfts's
+board**, and once that sentence is believed the work follows from it: MAME
+builds `sxx2f()` as `sxx2e()` plus three lines (`seibuspi.cpp:1892`) -- a
+different address map, `device_remove("ds2404")`, `EEPROM_93C46_16BIT` -- and
+runs `init_rdft2` for both rdft2 and rdft2us (`:4363`), so the decryption, the
+tile geometry and the sprite codec are not merely similar, they are the same
+selection.
+
+### 57.1 What was genuinely new, and what was recombination
+
+New: **one device**. `rtl/spi_93c46.sv`, a 64 x 16 serial EEPROM, verified
+against a transliteration of MAME's `eepromser.cpp` in `sim/tb_93c46.cpp`
+(section 58 has what that caught). Everything else was already in the tree and
+had never been combined:
+
+| | from | |
+|---|---|---|
+| 12 MB tiles, fore base 0x8000 | rdft2 | `big_tiles` |
+| text / tile keys | rdft2 | `TKEY*_RDFT2` |
+| RISE10 sprites, 6 MB chunks | rdft2 | `spr_rise10`, `SPR_CHUNK_SIZE_RDFT2` |
+| Z80 with its own ROM, no 0x688 download | rdfts | `set_sxx2c` = 0 |
+| samples in ROM, no flash, no updater | rdfts | `snd01_en` excludes it |
+| mono | rdfts | `stereo(set_sxx2c)` |
+| 25 MHz 386 | every board here | section 16.10's gate, unchanged |
+
+**The mod byte did not need a new field.** Bit 0 was already the BOARD and bits
+3:1 the set within it; the decode simply never used 3:1 on the bit-0-clear side.
+rdft2us is mod 0x02. `set_id` had exactly one of its eight values left.
+
+### 57.2 The one thing neither donor had: a 2.5 MB sample region
+
+rdft2us loads `pcm.u0103` at ymf 0 and `sound1.u0107` -- **not** the cartridges'
+`sound1.u0222`, as MAME's own comment on the line says -- at 0x200000. So the
+region is 0x280000 and the YMF271 addresses past the 2 MB every other set stops
+at. `ymf271_synth.sv` masked `ext_addr[20:0]`, which is 2 MB exactly.
+
+Widening it unconditionally would have been a quiet bug. The half megabyte above
+the samples is `SDR_SND01_BASE` -- **the cartridge sets' Z80 program** -- so on
+SXX2C a stray sample pointer above 2 MB would have played that program as audio
+instead of being folded back. Hence `SET_HAS_25MB_PCM`, a per-set signal threaded
+spi_top -> spi_sound -> ymf271 -> ymf271_synth, and the mask widens on rdft2us
+alone. The region fits with nothing moved: 0x280000 + 0x280000 = 0x500000, which
+is exactly where SND01 ended, and SND01 is unused here precisely BECAUSE this is
+not a cartridge -- no sound01 window, no updater, no program for the 386 to fetch.
+
+### 57.3 The save file, and the argument that was wrong
+
+An earlier draft of this called `spi_nvram` the awkward part -- "a file whose
+whole design premise is two devices with sizes known up front". That was wrong,
+and the correction is worth keeping because it generalises: `tail_base` is one
+offset selected by one mod-byte bit, the MRA declares the size, and MRAs are per
+game. A third layout is a third constant, not a third mechanism. 128 bytes,
+`small_nv`, and the file stays byte-for-byte MAME's -- its 93C46 nvram is the
+array verbatim, little-endian per word (`eeprom.cpp:286`).
+
+The 93C46 **shares the DS2404's byte port** rather than adding a second one up
+through SeibuSPI.sv. Only one backup part exists on any board, the file is 128
+bytes so the address never leaves seven bits, and only the write enable has to
+be steered. Its savestate shares the DS2404's two sections for the same reason,
+using two of sixteen dwords and 128 of 512 bytes -- the alternative was two new
+SSIDX entries and a framework change to save 384 bytes in a save file.
+
+### 57.4 No handshake, and why this chip is cheaper than the last one
+
+The DS2404 needed a `req`/`ack` toggle from clk_cpu because its command bytes are
+EVENTS that must not be seen twice or out of order. The 93C46's three inputs are
+LEVELS -- the 386 writes cs/sk/di to 0x68E and they sit there for microseconds --
+so the module samples them on clk_ram and finds its own edges. clk_cpu is a gated
+clk_sys/2 off the same PLL, so that is a synchronous transfer and not a CDC.
+
+One register write drives two devices, which is MAME's `spi_layerbanks_eeprom_w`
+exactly: the low bits of 0x68E are the tile banks and the high three are DI/CLK/CS.
+The read back is SYSTEM bit 6 at 0x60C, IPT_UNUSED on the other boards and the
+EEPROM's DO here.
+
+### 57.5 The bug that only the game could find: DO is a busy pin
+
+The 93C46 was written against MAME's `eepromser.cpp`, tested against a
+transliteration of it, and passed every check -- and rdft2us still booted to a
+black screen and spun for 94 frames with no DMA of any kind.
+
+**What was wrong was a reading of MAME, not of the datasheet.**
+`base_do_read()` returns a configuration constant in every state but
+READING_DATA, which reads like "DO is never a busy pin", and the READY/BUSY
+status is a separate `base_ready_read()`. Both true, and both beside the point,
+because the 93cxx subclass does not use `base_do_read()` as-is:
+
+    int eeprom_serial_93cxx_device::do_read()
+    { return (m_state == STATE_WAIT_FOR_START_BIT) ? base_ready_read()
+                                                   : base_do_read(); }
+                                                        -- eepromser.cpp:658
+
+with the header calling it "combined DO+READY/BUSY". DO is the shift register
+while a word is going out, **the write-completion status while the chip sits with
+CS raised waiting for a start bit**, and 1 otherwise -- which is the datasheet's
+own behaviour and what the game polls. Reading one function and not its override
+is the whole of it.
+
+**Nothing about the command stream was wrong**, which is why no unit test could
+have caught it. Tracing the chip showed exactly what MAME would have seen: READ
+of words 0x00 through 0x0F, then EWEN, then ERASE of word 0 -- every opcode,
+address and lock state correct. Then the game did this, at 0x2A10A4 in its own
+program:
+
+        xor  $0x40,%al          ; toggle CLK
+        mov  %eax,0x68e
+        mov  0x60c,%cx          ; SYSTEM -- bit 6 is DO
+        xor  $0x40,%al
+        mov  %eax,0x68e
+        test $0x40,%cl
+        jne  0x2a10a4           ; loop WHILE DO == 1, i.e. wait for BUSY
+
+and the mirror image below it waiting for DO to come back to 1. A chip that is
+never busy never satisfies the first loop. The 386's own I/O write counter is
+what pointed at it: 163,934 writes per window, all to 0x68C and 0x690 in equal
+numbers -- equal because `mov %eax,0x68e` is a MISALIGNED dword store that the
+386 splits across two bus cycles, which is also why MAME `nopw`s 0x690.
+
+So the timer is not optional and its length matters in both directions: too short
+and the poll misses the window between two samples, too long and it breaks a game
+-- `eeprom.cpp:41` says "a 2ms write time is too long for rfjetsa" and picks
+1750us. MAME's four numbers are used unchanged, because they are numbers someone
+already had to tune against these games. `ready()` also gates the start bit, so a
+command issued while busy is dropped rather than queued; that is modelled too,
+and it immediately showed up as a testbench that had been quietly testing
+nothing, because every write after the first was being refused in both models at
+once and they agreed perfectly about it.
+
+**Two smaller things fell out of the same run.** A blank part is all ones
+(`nvram_default()`: `m_default_value_set ? m_default_value : ~0`) and the array
+was powering up at zero -- wrong on hardware too, on a first boot with no save
+file. And the ERAL/WRAL sweep ignores the host lines while it runs, so the CS
+fall AND the following CS rise can both land inside it; finishing in S_RESET then
+waits for a rise that has already happened, and the poll hangs. It finishes in
+whichever state the current CS level implies.
+
+### 57.6 Verified
+
+* `make check-mra` -- **all 17 loader parts agree** on order, name, CRC, size,
+  scatter mode and destination, against MAME's `ROM_START(rdft2us)` and against
+  `rom_loader.sv`'s new table, independently. 50 MRAs still pass.
+* The MRA lists `zip="rdft2us.zip|rdft2.zip"`: every graphics ROM and the 2 MB
+  PCM are byte-identical to rdft2's under a different silkscreen, which is why a
+  merged rdft2.zip carries only prg0-3, zprg and sound1 under `rdft2us/`.
+* `tools/build_sdram_image.py --set rdft2us` builds the 41 MB image, 20 parts.
+* `make lint`, `make lint-top`, `make check-tb` clean.
+* **Fitted, SEED 1, timing met.** ALMs 39,326 -> 39,447 (still 94%), RAM blocks
+  529 -> 533, setup +0.030 on clk_ram, hold +0.187, TNS 0.000. That took three
+  attempts and 57.7 is what they cost.
+* **The game boots and draws in simulation.** `sim/tb_boot` on the built image:
+  the RAIDEN FIGHTERS 2 tiled background at 58,880 non-black pixels of 76,800,
+  tilemap, palette and sprite DMA all running, and the 386's I/O writes down from
+  163,934 per window in the spin to 90 in normal play.
+
+### 57.7 The 93C46's area: two wrong answers before the right one
+
+1 Kbit of storage, three fitted versions, and the first one broke the build:
+
+| version | spi_93c46 | design | timing |
+|---|---|---|---|
+| flops, one 16-bit array, combinational reads | 1191 ALMs, 1169 regs | 41,347 (99%) | -0.098 setup, **-0.435 hold** |
+| registered reads, two byte lanes | 1511 ALMs, 1194 regs | 41,118 (98%) | **-0.017** setup, +0.242 hold |
+| the same, byte read ports MERGED | **178 ALMs, 290 regs** | 39,447 (94%) | **+0.030 setup, +0.187 hold** |
+
+against `spi_ds2404`'s 643 ALMs for a real 512-byte SRAM.
+
+**The first version's header argued for flops and did not count them.** "64 x 16
+is 1 Kbit and an M10K is 10 Kbit; RAM is the binding resource at 96%; spending
+one to waste 90% of it is the wrong trade twice over" -- every clause true, the
+conclusion wrong, because it weighed one M10K against "some flops" without
+measuring either. 1191 ALMs at 94% utilisation is not affordable.
+
+**The second diagnosis was also wrong.** Told that the array should be block RAM,
+the obvious move was to make Quartus infer it: registered reads (the shape
+spi_ds2404 uses), then byte lanes (the shape spi_mainram's header prescribes),
+then `ramstyle = "M10K"`, then a scoped
+`ALLOW_ANY_RAM_SIZE_FOR_RECOGNITION`. Each changed the logic-cell count by
+EXACTLY nothing -- 84,571 cells three runs running -- and the map report kept
+showing `mem_hi[0][0]` as a discrete register. The conclusion drawn from that,
+that 512 bits is simply below Quartus's inference threshold, was itself wrong.
+
+**What the cost actually was: one 64:1 mux per read port per lane.** Three ports
+over two lanes is six of them, and that is the entire module. The storage bits
+were never the problem, which is why nothing aimed at the storage helped, and why
+registering the reads made the module BIGGER (it added flops without removing a
+mux) even as it fixed the -0.435 hold by breaking a long combinational path.
+
+Merging the save-file and savestate byte ports -- they cannot be live together,
+because a savestate section is read with the board PAUSED and the save file is
+uploaded while it runs, which is what `pause` selects on -- took six muxes to
+four. At two read ports Quartus then inferred the RAM it had refused at three,
+and the module fell to 178 ALMs. Which of the two effects mattered more was not
+isolated; both were in the same build.
+
+**The lesson is the one this project keeps writing down.** Both wrong answers
+were reasoned; both were settled by two numbers that were already in the fit
+report before either guess was made -- `spi_93c46 1190.8 ALMs` beside
+`spi_ds2404 643.0`, and `altsyncram` appearing for the DS2404's array and not for
+this one. The engine kept its own read port throughout, because an EEPROM read
+spans milliseconds of host writes and a 128-byte upload would routinely land in
+the middle of one; that pair really would collide, and sharing it would have been
+the third wrong answer.
+
+---
+
+## 58. SXX2F and SXX2G: two boards, one new chip, and four void tests (2026-09-07)
+
+`rdft2us`, `rfjets` and `rfjetsa` -- three sets across two boards, all three
+running on hardware. Section 57 covers SXX2F's shape; this is what SXX2G cost on
+top and, more usefully, how the bring-up went wrong.
+
+### 58.1 SXX2G is three clocks and nothing else
+
+MAME's `sxx2g()` is `sxx2f()` with three `set_clock` calls (`seibuspi.cpp:1907`,
+"clocks differ, but otherwise same hw as sxx2f"), and each needed a different
+answer:
+
+| | | |
+|---|---|---|
+| 386 | 28.63636, not 50/2 | the raw PLL output, so the gate comes OFF -- `full_speed` on spi_clk_throttle, which its own header had promised would be "a mux on the two constants" and turned out cheaper |
+| Z80 | 4.9152, not 7.1590909 | `clk_sys / 4.9152 = 11.652`, so no counter can make it. But the ratio IS exact as a fraction -- clk_sys is 630/11 MHz and 4.9152/(630/11) = **5632/65625** -- so it is a Bresenham accumulator, the same trick as the 386 gate and the YMF tick. `z80_acc` joins the savestate |
+| YMF271 | 16.384, not 16.9344 | one constant, as predicted: `ymf271.sv` accumulates the rate rather than synthesising a master clock. 16.384/384 = 128000/3 Hz, so numerator AND denominator scale by three and 42666.67 is exact rather than rounded |
+
+MAME's Z80 constant on that line is `4.9512_MHz_XTAL` while its own comment says
+4.9152MHz. 4.9152 is the standard crystal, in `xtal.cpp` and used by 50 files;
+4.9512 appears once in all of MAME. The core uses 4.9152.
+
+`set_id` went to four bits -- it enumerates across BOTH boards, so it ran out at
+eight while the mod byte's own 3:1 field had not. Nine conditions in spi_top ask
+"is this SXX2G", so that is a macro (`IS_SXX2G`) rather than an OR-list that
+would have been extended in eight places out of nine.
+
+`rfjetsa` needs an id of its own for one reason: it has no factory EEPROM image,
+so its part COUNT differs, and nparts is keyed on set_id. It shares rfjets'
+table arm.
+
+### 58.2 The factory EEPROM, and a loader mode that is not memory
+
+rfjets ships `ROM_REGION16_BE(0x80, "eeprom")` holding `st93c46.bin`, which MAME
+copies over its all-ones fill. Without it the game finds its settings invalid,
+branches into a message routine, and waits 120 frames on a counter only the
+vblank ISR writes -- with interrupts off, because the CPU-speed calibration's
+`pushf`/`popf` legitimately restores IF=0 and **there is no `sti` anywhere on
+that path**. Checked, every routine the trace walked.
+
+`rom_loader` gained `M_EEDEF` for it: the 128 bytes go straight into the chip as
+they stream past, with no SDRAM round trip and no state machine, and `spi_nvram`
+-- which owns the save file -- was left alone rather than taught to arbitrate its
+read channel against a preload. Precedence falls out for free: loader before
+reset, save file after it under `nv_hold`, savestate only when paused, and the
+three write sources into the array can never be live together.
+
+**The destination index is the source index with bit 0 INVERTED.** The region is
+big-endian and `internal_read` is `get_u16le`, so MAME's array holds the file
+byte-swapped per word and the game validates the swapped order. Three
+independent confirmations, in the order they arrived: reading 0x28C74 in MAME and
+in the core and seeing every pair transposed; MAME's own saved nvram file
+starting `6d 4a 4a 38`; and MAME with its nvram cleared writing that same magic
+itself.
+
+### 58.3 It was never an interrupt bug
+
+The chase went: "interrupts are never enabled" -> "the third interrupt never
+returns" -> neither. `EFLAGS.IF` had to be exposed (`patches/z386-irq-visibility.patch`)
+to find that out, and it overturned the diagnosis it was added to confirm --
+interrupts are enabled at the same point in boot as on the set that works, and
+the IF toggles that looked like `cli`/`sti` pairs were ordinary interrupt entry
+and `iret`, one per frame.
+
+What it actually was: **rfjets cannot have a blank EEPROM.** The part is
+factory-programmed, MAME loads that image, hardware ships with it. The hang was
+the game's own legitimate behaviour in a state that cannot occur, and the core
+simply had no way to reproduce a programmed part. `rfjetsa`, which ships none,
+boots fine on a blank one -- measured on hardware, `SOLO PLAY` where rfjets
+shows `DUAL PLAY`, which is exactly a settings difference.
+
+### 58.4 Four tests that measured nothing, and what hid them
+
+Worth writing down in full, because every one produced a confident negative
+result that was stated as fact:
+
+1. **A stale binary.** The rebuild check was `grep -cE "%Error|error:"`, which
+   does not match Verilator's `make: *** [...] Error 1`. A broken build reported
+   clean and the previous executable kept running.
+2. **The EEPROM seed never landed.** Its write enable was asserted at
+   `(t&7)==0` and cleared on the next step, and `clk_ram` is `t & 1` -- so the
+   clock rose exactly as the enable went away. Not one byte was written, across
+   both byte-order tests.
+3. **The EEPROM was not connected.** `set_93c46` named only the SXX2F set, so
+   rfjets bit-banged 0x68E into nothing. The trace showed zero commands, which
+   is what finally gave it away.
+4. **`rom_lim` was hardcoded to 128 KB** for every single board, where rfjets'
+   Z80 ROM is the full 256 KB region.
+
+3 and 4 are real bugs, fixed. 1 and 2 are instrument bugs, and they are the
+expensive kind: they do not fail, they agree with whatever you already believe.
+The measurement that finally settled the byte order -- reading one RAM address
+on both sides -- was available from the first hour.
+
+`check_mra` had a fifth of the same shape: its ROM_LOAD regex did not know
+`ROM_LOAD16_WORD`, so rfjets' `eeprom` region was invisible and a `skip=` entry
+naming it looked satisfied while doing nothing. An unrecognised load macro is
+silence, not an error.
+
+### 58.5 Verified
+
+* `tb_rom_loader`: M_EEDEF writes 128 bytes, byte-swapped, each exactly once,
+  and no set without such a part emits a single strobe. It caught `bytes_out`
+  counting those 128 as SDRAM output on its first run.
+* `tb_93c46`: unchanged and passing, including the write-busy poll and a
+  mid-command savestate.
+* `check_mra`: 52 MRAs, rfjets at 18 parts and rfjetsa at 17, each against
+  MAME's driver and the RTL table independently.
+* Fitted SEED 1: ALMs 39,447 -> 39,593 (94%), RAM blocks unchanged at 533,
+  setup +0.178, hold +0.244, TNS 0.000. Two boards, a fractional Z80 clock and a
+  new loader mode for 146 ALMs.
+* **On hardware**, core `7fb3c4c6`: rdft2us, rfjets and rfjetsa all reach
+  attract. rfjets getting past its settings validation is the proof that
+  M_EEDEF delivers through the real loader.
+
+### 58.6 Not verified
+
+Sound on SXX2G has not been listened to, so the 4.9152 MHz Z80 and the
+42666.67 Hz sample rate are proven only to the extent a working attract implies
+them. Savestates on either new board are untested. And a corrupt save file would
+overwrite the factory default and put rfjets back on the path it cannot leave --
+untested, and the one place this design is still fragile.

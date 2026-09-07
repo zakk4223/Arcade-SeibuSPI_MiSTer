@@ -5,7 +5,7 @@ RTL       := ../rtl
 TOOLS     := ../tools
 VFLAGS    := -Wall -I$(RTL) -CFLAGS "-O2 -I.." lint.vlt --cc --exe --build -j 0 --quiet
 
-.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-bench run-sound run-sdram run-timing
+.PHONY: all check-tb clean lint lint-top lint-sound lint-derive capture run-ddr_rom_reader run-rom_decode run-bpe run-ymf271 run-ymf271-math run-rom_loader run-snd_window run-tile_decrypt run-spr_decrypt run-rise10 run-rise11 run-video run-dma run-boot run-bench run-93c46 run-sound run-sdram run-timing
 
 SLOP_BIAS ?= 1
 
@@ -466,6 +466,13 @@ obj_dir/Vspi_nvram: $(RTL)/spi_nvram.sv $(RTL)/spi_defs.vh tb_nvram.cpp lint.vlt
 # cycles rather than in half a million.
 run-ds2404: obj_dir/Vspi_ds2404
 	@./obj_dir/Vspi_ds2404
+
+run-93c46: obj_dir/Vspi_93c46
+	@./obj_dir/Vspi_93c46
+
+obj_dir/Vspi_93c46: $(RTL)/spi_93c46.sv tb_93c46.cpp lint.vlt
+	$(VERILATOR) $(VFLAGS) -GCLK_MHZ=1 --top-module spi_93c46 \
+	    $(RTL)/spi_93c46.sv tb_93c46.cpp
 
 obj_dir/Vspi_ds2404: $(RTL)/spi_ds2404.sv tb_ds2404.cpp lint.vlt
 	$(VERILATOR) $(VFLAGS) -GTICK_DIV=64 --top-module spi_ds2404 \

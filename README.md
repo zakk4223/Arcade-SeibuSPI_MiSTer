@@ -7,6 +7,8 @@
 - Raiden Fighters Jet
 - Viper Phase 1
 - Senkyu
+- Raiden Fighters 2 (US, single board) — the SXX2F board, `rdft2us`
+- Raiden Fighters Jet (US, single board) — the SXX2G board, `rfjets` / `rfjetsa`
 
 ## Games that boot, but don't work
 
@@ -82,23 +84,22 @@ current gaps:
 
 Quartus Prime 17.0.0 Lite, Cyclone V `5CSEBA6U23I7` (MiSTer DE10-Nano),
 top-level entity `sys_top`, `SEED 1`. From `output_files/SeibuSPI.fit.summary`,
-fit dated 2026-09-06 (`BUILD_DATE 260906`, bitstream `b8f07077`).
+fit dated 2026-09-07 (`BUILD_DATE 260907`), with SXX2F and SXX2G added.
 
 | Resource                | Used      | Available | Utilization |
 |-------------------------|-----------|-----------|-------------|
-| Logic utilization (ALMs)| 39,326    | 41,910    | 94 %        |
-| Total registers         | 38,638    | -         | -           |
-| Block memory bits       | 3,841,857 | 5,662,720 | 68 %        |
-| RAM blocks              | 529       | 553       | 96 %        |
+| Logic utilization (ALMs)| 39,593    | 41,910    | 94 %        |
+| Total registers         | 38,731    | -         | -           |
+| Block memory bits       | 3,843,905 | 5,662,720 | 68 %        |
+| RAM blocks              | 533       | 553       | 96 %        |
 | DSP blocks              | 58        | 112       | 52 %        |
 | PLLs                    | 3         | 6         | 50 %        |
 | Pins                    | 145       | 314       | 46 %        |
 
-Timing: worst setup **+0.149 ns** on `pll_hdmi`, worst hold **+0.243 ns** on
+Timing: worst setup **+0.178 ns** on `pll_hdmi`, worst hold **+0.244 ns** on
 `emu` (clk_ram). The core's own clock has more room than that headline suggests
-— clk_ram is +0.269 setup and clk_cpu +1.991 — because the tightest path in the
-design belongs to the HDMI PLL, which is framework territory and not something
-this core's RTL moves. TNS 0.000 on every clock for setup, hold, recovery,
+— the tightest clock is the HDMI PLL again, which is framework territory and not
+something this core's RTL moves. TNS 0.000 on every clock for setup, hold, recovery,
 removal and minimum pulse width; no critical warnings. `make check-timing` is
 the gate, and `make release` refuses to assemble a distribution without it.
 

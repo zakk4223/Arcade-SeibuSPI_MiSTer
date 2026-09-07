@@ -78,6 +78,12 @@ module spi_nvram
 	// MRA property, fixed before the OSD is reachable: on SXX2E the samples are a
 	// ROM and the file is 512 bytes of SRAM and nothing else.
 	input             has_flash,
+	// The backup device is a 93C46 (128 bytes) rather than a DS2404 (512), so
+	// the file is a quarter the size. A THIRD fixed layout, chosen the same way
+	// the other two are -- off the mod byte, before the transfer starts --
+	// because the MRA has to declare the size and the MRA is per game. Nothing
+	// here is dynamic; only which constant is used.
+	input             small_nv,
 	// ...and the stored stamp is the one to use, rather than the one the
 	// derivation is about to write. True in Cart copy mode only.
 	input             flash_live,
@@ -161,9 +167,16 @@ module spi_nvram
 	// The two flash chips, then the DS2404's SRAM. `has_flash` chooses which of
 	// the two shapes this MRA declared; the MRA's size= must match, and
 	// tools/check_mra.py holds the two against each other.
-	localparam [25:0] SRAM_BYTES = 26'h000_0200;
+	localparam [25:0] SRAM_BYTES  = 26'h000_0200;   // DS2404 bookkeeping SRAM
+	localparam [25:0] EEPROM_BYTES = 26'h000_0080;   // 93C46, 64 words of 16
+	wire [25:0] sram_bytes = small_nv ? EEPROM_BYTES : SRAM_BYTES;
+	// small_nv and has_flash are mutually exclusive in practice -- a 93C46 board
+	// is a single board and a single board has no sample flash -- but they are
+	// kept independent rather than folded together, because the thing that makes
+	// them exclusive is a property of the BOARDS that exist and not of this
+	// module.
 	wire [25:0] tail_base = has_flash ? STAMP_BYTES[25:0] : 26'd0;
-	wire [25:0] nv_size   = tail_base + SRAM_BYTES;
+	wire [25:0] nv_size   = tail_base + sram_bytes;
 	// The offset into the SRAM, on each side. These are SUBTRACTIONS and were
 	// once the low nine bits of the counter, which worked only because both
 	// tail bases used to be 512-aligned -- 0x200000 and 0. A four-byte stamp

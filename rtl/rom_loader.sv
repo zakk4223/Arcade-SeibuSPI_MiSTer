@@ -45,7 +45,7 @@ module rom_loader
 	// decoded in SeibuSPI.sv from the MRA's index-1 mod byte. It must be
 	// stable before the
 	// index-0 download starts, which it is: the HPS sends the mod byte first.
-	input       [2:0] set_id,
+	input       [3:0] set_id,
 
 	// The authentic-flash variant of a cartridge set: the same head of the
 	// table, a different tail. Instead of a finished sample-flash image the MRA
@@ -59,6 +59,11 @@ module rom_loader
 	input     [127:0] part_codec,
 
 	// SDRAM write port (channel 3, toggle handshake)
+	// The factory 93C46 image, for an M_EEDEF part. Bypasses SDRAM entirely.
+	output reg  [6:0] ee_addr,
+	output reg  [7:0] ee_din,
+	output reg        ee_we,
+
 	output reg [25:0] sdr_addr,
 	output reg [15:0] sdr_din,
 	output reg  [1:0] sdr_be,
@@ -129,6 +134,20 @@ module rom_loader
 	localparam [4:0] M_SPR_ILV   = 5'd11;
 	localparam [4:0] M_SPR_ILV_R = 5'd12;
 
+	// A part that is not memory at all: the 128 bytes of rfjets' factory 93C46
+	// image, written straight into the chip as they stream past instead of
+	// being placed in SDRAM. There is no round trip and no state machine --
+	// the loader already has each byte in hand, and spi_nvram, which owns the
+	// save file, is left alone rather than being taught to arbitrate its
+	// SDRAM read channel against a preload.
+	//
+	// The destination index is the source index with bit 0 INVERTED. MAME
+	// declares that region ROM_REGION16_BE and loads it with ROM_LOAD16_WORD,
+	// so its array holds the file byte-swapped per word, and the game's
+	// validation is over the swapped order. Feeding it straight through is
+	// what made rfjets print GAME SETTING RESET and hang -- see PLAN.md 58.
+	localparam [4:0] M_EEDEF     = 5'd13;
+
 	// Part indices are 4 bits, and part_end (which spi_jtag_peek reports by bit
 	// position) is 4 bits with it. That is the reason rdft2's six sprite ROMs
 	// are ONE loader part rather than six: at a 6 MB chunk stride they are
@@ -136,6 +155,13 @@ module rom_loader
 	// and 19 parts would not have fit. check_mra.py still checks all six
 	// individually, by walking that part's MRA members.
 	localparam [4:0] NPARTS_RDFTS = 5'd14;
+	// 4 program + 1 Z80 + 3 text + 4 tiles + 3 sprite chunks + 2 sample = 17.
+	localparam [4:0] NPARTS_RDFT2US = 5'd17;
+	// 4 program + 1 Z80 + 3 text + 4 tiles + 3 sprites + 2 sample = 17.
+	// 4 program + 1 Z80 + 3 text + 4 tiles + 3 sprites + 2 sample = 17, and for
+	// rfjets an 18th: the factory 93C46 image. rfjetsa has no such region.
+	localparam [4:0] NPARTS_RFJETS  = 5'd18;
+	localparam [4:0] NPARTS_RFJETSA = 5'd17;
 	localparam [4:0] NPARTS_RDFT  = 5'd15;
 	localparam [4:0] NPARTS_RDFT2 = 5'd17;
 	localparam [4:0] NPARTS_RFJET = 5'd17;
@@ -167,6 +193,9 @@ module rom_loader
 		SET_RDFT : nparts = set_upd ? NPARTS_RDFT_U  : NPARTS_RDFT;
 		SET_RDFT2: nparts = set_upd ? NPARTS_RDFT2_U : NPARTS_RDFT2;
 		SET_RFJET: nparts = set_upd ? NPARTS_RFJET_U : NPARTS_RFJET;
+		SET_RDFT2US: nparts = NPARTS_RDFT2US;
+		SET_RFJETS: nparts = NPARTS_RFJETS;
+		SET_RFJETSA: nparts = NPARTS_RFJETSA;
 		SET_VIPRP1: nparts = NPARTS_VIPRP1;
 		SET_SENKYU: nparts = NPARTS_SENKYU;
 		SET_EJANHS: nparts = NPARTS_EJANHS;
@@ -452,6 +481,94 @@ module rom_loader
 		default:begin part_base = SDR_PCM_BASE;                     part_size = 26'h020_0000; part_mode = M_LINEAR; end // flash0_blank_region01.u1053 + 1 MB of FF
 		endcase
 
+		// ---- TABLE rfjets: SXX2G single board ----
+		//
+		// rfjet's GAME on rdft2us's BOARD. MAME's sxx2g() is sxx2f() with three
+		// clocks changed and nothing else (seibuspi.cpp:1907), so the shape here
+		// is rdft2us's with rfjet's geometry: 9 MB of tiles rather than 12, and
+		// three EIGHT MB sprite ROMs -- one per chunk, not a pair -- because the
+		// RISE11 sets load obj-1/2/3 whole at region 0, 8 MB and 16 MB.
+		//
+		// The Z80 ROM is the full 256 KB region here, where rdft2us fills only
+		// half of its. The sample region is 2.5 MB again, pcm-d.u0103 then
+		// rfj-04.u0107 above the 2 MB, which is why SET_HAS_25MB_PCM names this
+		// set as well.
+		//
+		// rfjetsa walks this same table: its four program ROMs differ and the
+		// other thirteen parts are identical in region, offset and size, so it
+		// is an ordinary generated clone MRA. rfjets also carries a 128-byte
+		// `eeprom` region (st93c46.bin) that rfjetsa does not; nothing loads it
+		// yet -- see PLAN.md 58 on why that is still an open question rather
+		// than a part in this table.
+		SET_RFJETS,
+		SET_RFJETSA: case (part_sel)
+			//                                          base   size          mode
+			5'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // rfj-06.u0259
+			5'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // rfj-07.u0258
+			5'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // rfj-08.u0265
+			5'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // rfj-09.u0264
+			5'd4 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h004_0000; part_mode = M_LINEAR; end // rfj-05.u091
+			5'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // rfj-01.u0524
+			5'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // rfj-02.u0518
+			5'd7 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // rfj-03.u0514
+			5'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-1d.u0535
+			5'd9 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0537
+			5'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;      part_size = 26'h020_0000; part_mode = M_24_W01; end // bg-2d.u0536
+			5'd11: begin part_base = SDR_TILES_BASE + 26'h060_0000;      part_size = 26'h010_0000; part_mode = M_24_B2;  end // bg-2p.u0545
+			5'd12: begin part_base = SDR_SPRITES_BASE + 26'd0;           part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-1.u073
+			5'd13: begin part_base = SDR_SPRITES_BASE + 26'd2;           part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-2.u074
+			5'd14: begin part_base = SDR_SPRITES_BASE + 26'd4;           part_size = 26'h080_0000; part_mode = M_SPR_ILV_R; end // obj-3.u075
+			5'd15: begin part_base = SDR_PCM_BASE;                       part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm-d.u0103
+			5'd16: begin part_base = SDR_PCM_BASE + 26'h020_0000;       part_size = 26'h008_0000; part_mode = M_LINEAR; end // rfj-04.u0107
+			// rfjets only. The 128-byte factory 93C46 image, written into the
+			// chip rather than into SDRAM (M_EEDEF). rfjetsa has no such
+			// region, which is the whole reason it needs its own set id: this
+			// arm is shared and only `nparts` differs.
+			default:begin part_base = SDR_EEDEF_BASE;                    part_size = 26'h000_0080; part_mode = M_EEDEF;  end // st93c46.bin
+		endcase
+
+		// ---- TABLE rdft2us: SXX2F single board ----
+		//
+		// rdft2's GAME on rdfts's BOARD, and the table is exactly that: the
+		// graphics half is rdft2's part for part (12 MB of tiles with the second
+		// group at +6 MB, the fix0/fix1/fixp lane order, three 6 MB RISE10
+		// sprite chunks in MAME's obj3/obj2/obj1 order), and the sound half is
+		// rdfts's -- a Z80 ROM the 386 never downloads, and samples in plain ROM
+		// with no flash, no updater and no sound01 window.
+		//
+		// Every graphics ROM here is byte-identical to rdft2's under a different
+		// silkscreen: MAME merges them by CRC, which is why the merged rdft2.zip
+		// carries only prg0-3, zprg and sound1 under rdft2us/. Only the sound
+		// tail is genuinely new.
+		//
+		// The one thing neither donor has: the sample region is 2.5 MB, not 2.
+		// pcm.u0103 fills the first 2 MB and sound1.u0107 -- a DIFFERENT ROM from
+		// the cartridges' sound1.u0222, as MAME's own comment says -- sits above
+		// it at 0x200000. That is why SET_HAS_25MB_PCM exists and why
+		// ymf271_synth widens its address by a bit here and nowhere else. The
+		// half megabyte it lands in is SDR_SND01_BASE's, free on this board
+		// exactly because a single board has no sound01 window to fill.
+		SET_RDFT2US: case (part_sel)
+			//                                          base   size          mode
+			5'd0 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B0;  end // prg0.u0259
+			5'd1 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B1;  end // prg1.u0258
+			5'd2 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B2;  end // prg2.u0265
+			5'd3 : begin part_base = SDR_PRG_BASE;                       part_size = 26'h008_0000; part_mode = M_32_B3;  end // prg3.u0264
+			5'd4 : begin part_base = SDR_Z80_BASE;                       part_size = 26'h002_0000; part_mode = M_LINEAR; end // zprg.u091
+			5'd5 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B1;  end // fix0.u0524
+			5'd6 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B0;  end // fix1.u0518
+			5'd7 : begin part_base = SDR_CHARS_BASE;                     part_size = 26'h001_0000; part_mode = M_24_B2;  end // fixp.u0514
+			5'd8 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-1d.u0535
+			5'd9 : begin part_base = SDR_TILES_BASE;                     part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-1p.u0537
+			5'd10: begin part_base = SDR_TILES_BASE + 26'h060_0000;      part_size = 26'h040_0000; part_mode = M_24_W01; end // bg-2d.u0536
+			5'd11: begin part_base = SDR_TILES_BASE + 26'h060_0000;      part_size = 26'h020_0000; part_mode = M_24_B2;  end // bg-2p.u0538
+			5'd12: begin part_base = SDR_SPRITES_BASE + 26'd0;           part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 0: obj3.u075 + obj3b.u078
+			5'd13: begin part_base = SDR_SPRITES_BASE + 26'd2;           part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 1: obj2.u074 + obj2b.u077
+			5'd14: begin part_base = SDR_SPRITES_BASE + 26'd4;           part_size = 26'h060_0000; part_mode = M_SPR_ILV_R; end // sprites chunk 2: obj1.u073 + obj1b.u076
+			5'd15: begin part_base = SDR_PCM_BASE;                       part_size = 26'h020_0000; part_mode = M_LINEAR; end // pcm.u0103
+			default:begin part_base = SDR_PCM_BASE + 26'h020_0000;       part_size = 26'h008_0000; part_mode = M_LINEAR; end // sound1.u0107
+		endcase
+
 		// ---- TABLE rdfts: SXX2E single board ----
 		default: case (part_sel)
 			//                                          base   size          mode
@@ -596,6 +713,7 @@ module rom_loader
 	reg seen_download;   // rom_ready must not assert before the first download
 
 	always @(posedge clk) begin
+		ee_we <= 1'b0;
 		if (reset) begin
 			part          <= 5'd0;
 			in_off        <= 26'd0;
@@ -626,14 +744,25 @@ module rom_loader
 			// part is still draining after the HPS drops ioctl_download, and
 			// those bytes are as real as the rest.
 			if (emit) begin
-				sdr_addr  <= {dest_r[25:1], 1'b0};
-				sdr_din   <= {dec_out_data, dec_out_data};
-				sdr_be    <= dest_r[0] ? 2'b10 : 2'b01;
-				sdr_rnw   <= 1'b0;
-				sdr_req   <= ~sdr_req;
-				busy      <= 1'b1;
+				if (part_mode_r == M_EEDEF) begin
+					// Straight into the chip. No `busy`: there is no write to
+					// retire, so the next byte can follow immediately.
+					ee_addr <= {out_off[6:1], ~out_off[0]};
+					ee_din  <= dec_out_data;
+					ee_we   <= 1'b1;
+				end else begin
+					sdr_addr  <= {dest_r[25:1], 1'b0};
+					sdr_din   <= {dec_out_data, dec_out_data};
+					sdr_be    <= dest_r[0] ? 2'b10 : 2'b01;
+					sdr_rnw   <= 1'b0;
+					sdr_req   <= ~sdr_req;
+					busy      <= 1'b1;
+					// Counts bytes that reach SDRAM, so an M_EEDEF byte is not
+					// one -- tb_rom_loader's telemetry check caught exactly
+					// that on its first run.
+					bytes_out <= bytes_out + 26'd1;
+				end
 				out_off   <= out_off + 26'd1;
-				bytes_out <= bytes_out + 26'd1;
 			end
 
 			if (feed) begin

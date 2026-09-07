@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <vector>
 #include <map>
 #include <set>
@@ -146,6 +147,17 @@ int main(int argc, char **argv)
         { "viprp1", 4 },   // SET_VIPRP1
         { "senkyu", 5 },   // SET_SENKYU
         { "ejanhs", 6 },   // SET_EJANHS
+        // SET_RDFT2US -- the SXX2F single board. Mod byte 0x02: bit 0 clear
+        // like rdfts, bits 3:1 = 1. rdft2's game on rdfts's board, so its
+        // set_sxx2c is 0 and its Z80 program is already in SDRAM.
+        { "rdft2us", 7 },
+        // SET_RFJETS -- the SXX2G single board. Mod byte 0x04: bit 0 clear like
+        // the other single boards, bits 3:1 = 2. rfjet's game on rdft2us's
+        // board, so sxx2c is 0 and the Z80 program is already in SDRAM.
+        { "rfjets",  8 },
+        // SET_RFJETSA -- the same board and layout, no factory EEPROM image,
+        // so it boots with a blank part and takes the settings-reset path.
+        { "rfjetsa", 9 },
     };
     int set_id = -1;
     for (const auto &e : SETS) if (!strcmp(setname, e.name)) set_id = e.id;
@@ -155,8 +167,13 @@ int main(int argc, char **argv)
         printf(")\n");
         return 2;
     }
-    // mod_byte[0] on hardware. rdfts is the only set with it clear.
-    bool set_sxx2c = set_id != 0;
+    // mod_byte[0] on hardware: the BOARD, not the set. Clear on every single
+    // board -- rdfts (SXX2E) and rdft2us (SXX2F) -- and set on the six SXX2C
+    // cartridges. This was `set_id != 0` while rdfts was the only single board,
+    // and adding rdft2us to the table above without changing it here gave that
+    // set the cartridge's Z80 download and its stereo mix: the game spun on
+    // 0x600 and drew nothing, for 42 frames, with no error anywhere.
+    bool set_sxx2c = (set_id != 0) && (set_id != 7) && (set_id != 8) && (set_id != 9);
     // mod_byte[0] & mod_byte[4]. Every MRA this repo ships has bit 4 set, but
     // that does NOT make set_upd=1 the right default here: spi_flash_derive
     // lives in SeibuSPI.sv, above spi_top, so this bench does not contain it.
@@ -174,6 +191,19 @@ int main(int argc, char **argv)
     bool from_snd01 = (set_id == 2) || (set_id == 3) ||
                       (set_id == 5) || (set_id == 6);
     printf("set: %s (set_id=%d, sxx2c=%d)\n", setname, set_id, set_sxx2c);
+
+    // EE_IMAGE: seed the backup device through the save-file port before the
+    // board is released, which is what an MRA's <nvram> would do on hardware
+    // and what MAME's `eeprom` ROM region does for rfjets.
+    const char *ee_path = getenv("EE_IMAGE");
+    std::vector<uint8_t> ee_img;
+    if (ee_path) {
+        FILE *ef = fopen(ee_path, "rb");
+        if (!ef) { printf("FAIL: cannot open %s\n", ee_path); return 2; }
+        uint8_t b; while (fread(&b, 1, 1, ef) == 1) ee_img.push_back(b);
+        fclose(ef);
+        printf("eeprom seed: %s (%zu bytes)\n", ee_path, ee_img.size());
+    }
 
     FILE *f = fopen(argv[1], "rb");
     if (!f) { printf("FAIL: cannot open %s\n", argv[1]); return 2; }
@@ -195,6 +225,7 @@ int main(int argc, char **argv)
                                  sdram.begin() + Z80_BASE + Z80_SIZE);
 
     Vtb_boot_top *dut = new Vtb_boot_top;
+    dut->nv_addr = 0; dut->nv_din = 0; dut->nv_we = 0;
 
     // cdl is not a channel, only an owner tag: the download shares ch3 with the
     // Z80 fetch and writes rather than reads, so it retires differently.
@@ -561,7 +592,76 @@ int main(int argc, char **argv)
     const size_t LONG_MAX = LONG_MAX_N;
     uint64_t ss_snap_vbl = 0, ss_busy_start = 0, ss_hash_anchor = 0;
 
+    // EIP run-ring, see the push site below.
+    const bool eip_ring_on = getenv("EIP_RING") != nullptr;
+    const uint32_t ring_trig = getenv("EIP_RING_TRIG")
+        ? (uint32_t)strtoul(getenv("EIP_RING_TRIG"), nullptr, 16) : 0;
+    bool ring_frozen = false;
+    const bool if_watch = getenv("IF_WATCH") != nullptr;
+    int if_last = 0, if_reports = 0;
+    static const int RING = 512;
+    std::vector<std::pair<uint32_t,uint64_t>> ring(RING);
+    int ring_head = 0, ring_n = 0;
+
+    size_t ee_i = 0;
+    uint32_t ring_prev = 0xFFFFFFFFu;
     for (uint64_t t = 0; t < max_steps; t++) {
+        // EIP_RING: sampled on EVERY half-step, not once per clk_cpu phase like
+        // the trail below. dbg_EIP is a clk_cpu register so twice-a-cycle ought
+        // to be enough -- but "ought to" produced a trace with a `call` whose
+        // callee never appeared, which is impossible, so the assumption is not
+        // worth keeping. A ring of RUNS (value plus repeat count) so a spin
+        // collapses to one entry and the history into it survives.
+        // IF_WATCH: report every change of EFLAGS.IF with the EIP at the time,
+        // which is what actually locates an `sti`. `dbg_IF` is the flag itself,
+        // so the first 0->1 IS the instruction that enabled interrupts.
+        if (if_watch && (t % 5000000) == 0)
+            printf("  [t=%llu] IF=%d z386_intr=%d inhibit=%d | spi_cpu irq=%d"
+                   " inta=%d | EIP=%08X\n",
+                   (unsigned long long)t, dut->p_if, dut->p_intr_pending,
+                   dut->p_intr_inhibit, dut->p_cpu_irq, dut->p_cpu_inta,
+                   dut->p_eip);
+        if (if_watch && dut->p_if != if_last) {
+            if (if_reports < 40)
+                printf("  IF %d->%d at EIP=%08X  (intr_pending=%d inhibit=%d) t=%llu\n",
+                       if_last, dut->p_if, dut->p_eip, dut->p_intr_pending,
+                       dut->p_intr_inhibit, (unsigned long long)t);
+            if_reports++;
+            if_last = dut->p_if;
+        }
+
+        // EIP_RING_TRIG=<hex addr>: freeze the ring the first time EIP reaches
+        // that address, so what survives is the path INTO it rather than the
+        // loop it is stuck in. Without this the ring just fills with the spin.
+        if (eip_ring_on && !ring_frozen && ring_trig &&
+            dut->p_eip == ring_trig && ring_n > 8) ring_frozen = true;
+        if (eip_ring_on && !ring_frozen && dut->p_eip != ring_prev) {
+            ring_prev = dut->p_eip;
+            if (ring_n && ring[(ring_head + RING - 1) % RING].first == dut->p_eip)
+                ring[(ring_head + RING - 1) % RING].second++;
+            else {
+                ring[ring_head] = {dut->p_eip, 1};
+                ring_head = (ring_head + 1) % RING;
+                if (ring_n < RING) ring_n++;
+            }
+        }
+
+        // One byte per eight half-steps, with the write enable held across a
+        // RISING clk_ram edge. It used to be asserted at (t&7)==0 and cleared
+        // on the very next step -- and clk_ram is `t & 1`, so it rose exactly
+        // when the enable had just gone away, and not one byte was ever
+        // written. Every EEPROM seeding test run against that measured nothing.
+        if (ee_i < ee_img.size()) {
+            if ((t & 7) == 0) {
+                dut->nv_addr = (uint16_t)ee_i;
+                dut->nv_din  = ee_img[ee_i];
+                dut->nv_we   = 1;
+            } else if ((t & 7) == 4) {
+                dut->nv_we = 0;
+                ee_i++;
+            }
+        }
+
         // clk_ram toggles every step; clk_sys every 2; clk_cpu every 4
         dut->clk_ram = (t >> 0) & 1;
         dut->clk_sys = (t >> 1) & 1;
@@ -1732,6 +1832,32 @@ int main(int argc, char **argv)
         }
     }
 
+    // IO_SUMMARY: the I/O registers this run wrote, busiest first, with the
+    // last value each received. `io_writes` has been collected all along and
+    // was only ever used for the CRTC shadow; a spin loop is visible here in
+    // one line, which is what the SXX2F bring-up needed and had to add.
+    if (getenv("IO_SUMMARY")) {
+        std::vector<std::pair<uint32_t, std::pair<uint64_t, uint32_t>>> v(
+            io_writes.begin(), io_writes.end());
+        std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) {
+            return a.second.first > b.second.first; });
+        printf("\nI/O writes by register, busiest first (%llu total):\n",
+               (unsigned long long)io_wr_total);
+        for (size_t i = 0; i < v.size() && i < 16; i++)
+            printf("  0x%03X  %12llu  last=%08X\n", v[i].first * 4,
+                   (unsigned long long)v[i].second.first, v[i].second.second);
+    }
+
+    if (eip_ring_on && ring_n) {
+        printf("\nlast %d EIP runs (oldest first), value x repeat:\n", ring_n);
+        for (int i = 0; i < ring_n; i++) {
+            auto &e = ring[(ring_head - ring_n + i + 2 * RING) % RING];
+            printf("  %08X x%-8llu%s", e.first, (unsigned long long)e.second,
+                   ((i % 4) == 3) ? "\n" : "");
+        }
+        printf("\n");
+    }
+
     printf("IDT at end             : base=%08X limit=%05X (%llu changes), "
            "CS=%04X EIP=%08X\n",
            dut->p_idt_base, dut->p_idt_limit,
@@ -1815,6 +1941,17 @@ int main(int argc, char **argv)
             }
         }
         printf("main RAM hash          : %016llX\n", (unsigned long long)h);
+        // RAM_PEEK=<hex byte addr>[,<hex>...]: dwords out of main RAM by
+        // address, for reading a specific variable the game computed rather
+        // than diffing whole-RAM hashes.
+        if (const char *pk = getenv("RAM_PEEK")) {
+            char buf[256]; snprintf(buf, sizeof buf, "%s", pk);
+            for (char *tok = strtok(buf, ","); tok; tok = strtok(nullptr, ",")) {
+                uint32_t a = (uint32_t)strtoul(tok, nullptr, 16);
+                dut->peek_addr = (uint16_t)(a >> 2); dut->eval();
+                printf("  RAM[%05X] = %08X\n", a, dut->peek_data);
+            }
+        }
     }
     // A dump, so two runs can be diffed dword by dword rather than compared
     // through a hash that says only "different".

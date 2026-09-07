@@ -80,6 +80,14 @@ module spi_io
 
 	// ---- SXX2C cartridge ------------------------------------------------
 	input             set_sxx2c,
+	// SXX2F keeps its bookkeeping in a 93C46 where SXX2C/SXX2E have a DS2404.
+	// The chip is three level signals out and one level back, so unlike the
+	// DS2404 there is no handshake here at all -- see rtl/spi_93c46.sv.
+	input             set_93c46,
+	output reg        ee_cs,
+	output reg        ee_sk,
+	output reg        ee_di,
+	input             ee_do,
 	// Z80 -> 386 FIFO. On the cartridge this REPLACES the coin latch at 0x680;
 	// coins arrive as a FIFO message instead of through sb_coin_r.
 	input       [7:0] fifo2_q,
@@ -195,7 +203,12 @@ module spi_io
 			5'd20:   ss_dout <= {scroll_by, scroll_bx};
 			5'd21:   ss_dout <= {scroll_my, scroll_mx};
 			5'd22:   ss_dout <= {scroll_fy, scroll_fx};
-			5'd23:   ss_dout <= {7'd0, rf2_layer_bank, z80_rst_n,
+			// The three 93C46 lines ride in this dword's spare top bits: they
+			// are written by the same 0x68E store as rf2_layer_bank, and a
+			// restore that dropped them would hand the chip a CS or CLK level
+			// that never matched what the game last wrote.
+			5'd23:   ss_dout <= {4'd0, ee_di, ee_sk, ee_cs,
+			                     rf2_layer_bank, z80_rst_n,
 			                     layer_enable, layer_bank};
 			5'd24:   ss_dout <= {14'd0, dma_src};
 			5'd25:   ss_dout <= {16'd0, dma_len};
@@ -260,6 +273,9 @@ module spi_io
 			layer_enable     <= 5'b00000;   // MAME video_start: 0 = all layers enabled
 
 			rf2_layer_bank   <= 3'd0;
+			ee_cs            <= 1'b0;
+			ee_sk            <= 1'b0;
+			ee_di            <= 1'b0;
 			{scroll_bx, scroll_by} <= 32'd0;
 			{scroll_mx, scroll_my} <= 32'd0;
 			{scroll_fx, scroll_fy} <= 32'd0;
@@ -280,6 +296,9 @@ module spi_io
 					layer_enable   <= ss_din[20:16];
 					z80_rst_n      <= ss_din[21];
 					rf2_layer_bank <= ss_din[24:22];
+					ee_cs          <= ss_din[25];
+					ee_sk          <= ss_din[26];
+					ee_di          <= ss_din[27];
 				end
 				5'd24: dma_src <= ss_din[17:0];
 				5'd25: dma_len <= ss_din[15:0];
@@ -365,7 +384,19 @@ module spi_io
 						z80_rst_n <= wdata[0];
 						dl_pos    <= 19'd0;
 					end
-					if (be[2]) rf2_layer_bank <= wdata[18:16];  // 0x68E
+					// 0x68E. MAME's spi_layerbanks_eeprom_w does BOTH: the low
+					// bits are the tile banks (rf2_layer_bank_w) and the high
+					// bits are the EEPROM (eeprom_w), one write driving two
+					// devices. On SXX2C/SXX2E the handler is rf2_layer_bank_w
+					// alone and there is no EEPROM to drive.
+					if (be[2]) begin
+						rf2_layer_bank <= wdata[18:16];
+						if (set_93c46) begin
+							ee_di <= wdata[23];   // d7
+							ee_sk <= wdata[22];   // d6
+							ee_cs <= wdata[21];   // d5
+						end
+					end
 				end
 
 
@@ -442,7 +473,14 @@ module spi_io
 			11'h600: rdata = 32'h0000_0001;
 			11'h604: rdata = {16'hFFFF, inputs};
 			11'h608: rdata = 32'hFFFF_FFFF;
-			11'h60C: rdata = {24'hFFFFFF, system};
+			// 0x60C SYSTEM. Bit 6 is IPT_UNUSED on SXX2C and SXX2E -- active
+			// low, so it reads 1 -- and on SXX2F it is the 93C46's DO
+			// (`INPUT_PORTS sxx2f`, seibuspi.cpp:1322). DO is not merely a data
+			// line: in the state the chip sits in between commands it reports
+			// write completion, and rdft2us polls exactly that. See
+			// rtl/spi_93c46.sv.
+			11'h60C: rdata = {24'hFFFFFF, system[7],
+			                  set_93c46 ? ee_do : system[6], system[5:0]};
 			// On SXX2C 0x680 is the Z80->386 FIFO, not the coin latch.
 			11'h680: rdata = {24'd0, set_sxx2c ? fifo2_q : coin_latch};
 			// d1 = _EF of the Z80->386 FIFO: 0 while it is empty. SXX2E has no

@@ -28,7 +28,13 @@ module tb_boot_top
 	// Three bits since viprp1 became the fifth set. This was [1:0] against
 	// spi_top's [2:0], which is a WIDTHEXPAND and, with the other 32 pins
 	// below, is why this testbench had stopped building at all.
-	input       [2:0] set_id,
+	input       [3:0] set_id,
+	// The save-file byte port, so a testbench can seed the backup device before
+	// release -- rfjets ships a factory 93C46 image (st93c46.bin) that MAME
+	// copies in and this core has no MRA path for yet.
+	input       [8:0] nv_addr,
+	input       [7:0] nv_din,
+	input             nv_we,
 	// mod_byte[0] & mod_byte[4] on hardware. EVERY MRA this repo ships sets
 	// it (viprp1 0x17, senkyu 0x19, ejanhs 0x1B, rdft 0x11), because they all
 	// derive the sample flash rather than carrying a programmed one -- so with
@@ -147,6 +153,9 @@ module tb_boot_top
 	// visible and sane once the boot code has run its LIDT.
 	output     [31:0] p_idt_base,
 	output     [19:0] p_idt_limit,
+	output            p_if,
+	output            p_intr_pending,
+	output            p_intr_inhibit,
 	output     [31:0] p_eip,
 	output     [15:0] p_cs,
 	output     [31:0] p_cs_base,
@@ -303,6 +312,13 @@ module tb_boot_top
 		.ss_dbg_gate_reads (p_ss_gate_reads),
 		.ss_dbg_hold       (p_ss_hold),
 		.ss_dbg_stalls     (p_ss_stalls),
+		// This bench preloads SDRAM directly and has no rom_loader, so the
+		// factory 93C46 image never streams past. EE_IMAGE seeds it through the
+		// save-file port instead; tb_rom_loader is where M_EEDEF is checked.
+		.ee_ld_addr        (7'd0),
+		.ee_ld_din         (8'd0),
+		.ee_ld_we          (1'b0),
+
 		.p_cpu_irq         (p_cpu_irq),
 		.p_ds_rtc          (p_ds_rtc),
 		.p_ds_tick         (p_ds_tick),
@@ -348,9 +364,9 @@ module tb_boot_top
 		// reason the comment above gives: PINMISSING is an error, so an
 		// unconnected port stops this file BUILDING. Nothing in the boot
 		// sequence reads the chip's bookkeeping, so a quiet port is honest.
-		.ds_nv_addr    (9'd0),
-		.ds_nv_din     (8'd0),
-		.ds_nv_we      (1'b0),
+		.ds_nv_addr    (nv_addr),
+		.ds_nv_din     (nv_din),
+		.ds_nv_we      (nv_we),
 		.ds_nv_dout    (),
 		.ds_nv_dirty   (),
 
@@ -449,6 +465,9 @@ module tb_boot_top
 	assign p_idt_base        = dut.cpu.dbg_idt_base;
 	assign p_idt_limit       = dut.cpu.dbg_idt_limit;
 	assign p_eip             = dut.cpu.dbg_eip;
+	assign p_if              = dut.cpu.dbg_if;
+	assign p_intr_pending    = dut.cpu.dbg_intr_pending;
+	assign p_intr_inhibit    = dut.cpu.dbg_intr_inhibit;
 	assign p_cs              = dut.cpu.dbg_cs;
 	assign p_cs_base         = dut.cpu.dbg_cs_base;
 	assign peek_data         = {dut.cpu.mainram.mem3[peek_addr],

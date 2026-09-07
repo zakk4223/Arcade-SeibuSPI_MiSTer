@@ -93,6 +93,75 @@ PARTS_RDFTS = [
     ("pcm",     0x3f8d4a48, 0x200000, "LINEAR",  0),
 ]
 
+# rdft2us, the SXX2F single board: rdft2's game on rdfts's board. The graphics
+# half is rdft2's part for part and the sound half is rdfts's -- a Z80 program
+# ROM and real sample ROMs, no flash. The one thing neither donor has is a 2.5 MB
+# sample region: pcm.u0103 fills the first 2 MB and sound1.u0107 sits above it,
+# in the half megabyte the cartridge sets use for SDR_SND01_BASE. That is why
+# ymf271_synth's sample address is 22 bits on this set alone.
+PARTS_RDFT2US = [
+    ("prg",     0xff3eeec1,  0x80000, "W32_B0",  0),
+    ("prg",     0xe2cf77d6,  0x80000, "W32_B1",  0),
+    ("prg",     0xcae87e1f,  0x80000, "W32_B2",  0),
+    ("prg",     0x83f4fb5f,  0x80000, "W32_B3",  0),
+    ("z80",     0xcc543c4f,  0x20000, "LINEAR",  0),
+    ("chars",   0x6fdf4cf6,  0x10000, "W24_B1",  0),
+    ("chars",   0x69b7899b,  0x10000, "W24_B0",  0),
+    ("chars",   0x99a5fece,  0x10000, "W24_B2",  0),
+    ("tiles",   0x6143f576, 0x400000, "W24_W01", 0),
+    ("tiles",   0x55e64ef7, 0x200000, "W24_B2",  0),
+    ("tiles",   0xc607a444, 0x400000, "W24_W01", 0x600000),
+    ("tiles",   0xf0830248, 0x200000, "W24_B2",  0x600000),
+    # Three 6 MB plane-pair chunks, each a pair of ROMs, exactly as rdft2's are
+    # -- these ARE rdft2's ROMs, merged by CRC under a different silkscreen.
+    # `off` is the chunk slot (+0/+2/+4) and the sixth field is the source-index
+    # bias that makes the second ROM of a pair continue its chunk.
+    ("sprites", 0xe08f42dc, 0x400000, "SPR_ILV_R", 0, 0x000000),
+    ("sprites", 0x1b6a523c, 0x200000, "SPR_ILV_R", 0, 0x400000),
+    ("sprites", 0x7aeadd8e, 0x400000, "SPR_ILV_R", 2, 0x000000),
+    ("sprites", 0x5d790a5d, 0x200000, "SPR_ILV_R", 2, 0x400000),
+    ("sprites", 0xc2c50f02, 0x400000, "SPR_ILV_R", 4, 0x000000),
+    ("sprites", 0x5259321f, 0x200000, "SPR_ILV_R", 4, 0x400000),
+    ("pcm",     0x2edc30b5, 0x200000, "LINEAR",  0),
+    ("pcm",     0x20384b0e,  0x80000, "LINEAR",  0x200000),
+]
+
+# rfjets, the SXX2G single board: rfjet's game on rdft2us's board. Same shape as
+# PARTS_RDFT2US with rfjet's geometry -- 9 MB of tiles and three EIGHT MB sprite
+# ROMs, one per chunk rather than a pair -- and the same 2.5 MB sample region.
+# rfjetsa walks this same layout with four different program ROMs.
+PARTS_RFJETS = [
+    ("prg",     0xc835aa7a,  0x80000, "W32_B0",  0),
+    ("prg",     0x3b6ca1ca,  0x80000, "W32_B1",  0),
+    ("prg",     0x1f5dd06c,  0x80000, "W32_B2",  0),
+    ("prg",     0xcc71c402,  0x80000, "W32_B3",  0),
+    ("z80",     0xa55e8799,  0x40000, "LINEAR",  0),
+    ("chars",   0x8bc080be,  0x10000, "W24_B1",  0),
+    ("chars",   0xbded85e7,  0x10000, "W24_B0",  0),
+    ("chars",   0x015d0748,  0x10000, "W24_B2",  0),
+    ("tiles",   0xedfd96da, 0x400000, "W24_W01", 0),
+    ("tiles",   0xa4cc4631, 0x200000, "W24_B2",  0),
+    ("tiles",   0x731fbb59, 0x200000, "W24_W01", 0x600000),
+    ("tiles",   0x03652c25, 0x100000, "W24_B2",  0x600000),
+    ("sprites", 0x58a59896, 0x800000, "SPR_ILV_R", 0),
+    ("sprites", 0xa121d1e3, 0x800000, "SPR_ILV_R", 2),
+    ("sprites", 0xbc2c0c63, 0x800000, "SPR_ILV_R", 4),
+    ("pcm",     0x8ee3ff45, 0x200000, "LINEAR",  0),
+    ("pcm",     0xc050da03,  0x80000, "LINEAR",  0x200000),
+    # st93c46.bin is NOT here on purpose. rfjets' MRA carries it as an 18th
+    # part, but rom_loader's M_EEDEF mode writes it into the 93C46 as it
+    # streams past rather than into SDRAM, so it has no place in an image.
+    # sim/tb_boot has no loader -- it preloads SDRAM directly -- so seed the
+    # chip there with EE_IMAGE=<file> instead, and note the file needs its
+    # bytes swapped per word (MAME's region is ROM_REGION16_BE).
+]
+
+# rfjetsa: rfjets' layout, four different program ROMs.
+PARTS_RFJETSA = [("prg", c, 0x80000, m, 0) for c, m in
+                 ((0xb0c8d47e, "W32_B0"), (0x17189b39, "W32_B1"),
+                  (0xab6d724b, "W32_B2"), (0xb119a67c, "W32_B3"))] \
+                + PARTS_RFJETS[4:]
+
 # rdft, the SPI cartridge's first set. Order and modes are rom_loader.sv's rdft
 # table. Four byte lanes for the program and three for the text layer, where
 # rdfts has word+byte pairs, and no audiocpu part at all -- that region is RAM
@@ -256,6 +325,19 @@ BLANK_VIPRP1 = 0xa4c181d0       # flash0_blank_regionbe.u1053, viprp1's region
 BLANK_REGION01 = 0x7ae7ab76     # flash0_blank_region01.u1053, senkyu/ejanhs
 SETS = {
     "rdfts": dict(parts=PARTS_RDFTS, probe=0xe278dddd, flash=False),
+    # Probed on prg0.u0259, which is unique to this set: a merged rdft2.zip
+    # holds it alongside rdft2's own program, so the probe has to be a ROM the
+    # parent does not have. It is checked before "rdft2" for the same reason
+    # rdfts is checked before "rdft" -- first match wins.
+    "rdft2us": dict(parts=PARTS_RDFT2US, probe=0xff3eeec1, flash=False),
+    # Probed on rfj-06.u0259, unique to this set: a merged rfjet.zip carries it
+    # alongside the cartridge's own program, so the probe has to be a ROM the
+    # parent does not have. Checked before "rfjet" for the same reason rdfts is
+    # checked before "rdft" -- first match wins.
+    "rfjets":  dict(parts=PARTS_RFJETS,  probe=0xc835aa7a, flash=False),
+    # rfjetsa walks the same layout with four different program ROMs and no
+    # factory EEPROM image. Probed on its own prg0.
+    "rfjetsa": dict(parts=PARTS_RFJETSA, probe=0xb0c8d47e, flash=False),
     "rdft":  dict(parts=PARTS_RDFT,  probe=0xadcb5dbc, flash=True,
                   pcmsrc=PCMSRC_SEI252,
                   # rdft's image is a plain concatenation rather than a decoded

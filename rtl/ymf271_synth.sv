@@ -91,6 +91,16 @@ module ymf271_synth
 	// matches MAME; it is not independently confirmed.
 	input                stereo,
 
+	// The sample region is 2.5 MB rather than 2 MB, so the chip's external
+	// address has to reach 22 bits instead of 21. True only on the single-board
+	// sets that load a second sample ROM above the first (SET_HAS_25MB_PCM in
+	// spi_defs.vh). It is a per-set signal and not a constant because the extra
+	// half megabyte is SDR_SND01_BASE's: free on those boards, but the CARTRIDGE
+	// sets' Z80 program on every other one. Widening this unconditionally would
+	// let a stray sample pointer read that program as audio, and the failure
+	// would be a glitch with no obvious cause.
+	input                pcm_25mb,
+
 	// ---- slot parameter writes (from the register file) -------------------
 	input                par_we,
 	input          [7:0] par_addr,     // {slot[5:0], word[1:0]}
@@ -1135,7 +1145,7 @@ module ymf271_synth
 			// the region is 2 MB, so the chip's 23-bit space mirrors inside it.
 			// Real hardware has nothing above the ROM either; MAME reads 0
 			// there because its region is ERASE00.
-			sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
+			sdr_addr <= SDR_PCM_BASE + {3'd0, ext_addr[21] & pcm_25mb, ext_addr[20:3], 3'b000};
 			sdr_req  <= ~sdr_req;
 			ext_ret  <= S_IDLE;
 			state    <= S_EXT;
@@ -1507,7 +1517,7 @@ module ymf271_synth
 			end
 			if (last_slot) begin
 				if (ext_req != ext_ack) begin
-					sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
+					sdr_addr <= SDR_PCM_BASE + {3'd0, ext_addr[21] & pcm_25mb, ext_addr[20:3], 3'b000};
 					sdr_req  <= ~sdr_req;
 					ext_ret  <= S_OUT;
 					state    <= S_EXT;
@@ -1522,7 +1532,7 @@ module ymf271_synth
 				cch_ra <= nslot;
 				par_ra <= {nslot, 2'd0};
 				if (ext_req != ext_ack) begin
-					sdr_addr <= SDR_PCM_BASE + {4'd0, ext_addr[20:3], 3'b000};
+					sdr_addr <= SDR_PCM_BASE + {3'd0, ext_addr[21] & pcm_25mb, ext_addr[20:3], 3'b000};
 					sdr_req  <= ~sdr_req;
 					ext_ret  <= S_LD0;
 					state    <= S_EXT;
@@ -1633,11 +1643,13 @@ module ymf271_synth
 	                 att_atk, att_dec, att_ceil, adv, pos3, fm_nsh, exp_sh, op_mag,
 	                 logsin_x, att_c, kc_ext, lfo_per, eg_mask, env_sum,
 	                 eg_cnt_sh, pcm_shr, em_shr, lp_m32, lp_m96, alg_b, B3,
-	                 // ext_addr is the chip's full 23-bit space; the sample
-	                 // region is 2 MB, so [20:0] addresses all of it -- both
-	                 // flash chips included, since chip 1 is just bit 20 -- and
-	                 // the top two bits mirror rather than reach anything.
-	                 ext_addr[22:21]};
+	                 // ext_addr is the chip's full 23-bit space. The sample
+	                 // region is 2 MB on almost every set, so [20:0] addresses
+	                 // all of it -- both flash chips included, since chip 1 is
+	                 // just bit 20. Bit 21 is used only where the region is
+	                 // 2.5 MB (pcm_25mb); bit 22 mirrors rather than reaching
+	                 // anything on any set.
+	                 ext_addr[22]};
 	/* verilator lint_on UNUSEDSIGNAL */
 
 	initial begin

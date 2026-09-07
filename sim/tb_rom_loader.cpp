@@ -47,7 +47,11 @@ static const uint32_t PCMSRC_RFJET  = SPRITES_BASE + 3 * 0x800000;  // 0x2900000
 static const uint32_t SDR_SIZE     = 0x2B00000;
 
 enum Mode { LINEAR, W32_B0, W32_B1, W32_B2, W32_B3, W32_W01, W32_W23,
-            W24_B0, W24_B1, W24_B2, W24_W01, SPR_ILV, SPR_ILV_R };
+            W24_B0, W24_B1, W24_B2, W24_W01, SPR_ILV, SPR_ILV_R,
+            // Not memory: rfjets' factory 93C46 image goes straight into the
+            // chip through the loader's ee_* port, byte-swapped per word, so
+            // the reference model collects it separately from SDRAM.
+            EEDEF };
 
 struct Part { const char *name; uint32_t base; uint32_t size; Mode mode; };
 
@@ -69,6 +73,29 @@ static const Part parts_sxx2e[] = {
     { "gun_dogs_obj-2.u0324", SPRITES_BASE + 2,          0x400000, SPR_ILV },
     { "gun_dogs_obj-3.u0323", SPRITES_BASE + 4,          0x400000, SPR_ILV },
     { "raiden-f_pcm2.u0975",  PCM_BASE,                  0x200000, LINEAR  },
+};
+
+// rfjets, SXX2G single board. The last part is the one this set is here for:
+// 128 bytes that never reach SDRAM.
+static const Part parts_rfjets[] = {
+    { "rfj-06.u0259",  PRG_BASE,                0x080000, W32_B0    },
+    { "rfj-07.u0258",  PRG_BASE,                0x080000, W32_B1    },
+    { "rfj-08.u0265",  PRG_BASE,                0x080000, W32_B2    },
+    { "rfj-09.u0264",  PRG_BASE,                0x080000, W32_B3    },
+    { "rfj-05.u091",   Z80_BASE,                0x040000, LINEAR    },
+    { "rfj-01.u0524",  CHARS_BASE,              0x010000, W24_B1    },
+    { "rfj-02.u0518",  CHARS_BASE,              0x010000, W24_B0    },
+    { "rfj-03.u0514",  CHARS_BASE,              0x010000, W24_B2    },
+    { "bg-1d.u0535",   TILES_BASE,              0x400000, W24_W01   },
+    { "bg-1p.u0537",   TILES_BASE,              0x200000, W24_B2    },
+    { "bg-2d.u0536",   TILES_BASE  + 0x600000,  0x200000, W24_W01   },
+    { "bg-2p.u0545",   TILES_BASE  + 0x600000,  0x100000, W24_B2    },
+    { "obj-1.u073",    SPRITES_BASE + 0,        0x800000, SPR_ILV_R },
+    { "obj-2.u074",    SPRITES_BASE + 2,        0x800000, SPR_ILV_R },
+    { "obj-3.u075",    SPRITES_BASE + 4,        0x800000, SPR_ILV_R },
+    { "pcm-d.u0103",   PCM_BASE,                0x200000, LINEAR    },
+    { "rfj-04.u0107",  PCM_BASE    + 0x200000,  0x080000, LINEAR    },
+    { "st93c46.bin",   0,                       0x000080, EEDEF     },
 };
 
 // rdft, SPI cartridge, pre-flashed. Four byte lanes for the program and three
@@ -238,6 +265,8 @@ static const Part parts_ejanhs[] = {
 static uint32_t dest_of(const Part &p, uint32_t i)
 {
     switch (p.mode) {
+    // EEDEF never reaches SDRAM; dest_of is not consulted for it.
+    case EEDEF:   return 0;
     case LINEAR:  return p.base + i;
     case W32_B0:  return p.base + i * 4 + 0;
     case W32_B1:  return p.base + i * 4 + 1;
@@ -420,6 +449,13 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
                (double)cexpect.size() / (double)parts[codec_part].size);
     }
 
+    // The 93C46 default: what the loader should strobe out on ee_*, and what
+    // it actually did. Index i of the part must land at i^1 -- MAME loads that
+    // region ROM_REGION16_BE, so its array is the file byte-swapped per word.
+    std::vector<uint8_t> ee_ref(128, 0), ee_got(128, 0);
+    std::vector<int>     ee_hit(128, 0);
+    int ee_writes = 0;
+
     std::vector<uint8_t> mem(SDR_SIZE, 0xFF);
     std::vector<uint8_t> ref(SDR_SIZE, 0xFF);
     std::vector<uint8_t> written(SDR_SIZE, 0);
@@ -437,6 +473,15 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
             }
             total     += parts[pi].size;
             total_out += cexpect.size();
+            continue;
+        }
+        if (parts[pi].mode == EEDEF) {
+            // Not memory: the reference is the byte-swapped image, and the
+            // loader is expected to strobe it out on ee_* instead.
+            for (uint32_t i = 0; i < parts[pi].size; i++) {
+                ee_ref[i ^ 1] = src_byte(pi, i);
+                total++;
+            }
             continue;
         }
         for (uint32_t i = 0; i < parts[pi].size; i++) {
@@ -459,6 +504,15 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
     auto clock = [&]() {
         dut->clk = 0; dut->eval();
         dut->clk = 1; dut->eval();
+        // ee_we is a one-cycle strobe with no handshake, so it has to be
+        // sampled on every edge rather than when something acknowledges it.
+        if (dut->ee_we) {
+            if (dut->ee_addr < 128) {
+                ee_got[dut->ee_addr] = dut->ee_din;
+                ee_hit[dut->ee_addr]++;
+            }
+            ee_writes++;
+        }
         tick++;
     };
 
@@ -582,6 +636,35 @@ static int run_set(const Part *parts, int NPARTS, int set_id, const char *label,
     }
 
     printf("PASS: SDRAM image matches the MAME region layout exactly\n");
+    // ---- the 93C46 side channel ----------------------------------------
+    // Only a set with an EEDEF part should produce any of these, and it must
+    // produce exactly 128 -- one per byte, each landing once, byte-swapped.
+    bool has_eedef = false;
+    for (int k = 0; k < NPARTS; k++) if (parts[k].mode == EEDEF) has_eedef = true;
+    if (!has_eedef) {
+        if (ee_writes) {
+            printf("FAIL: %d ee_* writes on a set with no EEDEF part\n", ee_writes);
+            return 1;
+        }
+    } else {
+        if (ee_writes != 128) {
+            printf("FAIL: %d ee_* writes, expected 128\n", ee_writes);
+            return 1;
+        }
+        for (int k = 0; k < 128; k++) {
+            if (ee_hit[k] != 1) {
+                printf("FAIL: 93c46 byte %d written %d times\n", k, ee_hit[k]);
+                return 1;
+            }
+            if (ee_got[k] != ee_ref[k]) {
+                printf("FAIL: 93c46 byte %d = %02X, expected %02X"
+                       " (byte-swap wrong?)\n", k, ee_got[k], ee_ref[k]);
+                return 1;
+            }
+        }
+        printf("93c46 default: 128 bytes, byte-swapped per word, all correct\n");
+    }
+
     delete dut;
     return 0;
 }
@@ -656,6 +739,10 @@ int main(int argc, char **argv)
     // is what hps_io's one-clk_sys pulse looks like on clk_ram. This is the
     // real hardware timing and nothing here modelled it until rdfts was found
     // downloading twice its own image on a MiSTer (PLAN.md 10c).
+    rc = run_set(parts_rfjets, (int)(sizeof(parts_rfjets) / sizeof(parts_rfjets[0])),
+                 8, "rfjets, SXX2G single board (M_EEDEF)");
+    if (rc) return rc;
+
     rc = run_set(parts_sxx2e, (int)(sizeof(parts_sxx2e) / sizeof(parts_sxx2e[0])),
                  0, "rdfts (SXX2E)", -1, 2);
     if (rc) return rc;

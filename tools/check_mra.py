@@ -45,6 +45,7 @@ import zipfile
 # decide its updater has already run; the payload is derived at every boot.
 FLASH_BYTES = 4
 SRAM_BYTES  = 0x200
+EEPROM_BYTES = 0x80   # 93C46: 64 words of 16 bits, on the SXX2F single board
 
 # rtl/spi_defs.vh
 BASES = {
@@ -64,6 +65,10 @@ BASES = {
 BASES["pcmsrc_sei252"] = BASES["sprites"] + 3 * 0x400000   # 0x1D00000
 BASES["pcmsrc_rdft2"]  = BASES["sprites"] + 3 * 0x600000   # 0x2300000
 BASES["pcmsrc_rfjet"]  = BASES["sprites"] + 3 * 0x800000   # 0x2900000
+# Not a memory base at all. rfjets' 128-byte factory 93C46 image is written into
+# the chip by rom_loader's M_EEDEF mode as it streams past, so its part_base is
+# 0 and nothing is reserved for it (SDR_EEDEF_BASE in spi_defs.vh).
+BASES["eedef"] = 0
 
 # rtl/spi_defs.vh. The MRA names one of these per part; anything else is a typo
 # that would load a part as noise.
@@ -107,6 +112,33 @@ SETS = {
                                "seibu_8.u0216":      ("snd01",  "M_LINEAR"),
                                "flash0_blank_region80.u1053": ("pcm", "M_LINEAR")},
                       spr_mode="M_SPR_ILV", spr_chunk=0x400000),
+    # rdft2us: rdft2's game on rdfts's board. mod 0x02 -- bit 0 clear for a
+    # single board, bits 3:1 = 1 for the set. No skip list: unlike every
+    # cartridge set it carries its audiocpu region, because the Z80 has a real
+    # ROM here instead of RAM the 386 downloads into.
+    # rfjets: rfjet's game on rdft2us's board, SXX2G. mod 0x04 -- bit 0 clear
+    # for a single board, bits 3:1 = 2 for the set. Carries its audiocpu region
+    # like the other single boards, and an `eeprom` region nothing loads yet,
+    # which `skip` names so the part count lines up.
+    "rfjets": dict(mra="_alternatives/_Raiden Fighters Jet (Germany)/"
+                       "Raiden Fighters Jet (US, single board).mra",
+                   table="rfjets", mod=0x04, skip=(),
+                   # The 93C46 default is carried and loaded, but not into
+                   # memory -- M_EEDEF writes it straight into the chip.
+                   special={"st93c46.bin": ("eedef", "M_EEDEF")},
+                   spr_mode="M_SPR_ILV_R", spr_chunk=0x800000),
+    # rfjetsa: rfjets with four different program ROMs. Same board, same layout,
+    # same table -- hand-written only because gen_mras builds clones from their
+    # MAME parent's layout, and this one's parent is the rfjet cartridge.
+    "rfjetsa": dict(mra="_alternatives/_Raiden Fighters Jet (Germany)/"
+                        "Raiden Fighters Jet (US, single board, test version).mra",
+                    table="rfjets", mod=0x06, skip=("eeprom",),
+                    nparts_sym="NPARTS_RFJETSA",
+                    spr_mode="M_SPR_ILV_R", spr_chunk=0x800000),
+    "rdft2us": dict(mra="_alternatives/_Raiden Fighters 2 - Operation Hell Dive (Germany)/"
+                        "Raiden Fighters 2 - Operation Hell Dive (US, single board).mra",
+                    table="rdft2us", mod=0x02, skip=(),
+                    spr_mode="M_SPR_ILV_R", spr_chunk=0x600000),
     "rdft2": dict(mra="Raiden Fighters 2 - Operation Hell Dive (Germany).mra", table="rdft2", mod=0x13,
                       skip=("audiocpu", "pals"),
                       special={"pcm.u0217":    ("pcmsrc_rdft2", "M_LINEAR"),
@@ -228,7 +260,12 @@ def parse_mame(path, setname, skip, special):
             parts[-1]["size"] += int(r.group(2), 16)
             continue
 
-        r = re.search(r'(ROM_LOAD(?:24_WORD|24_BYTE|32_BYTE|32_WORD)?)\('
+        # 16_WORD was missing until rfjets, whose 128-byte `eeprom` region uses
+        # it. An unrecognised load macro is INVISIBLE to this checker rather
+        # than an error, so the region simply vanished and a skip= entry naming
+        # it looked satisfied while doing nothing. Any macro this list does not
+        # carry is a silent hole of the same kind.
+        r = re.search(r'(ROM_LOAD(?:16_WORD|24_WORD|24_BYTE|32_BYTE|32_WORD)?)\('
                       r'\s*"([^"]+)"\s*,\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*,'
                       r'\s*CRC\(([0-9a-fA-F]+)\)', line)
         if not r:
@@ -382,7 +419,7 @@ def check_derive_cfg(path, setname, data):
           % (le(16), le(20), data[24], src))
 
 
-def parse_loader(path, table, upd=False):
+def parse_loader(path, table, upd=False, nparts_sym=None):
     """One of rom_loader.sv's part tables, plus its part count.
 
     `upd` picks the authentic-flash tail (mod byte bit 4): the cartridge tables
@@ -427,7 +464,10 @@ def parse_loader(path, table, upd=False):
     # `_U` is the authentic-flash part count. A set that exists ONLY in that
     # form -- viprp1, whose pre-flashed image no MRA can assemble -- has a
     # single table and a single count, so fall back to the plain name.
-    sym = "NPARTS_" + table.upper() + ("_U" if upd else "")
+    # A set that SHARES another's table but walks fewer of its parts names its
+    # own count -- rfjetsa is rfjets' table without the factory EEPROM image,
+    # which is the whole reason it needs a set id of its own.
+    sym = nparts_sym or ("NPARTS_" + table.upper() + ("_U" if upd else ""))
     n = re.search(r"localparam \[4:0\] %s\s*=\s*5'd(\d+)" % sym, src)
     if not n and upd:
         sym = "NPARTS_" + table.upper()
@@ -442,6 +482,7 @@ def resolve_base(expr):
     for k, v in (("SDR_PRG_BASE", BASES["prg"]), ("SDR_Z80_BASE", BASES["z80"]),
                  ("SDR_CHARS_BASE", BASES["chars"]), ("SDR_PCM_BASE", BASES["pcm"]),
                  ("SDR_SND01_BASE", BASES["snd01"]),
+                 ("SDR_EEDEF_BASE", BASES["eedef"]),
                  ("SDR_PCMSRC_SEI252", BASES["pcmsrc_sei252"]),
                  ("SDR_PCMSRC_RDFT2", BASES["pcmsrc_rdft2"]),
                  ("SDR_PCMSRC_RFJET", BASES["pcmsrc_rfjet"]),
@@ -553,10 +594,16 @@ def check_nvram(path, mod):
     src = read_mra(path)
     m = re.search(r'<nvram\b([^>]*)/?>', src)
     has_flash = bool((mod or 0) & 0x01) and bool((mod or 0) & 0x10)
-    want = (SRAM_BYTES + FLASH_BYTES) if has_flash else SRAM_BYTES
+    # THREE layouts, not two, since SXX2F. A 93C46 board has no DS2404 and no
+    # sample flash, so its file is the EEPROM's 128 bytes and nothing else --
+    # spi_nvram.sv's `small_nv`. Which board it is comes off the same mod byte:
+    # bit 0 clear is a single board and bits 3:1 name it.
+    eeprom = (mod is not None) and not (mod & 0x01) and ((mod >> 1) & 0x07) in (1, 2, 3)
+    want = (EEPROM_BYTES if eeprom else
+            (SRAM_BYTES + FLASH_BYTES) if has_flash else SRAM_BYTES)
     if not m:
-        fail("%s: no <nvram> element, but every set has a DS2404 to remember "
-             "(%d bytes expected)" % (path, want))
+        fail("%s: no <nvram> element, but every set has a backup part to "
+             "remember (%d bytes expected)" % (path, want))
     attrs = m.group(1)
     idx = re.search(r'index="(\d+)"', attrs)
     size = re.search(r'size="(\d+)"', attrs)
@@ -565,13 +612,16 @@ def check_nvram(path, mod):
              % (path, idx.group(1) if idx else "unset"))
     if not size:
         fail("%s: <nvram> has no size=" % path)
+    shape = ("0x80 93C46 EEPROM, no DS2404 and no flash stamp" if eeprom else
+             "4-byte flash stamp + 0x200 DS2404 SRAM" if has_flash else
+             "0x200 DS2404 SRAM, no flash stamp")
     if int(size.group(1)) != want:
-        fail("%s: <nvram size=%s>, but a set with%s a sample flash needs %d "
-             "(%s)" % (path, size.group(1), "" if has_flash else "out", want,
-                       "4-byte flash stamp + 0x200 DS2404 SRAM" if has_flash
-                       else "0x200 DS2404 SRAM, no flash stamp"))
-    print("  nvram: %d bytes -- %s" % (want, "the flash's 4-byte stamp then the "
-          "DS2404's 512-byte tail" if has_flash else "the DS2404's 512 bytes alone"))
+        fail("%s: <nvram size=%s>, but this board needs %d (%s)"
+             % (path, size.group(1), want, shape))
+    print("  nvram: %d bytes -- %s"
+          % (want, "the 93C46's 128 bytes alone" if eeprom else
+             "the flash's 4-byte stamp then the DS2404's 512-byte tail"
+             if has_flash else "the DS2404's 512 bytes alone"))
 
 
 def check_set(setname, cfg, args):
@@ -599,7 +649,8 @@ def check_set(setname, cfg, args):
     # immediately below -- reading it from the file would make that check
     # circular.
     rtl, nparts = parse_loader(os.path.join(here, "rtl", "rom_loader.sv"),
-                               cfg["table"], upd=bool(cfg["mod"] & 0x10))
+                               cfg["table"], upd=bool(cfg["mod"] & 0x10),
+                               nparts_sym=cfg.get("nparts_sym"))
     mod_byte, codecs, cfg_bytes = parse_codecs(mra_path, nparts)
 
     if (mod_byte or 0) != cfg["mod"]:

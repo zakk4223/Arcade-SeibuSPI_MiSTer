@@ -25,7 +25,7 @@ module spi_top
 	input             set_sxx2c,
 	// Which ROM set, for the things that differ per GAME rather than per board:
 	// the sprite chunk stride and which sprite crypt to use. See spi_defs.vh.
-	input       [2:0] set_id,
+	input       [3:0] set_id,
 	// The authentic-flash variant of an SXX2C set: a blank flash plus the
 	// cartridge's own sound ROMs, and the game programs it itself. See
 	// PLAN.md section 17; meaningless without set_sxx2c.
@@ -105,6 +105,11 @@ module spi_top
 	// Every I/O register the 386 READS, and what it got back. Writes have been
 	// visible to the testbench since the beginning; reads have not, and a poll
 	// loop is made of reads.
+	// The factory 93C46 image, straight out of rom_loader (M_EEDEF).
+	input       [6:0] ee_ld_addr,
+	input       [7:0] ee_ld_din,
+	input             ee_ld_we,
+
 	output            p_cpu_irq,
 	// The DS2404's counter and its divider. Read-only taps; see spi_ds2404.sv.
 	output     [39:0] p_ds_rtc,
@@ -383,6 +388,12 @@ module spi_top
 		.dbg_ss_type   (ss_dbg_ss_type),
 		.dbg_ss_g      (ss_dbg_ss_g),
 		.dbg_irq   (p_cpu_irq),
+		// Read hierarchically by the testbenches (dut.cpu.dbg_if), so they are
+		// wired to locals here rather than pushed up as ports -- SeibuSPI.sv
+		// has no use for them and would only gain three unconnected pins.
+		.dbg_if             (cpu_dbg_if),
+		.dbg_intr_pending   (cpu_dbg_intr_pending),
+		.dbg_intr_inhibit   (cpu_dbg_intr_inhibit),
 		.dbg_gdt0(), .dbg_gdt1(),
 		.dbg_gdt2(), .dbg_gdt3(),
 		.dbg_gdt4(), .dbg_gdt5(),
@@ -510,7 +521,14 @@ module spi_top
 		.rdata            (io_rdata),
 
 		.inputs           (inputs),
+		// SYSTEM's bit 6 is substituted inside spi_io on a 93C46 board; the
+		// rest of the byte is the same on every set.
 		.system           (system),
+		.set_93c46        (set_93c46),
+		.ee_cs            (ee_cs),
+		.ee_sk            (ee_sk),
+		.ee_di            (ee_di),
+		.ee_do            (ee_do),
 
 		.layer_enable     (layer_enable),
 		.rowscroll_enable (rowscroll_enable),
@@ -558,6 +576,75 @@ module spi_top
 	reg        ds_pause;
 	always @(posedge clk_sys) ds_pause <= ss_pause && ss_snapshot;
 
+	// ------------------------------------------------------------------
+	// The 93C46, SXX2F's backup part in place of SXX2C/SXX2E's DS2404
+	// ------------------------------------------------------------------
+	// It shares the save file's byte port rather than adding a second one all
+	// the way up through SeibuSPI.sv: only one of the two devices exists on any
+	// board, the file is 128 bytes instead of 512 (spi_nvram's `small_nv`), so
+	// the address never leaves the low seven bits and the write enable only has
+	// to be steered. On clk_ram with the DS2404 and spi_nvram for the same
+	// reason the DS2404 is -- that is where the save file's port lives -- but
+	// unlike the DS2404 it needs no handshake from clk_cpu, because its three
+	// inputs are levels rather than events. See rtl/spi_93c46.sv.
+	// BOTH single boards that have one -- SXX2F and SXX2G. sxx2g() is sxx2f()
+	// with three clocks changed and nothing else (seibuspi.cpp:1907), so the
+	// backup part is the same 93C46 in the same place. Naming only the SXX2F
+	// set here left rfjets bit-banging 0x68E into nothing: the trace showed
+	// zero EEPROM commands, the game never got its answer, and it hung in a
+	// vsync wait with interrupts still disabled.
+	wire set_93c46 = (set_id == SET_RDFT2US) || `IS_SXX2G(set_id);
+	wire ee_cs, ee_sk, ee_di, ee_do;
+	wire ee_nv_dirty;
+	wire [7:0] ee_nv_dout;
+	wire [31:0] ee_ss_dout;
+	wire  [7:0] ee_ss_ram_dout;
+
+	spi_93c46 eeprom
+	(
+		.clk      (clk_ram),
+		.reset    (reset),
+		.pause    (ds_pause),
+
+		.cs       (ee_cs),
+		.sk       (ee_sk),
+		.di       (ee_di),
+		.dout     (ee_do),
+
+		.ld_addr  (ee_ld_addr),
+		.ld_din   (ee_ld_din),
+		.ld_we    (ee_ld_we & set_93c46),
+
+		.nv_addr  (ds_nv_addr[6:0]),
+		.nv_din   (ds_nv_din),
+		.nv_we    (ds_nv_we & set_93c46),
+		.nv_dout  (ee_nv_dout),
+		.nv_dirty (ee_nv_dirty),
+
+		// The savestate rides the DS2404's two sections rather than declaring
+		// two more. Only one backup part exists on any board, so the sections
+		// cannot both be live, and the 93C46 simply uses less of them: two of
+		// the sixteen dwords and 128 of the 512 bytes. The alternative is two
+		// new SSIDX entries and a framework change, to save 384 bytes in a save
+		// file. `ss_we` is steered so a restore cannot reach the wrong device.
+		.ss_addr     (ds_ss_addr[1:0]),
+		.ss_din      (ds_ss_din),
+		.ss_we       (ds_ss_we & set_93c46),
+		.ss_dout     (ee_ss_dout),
+		.ss_ram_addr (ds_ram_addr[6:0]),
+		.ss_ram_din  (ds_ram_din),
+		.ss_ram_we   (ds_ram_we & set_93c46),
+		.ss_ram_dout (ee_ss_ram_dout)
+	);
+
+	wire [7:0] ds_sram_nv_dout;
+	wire       ds_sram_nv_dirty;
+	wire       cpu_dbg_if, cpu_dbg_intr_pending, cpu_dbg_intr_inhibit;
+	/* verilator lint_off UNUSEDSIGNAL */
+	wire _unused_irqdbg = &{1'b0, cpu_dbg_if, cpu_dbg_intr_pending,
+	                        cpu_dbg_intr_inhibit};
+	/* verilator lint_on UNUSEDSIGNAL */
+
 	wire       ds_req, ds_ack, ds_stall;
 	wire [1:0] ds_port;
 	wire [7:0] ds_data, ds_dout;
@@ -599,12 +686,12 @@ module spi_top
 		.dbg_tick    (p_ds_tick),
 		.ss_addr     (ds_ss_addr),
 		.ss_din      (ds_ss_din),
-		.ss_we       (ds_ss_we),
-		.ss_dout     (ds_ss_dout),
+		.ss_we       (ds_ss_we & ~set_93c46),
+		.ss_dout     (ds_sram_ss_dout),
 		.ss_ram_addr (ds_ram_addr),
 		.ss_ram_din  (ds_ram_din),
-		.ss_ram_we   (ds_ram_we),
-		.ss_ram_dout (ds_ram_dout),
+		.ss_ram_we   (ds_ram_we & ~set_93c46),
+		.ss_ram_dout (ds_sram_ram_dout),
 		.dbg_ram_addr (dbg_ds_ram_addr),
 		.dbg_ram_dout (dbg_ds_ram_dout),
 		.clk      (clk_ram),
@@ -618,10 +705,14 @@ module spi_top
 
 		.nv_addr  (ds_nv_addr),
 		.nv_din   (ds_nv_din),
-		.nv_we    (ds_nv_we),
-		.nv_dout  (ds_nv_dout),
-		.nv_dirty (ds_nv_dirty)
+		.nv_we    (ds_nv_we & ~set_93c46),
+		.nv_dout  (ds_sram_nv_dout),
+		.nv_dirty (ds_sram_nv_dirty)
 	);
+
+	// One save-file port, whichever backup part this board has.
+	assign ds_nv_dout  = set_93c46 ? ee_nv_dout  : ds_sram_nv_dout;
+	assign ds_nv_dirty = set_93c46 ? ee_nv_dirty : ds_sram_nv_dirty;
 
 	// ------------------------------------------------------------------
 	// Sound: Z80 + YMF271
@@ -657,6 +748,10 @@ module spi_top
 		.ssbus_ymf_st   (ssb[SSIDX_YMF_ST]),
 		.ssbus_ymf_fb   (ssb[SSIDX_YMF_FB]),
 		.set_sxx2c  (set_sxx2c),
+		.pcm_25mb   (`SET_HAS_25MB_PCM(set_id)),
+		.ymf_16384  (`IS_SXX2G(set_id)),
+		.z80_slow   (`IS_SXX2G(set_id)),
+		.z80_rom_256k (`IS_SXX2G(set_id)),
 		.jumpers    (jumpers),
 		.fifo2_q    (fifo2_q),
 		.fifo2_empty(fifo2_empty),
@@ -866,6 +961,11 @@ module spi_top
 	wire  [8:0] ds_ram_addr;
 	wire  [7:0] ds_ram_din, ds_ram_dout;
 	wire        ds_ram_we;
+	// Whichever backup part this board has answers the shared sections.
+	wire [31:0] ds_sram_ss_dout;
+	wire  [7:0] ds_sram_ram_dout;
+	assign ds_ss_dout  = set_93c46 ? ee_ss_dout     : ds_sram_ss_dout;
+	assign ds_ram_dout = set_93c46 ? ee_ss_ram_dout : ds_sram_ram_dout;
 
 	spi_ss_bridge #(.SS_IDX(SSIDX_DS2404), .AW(4), .DW(32), .ITEMS(16))
 	ds_bridge (
@@ -992,13 +1092,21 @@ module spi_top
 	// background -- MAME's text_decrypt and bg_decrypt take the same three
 	// constants -- so one selection covers both layers.
 	// ------------------------------------------------------------------
-	wire big_tiles = (set_id == SET_RDFT2) || (set_id == SET_RFJET);
+	// rdft2us joins rdft2 in every one of these: MAME runs `init_rdft2` for
+	// both (seibuspi.cpp:4363), so the game -- its 12 MB of tiles, its text and
+	// tile keys, its RISE10 sprites and their 6 MB chunks -- is literally the
+	// same. Only the board around it differs.
+	wire big_tiles = (set_id == SET_RDFT2) || (set_id == SET_RFJET)
+	              || (set_id == SET_RDFT2US) || `IS_SXX2G(set_id);
 	wire [15:0] bg_fore_pos = big_tiles ? 16'h8000 : 16'h4000;
 
 	reg [23:0] tkey1, tkey2, tkey3;
 	always @* case (set_id)
-		SET_RDFT2: begin tkey1 = TKEY1_RDFT2;  tkey2 = TKEY2_RDFT2;  tkey3 = TKEY3_RDFT2;  end
-		SET_RFJET: begin tkey1 = TKEY1_RFJET;  tkey2 = TKEY2_RFJET;  tkey3 = TKEY3_RFJET;  end
+		SET_RDFT2,
+		SET_RDFT2US: begin tkey1 = TKEY1_RDFT2; tkey2 = TKEY2_RDFT2; tkey3 = TKEY3_RDFT2; end
+		SET_RFJET,
+		SET_RFJETS,
+		SET_RFJETSA: begin tkey1 = TKEY1_RFJET; tkey2 = TKEY2_RFJET; tkey3 = TKEY3_RFJET; end
 		default:   begin tkey1 = TKEY1_SEI252; tkey2 = TKEY2_SEI252; tkey3 = TKEY3_SEI252; end
 	endcase
 
@@ -1094,12 +1202,15 @@ module spi_top
 	// pcmsrc_base above is selected on exactly these arms, because the PCM
 	// source is loaded immediately after the sprites -- change one and the
 	// other has to move with it.
-	wire        spr_rise10 = (set_id == SET_RDFT2);
-	wire        spr_rise11 = (set_id == SET_RFJET);
+	wire        spr_rise10 = (set_id == SET_RDFT2) || (set_id == SET_RDFT2US);
+	wire        spr_rise11 = (set_id == SET_RFJET) || `IS_SXX2G(set_id);
 	reg  [25:0] spr_chunk;
 	always @* case (set_id)
-		SET_RDFT2: spr_chunk = SPR_CHUNK_SIZE_RDFT2;
-		SET_RFJET: spr_chunk = SPR_CHUNK_SIZE_RFJET;
+		SET_RDFT2,
+		SET_RDFT2US: spr_chunk = SPR_CHUNK_SIZE_RDFT2;
+		SET_RFJET,
+		SET_RFJETS,
+		SET_RFJETSA: spr_chunk = SPR_CHUNK_SIZE_RFJET;
 		default:   spr_chunk = SPR_CHUNK_SIZE;
 	endcase
 

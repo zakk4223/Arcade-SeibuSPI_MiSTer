@@ -1,0 +1,136 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SeibuSPI.                                      -->
+<!--                                                                     -->
+<!-- SeibuSPI is free software: you can redistribute it and/or modify    -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters Jet (US, single board)</name>
+    <setname>rfjets</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1999</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>US</region>
+    <category>Shooter</category>
+
+    <!--
+      SXX2G: the single-board Raiden Fighters Jet. MAME builds it as sxx2f()
+      with three clocks changed and nothing else -- "clocks differ, but
+      otherwise same hw as sxx2f" (seibuspi.cpp:1907) -- so this is rfjet's
+      GAME on rdft2us's BOARD, and it runs `init_rfjet`, the same init as the
+      cartridge set, so the keys and the RISE11 sprite codec are identical.
+
+      THE THREE CLOCKS are the whole of what SXX2G is, and each needed
+      something different in the core:
+
+        386      28.63636 MHz (AM386DX-40), not 50/2. That is the raw PLL
+                 output, so this board takes the clk_cpu gate OFF --
+                 rtl/spi_clk_throttle.sv's `full_speed`.
+        Z80      4.9152 MHz, not 7.1590909. clk_sys / 4.9152 = 11.652, so no
+                 counter can make it; rtl/spi_sound.sv runs a 5632/65625
+                 accumulator, which is the ratio exactly.
+        YMF271   16.384 MHz, not 16.9344 -- so 42666.67 Hz samples rather than
+                 44100. One constant, because rtl/ymf271.sv accumulates the
+                 rate instead of synthesising a master clock.
+
+      MAME's Z80 constant on that line is 4.9512_MHz_XTAL while its own comment
+      says 4.9152MHz. 4.9152 is the standard crystal, in xtal.cpp and used by
+      50 files; 4.9512 appears once in all of MAME and is not in the table. The
+      core uses 4.9152; PLAN.md has the argument.
+
+      rfjetsa is the same board with four different program ROMs and no factory
+      EEPROM image, so it walks this same table one part shorter -- mod 0x06.
+    -->
+
+    <!--
+      Byte 0 is the mod byte, 0x04: bit 0 CLEAR for a single board and
+      bits 3:1 = 2 for rfjets. See the map at the top of rtl/spi_defs.vh.
+    -->
+    <rom index="1"><part>04</part></rom>
+
+    <rom index="0" address="0x30000000" zip="rfjets.zip|rfjet.zip" md5="none">
+        <!-- 386 program: four byte lanes -->
+        <part name="rfj-06.u0259" crc="c835aa7a"/>
+        <part name="rfj-07.u0258" crc="3b6ca1ca"/>
+        <part name="rfj-08.u0265" crc="1f5dd06c"/>
+        <part name="rfj-09.u0264" crc="cc71c402"/>
+
+        <!-- Z80 program, the full 256 KB region here -->
+        <part name="rfj-05.u091" crc="a55e8799"/>
+
+        <!-- text layer: three byte lanes, lanes 1, 0, 2 -->
+        <part name="rfj-01.u0524" crc="8bc080be"/>
+        <part name="rfj-02.u0518" crc="bded85e7"/>
+        <part name="rfj-03.u0514" crc="015d0748"/>
+
+        <!-- background tiles, 9 MB: second group at region +6 MB, both of its
+             ROMs half the first group's -->
+        <part name="bg-1d.u0535" crc="edfd96da"/>
+        <part name="bg-1p.u0537" crc="a4cc4631"/>
+        <part name="bg-2d.u0536" crc="731fbb59"/>
+        <part name="bg-2p.u0545" crc="03652c25"/>
+
+        <!-- sprites, 24 MB as three 8 MB chunks. One ROM per chunk here, where
+             rdft2us pairs them, and MAME's order IS the numeric one -->
+        <part name="obj-1.u073" crc="58a59896"/>
+        <part name="obj-2.u074" crc="a121d1e3"/>
+        <part name="obj-3.u075" crc="bc2c0c63"/>
+
+        <!-- YMF271 samples, 2.5 MB: rfj-04.u0107 sits above the 2 MB, which is
+             why this set needs the core's 22-bit sample address -->
+        <part name="pcm-d.u0103" crc="8ee3ff45"/>
+        <part name="rfj-04.u0107" crc="c050da03"/>
+
+        <!-- The factory 93C46 image, 128 bytes. NOT memory: rom_loader's
+             M_EEDEF mode writes it into the chip as it streams past, byte-
+             swapped per word, because MAME declares this region
+             ROM_REGION16_BE and the game validates the swapped order. Without
+             it the game finds its settings invalid, prints a message and waits
+             on a vblank counter with interrupts disabled -- PLAN.md 58.
+
+             rfjetsa has no such region and takes mod 0x06, which is the same
+             table one part shorter. -->
+        <part name="st93c46.bin" crc="8fe8063b"/>
+    </rom>
+
+    <!--
+      The save file: 128 bytes, the 93C46's array verbatim, little-endian per
+      word -- byte-for-byte MAME's own `eeprom` nvram file for this set.
+
+      NOT the same thing as the `eeprom` ROM region rfjets carries in MAME
+      (st93c46.bin, 128 bytes). That is a factory DEFAULT which MAME copies over
+      its all-ones fill when no save exists; this core has no path to seed a
+      fabric register file from an MRA part, and it is untested whether the game
+      needs one -- rfjetsa ships without it. PLAN.md 58.
+    -->
+    <nvram index="2" size="128"/>
+
+    <!--
+      The names map to joystick bits 4 upwards IN ORDER and SeibuSPI.sv decodes
+      them at exactly those positions, so this list and that decode change
+      together. Pause is the eighth, bit 11, and is not a board input at all --
+      it gates the 386 while the video engines keep running, so the frozen frame
+      stays on screen. It is not on button 3 because four of the seven sets are
+      MAME's spi_3button and use that as a game button.
+
+      Savestate (SS) is the ninth, bit 12, and is also not a board input: it is
+      the modifier the savestate d-pad combinations are built on -- SS+Left/Right
+      picks the slot, SS+Down saves, SS+Up loads.  It has no entry in default=
+      because Main only accepts the eight base pad names there and the first
+      eight buttons use all of them, so it must be bound by hand.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test,Pause,Savestate (SS)"
+             default="A,B,X,Start,Select,R,L,Y" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>

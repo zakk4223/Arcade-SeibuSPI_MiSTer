@@ -94,6 +94,10 @@ localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 // existing MRA that sends only bit 0 keeps selecting the board's first set.
 //
 //   mod 0x00  SXX2E, set 0  -> rdfts
+//   mod 0x02  SXX2F, set 1  -> rdft2us
+//   mod 0x04  SXX2G, set 2  -> rfjets
+//   mod 0x06  SXX2G, set 3  -> rfjetsa  (same table; one part shorter, because
+//                                        it has no factory EEPROM image)
 //   mod 0x01  SXX2C, set 0  -> rdft
 //   mod 0x03  SXX2C, set 1  -> rdft2
 //   mod 0x05  SXX2C, set 2  -> rfjet
@@ -114,8 +118,16 @@ localparam [25:0] SDR_END          = 26'h2B0_0000;  //  43 MB total
 //   mod 0x19  SXX2C, set 4  -> senkyu, authentic flash
 //   mod 0x1B  SXX2C, set 5  -> ejanhs, authentic flash
 //
-// set_id is 3 bits since viprp1 became the fifth set; the mod byte's bits 3:1
-// have room for eight in total.
+// Bits 3:1 select within a board rather than only within SXX2C: with bit 0
+// clear they choose between the single-board variants, which is how rdft2us
+// (SXX2F) fits without a new field. Bit 0 stopped meaning "is a cartridge set"
+// and now means exactly what it always physically meant -- SXX2C, the board
+// with the Z80-in-RAM download, the sample flash and the DS2404.
+//
+// set_id is FOUR bits since rfjets became the ninth set. It enumerates across
+// BOTH boards, so it ran out at eight while the mod byte's own 3:1 field did
+// not -- with bit 0 clear that field still only uses 0 (rdfts), 1 (rdft2us) and
+// now 2 (rfjets). Widening set_id is what costs; the mod byte has room.
 // --------------------------------------------------------------------------
 // Which generation of the sample-flash updater a set's job table is written
 // for (tools/build_soundflash.py's GAMES table). They differ only in how the
@@ -137,13 +149,55 @@ localparam [1:0] SNDW_PRG = 2'd0;
 localparam [1:0] SNDW_S01 = 2'd1;
 localparam [1:0] SNDW_PCM = 2'd2;
 
-localparam [2:0] SET_RDFTS  = 3'd0;
-localparam [2:0] SET_RDFT   = 3'd1;
-localparam [2:0] SET_RDFT2  = 3'd2;
-localparam [2:0] SET_RFJET  = 3'd3;
-localparam [2:0] SET_VIPRP1 = 3'd4;
-localparam [2:0] SET_SENKYU = 3'd5;
-localparam [2:0] SET_EJANHS = 3'd6;
+localparam [3:0] SET_RDFTS   = 4'd0;
+localparam [3:0] SET_RDFT    = 4'd1;
+localparam [3:0] SET_RDFT2   = 4'd2;
+localparam [3:0] SET_RFJET   = 4'd3;
+localparam [3:0] SET_VIPRP1  = 4'd4;
+localparam [3:0] SET_SENKYU  = 4'd5;
+localparam [3:0] SET_EJANHS  = 4'd6;
+// rdft2us: rdft2's GAME on SXX2F's BOARD. Everything the video path needs is
+// rdft2's -- MAME runs `init_rdft2` for both, so the text, tile and RISE10
+// sprite keys are literally the same -- and everything the I/O path needs is
+// rdfts's: a Z80 with its own ROM instead of a 386 download, samples in plain
+// ROM instead of a programmed flash, mono. What is genuinely new is the backup
+// part: a 93C46 in place of the DS2404 (rtl/spi_93c46.sv).
+localparam [3:0] SET_RDFT2US = 4'd7;
+// rfjets: rfjet's GAME on rdft2us's BOARD, which is SXX2G -- MAME builds it as
+// sxx2f() with three clocks changed and nothing else (seibuspi.cpp:1907, "clocks
+// differ, but otherwise same hw as sxx2f"). It runs `init_rfjet`, so the keys,
+// the RISE11 sprite codec and the 8 MB chunks are the cartridge set's. rfjetsa
+// is the same board and the same layout with a different program: one table
+// serves both, and its MRA is generated.
+localparam [3:0] SET_RFJETS  = 4'd8;
+// rfjetsa walks rfjets' table and differs in exactly two ways: four different
+// program ROMs, and NO `eeprom` region. That second one is why it needs an id of
+// its own rather than sharing rfjets' -- the part COUNT differs, and nparts is
+// keyed on set_id. Everything else about the board is identical.
+localparam [3:0] SET_RFJETSA = 4'd9;
+
+// The single-board sets whose YMF271 sample region is 2.5 MB rather than 2 MB:
+// rdft2us loads pcm.u0103 at 0 and a 512 KB sound1.u0107 at 0x200000, so the
+// chip addresses past the 2 MB every other set stops at. The half megabyte it
+// needs is SDR_SND01_BASE's, which is free here precisely BECAUSE this is not a
+// cartridge set -- SXX2F has no sound01 window, no flash updater and no Z80
+// program for the 386 to fetch. ymf271_synth.sv widens its mask on this signal
+// alone; on every other set the mask stays at 2 MB, which is what keeps the
+// cartridge sets' Z80 program out of the sample path.
+`define SET_HAS_25MB_PCM(id) ((id) == SET_RDFT2US || `IS_SXX2G(id))
+
+// SXX2G, either set. Written as a macro because nine separate conditions in
+// spi_top ask it -- the three clocks, the 2.5 MB sample region, the 93C46, the
+// 256 KB Z80 ROM, and rfjet's video geometry -- and an OR-list that has to be
+// extended in nine places is an OR-list that will be extended in eight.
+`define IS_SXX2G(id) ((id) == SET_RFJETS || (id) == SET_RFJETSA)
+
+// The factory 93C46 image, 128 bytes, which rfjets ships as a ROM region and
+// the game validates before it will run (PLAN.md 58). It does NOT live in SDRAM
+// -- rom_loader's M_EEDEF mode writes it straight into the chip as it streams
+// past -- so this is not a memory-map entry at all and there is nothing here to
+// reserve. Named only so the part table has something to put in part_base.
+localparam [25:0] SDR_EEDEF_BASE = 26'd0;
 
 // The updater's generation, which is a property of the SET and shows up in one
 // place the core cares about: how the PCM source ROM sits in the 386's sound01

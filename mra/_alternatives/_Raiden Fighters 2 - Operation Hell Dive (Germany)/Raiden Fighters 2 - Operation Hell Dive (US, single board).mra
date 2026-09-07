@@ -1,0 +1,133 @@
+<!--            FPGA compatible core for Seibu SPI / SXX2C hardware        -->
+<!--                                                                     -->
+<!-- This file is part of SeibuSPI.                                      -->
+<!--                                                                     -->
+<!-- SeibuSPI is free software: you can redistribute it and/or modify    -->
+<!-- it under the terms of the GNU General Public License as published   -->
+<!-- by the Free Software Foundation, either version 3 of the License,   -->
+<!-- or (at your option) any later version.                              -->
+
+<misterromdescription>
+    <name>Raiden Fighters 2 - Operation Hell Dive (US, single board)</name>
+    <setname>rdft2us</setname>
+    <rbf>SeibuSPI</rbf>
+    <mameversion>0277</mameversion>
+    <year>1997</year>
+    <manufacturer>Seibu Kaihatsu</manufacturer>
+    <players>2</players>
+    <joystick>8</joystick>
+    <rotation>vertical (cw)</rotation>
+    <region>US</region>
+    <category>Shooter</category>
+
+    <!--
+      SXX2F: the single-board Raiden Fighters 2. MAME builds it as sxx2e() plus
+      three lines (seibuspi.cpp:1892) -- a different address map, the DS2404
+      removed, and a 93C46 in its place -- so this is rdft2's GAME on rdfts's
+      BOARD, and the ROM list below is exactly that split.
+
+      It runs `init_rdft2` (seibuspi.cpp:4363), the same init as the cartridge
+      set, so the text, tile and RISE10 sprite decryption are identical and the
+      core selects them off the same set id.
+
+      What the single board changes, and why there is no Sample Flash option
+      here: the YMF271 reads a real sample ROM instead of two flash chips the
+      game programs itself, and the Z80 has its own ROM instead of a 256 KB RAM
+      the 386 downloads into through port 0x688. So there is no updater, no
+      derived image, no codec, and nothing for the save file to remember about
+      a flash. The board's memory is the 93C46 alone.
+
+      TWO ZIPS, and a MERGED rdft2.zip is enough on its own. Every graphics ROM
+      and the 2 MB PCM are byte-identical to rdft2's under a different
+      silkscreen -- MAME merges them by CRC -- so a merged set keeps only
+      prg0-3, zprg and sound1, and keeps them under `rdft2us/`. Main resolves
+      those without help: this MRA's flat part names loaded straight out of a
+      merged rdft2.zip on hardware, with no rdft2us.zip present at all.
+
+      Both are listed so a SPLIT set works too, where the six unique files are
+      in their own zip and the rest are in the parent's. Neither arrangement
+      needs anything special in the part list.
+    -->
+
+    <!--
+      Byte 0 is the mod byte, 0x02: bit 0 CLEAR selects a single board (no Z80
+      download, no sample flash, no DS2404) and bits 3:1 = 1 select rdft2us
+      within that. See the map at the top of rtl/spi_defs.vh.
+
+      One byte and no more, the same as rdfts: nothing here is decoded on the
+      way in, so there are no {part index, codec} pairs, and there is no sample
+      flash for the derivation constants to describe.
+    -->
+    <rom index="1"><part>02</part></rom>
+
+    <rom index="0" address="0x30000000" zip="rdft2us.zip|rdft2.zip" md5="none">
+        <!-- 386 program: four byte lanes -->
+        <part name="prg0.u0259" crc="ff3eeec1"/>
+        <part name="prg1.u0258" crc="e2cf77d6"/>
+        <part name="prg2.u0265" crc="cae87e1f"/>
+        <part name="prg3.u0264" crc="83f4fb5f"/>
+
+        <!-- Z80 program. Its own ROM here; on a cartridge this region is RAM
+             the 386 fills through 0x688 before releasing the Z80. -->
+        <part name="zprg.u091" crc="cc543c4f"/>
+
+        <!-- text layer: three byte lanes, in MAME's fix0 / fix1 / fixp order
+             (lanes 1, 0, 2 -- not the numeric one) -->
+        <part name="fix0.u0524" crc="6fdf4cf6"/>
+        <part name="fix1.u0518" crc="69b7899b"/>
+        <part name="fixp.u0514" crc="99a5fece"/>
+
+        <!-- background tiles, 12 MB: a word pair and a plane byte per group,
+             second group at region +6 MB -->
+        <part name="bg-1d.u0535" crc="6143f576"/>
+        <part name="bg-1p.u0537" crc="55e64ef7"/>
+        <part name="bg-2d.u0536" crc="c607a444"/>
+        <part name="bg-2p.u0538" crc="f0830248"/>
+
+        <!-- sprites, 18 MB as three 6 MB plane-pair chunks, in MAME's
+             obj3 / obj2 / obj1 order -->
+        <part name="obj3.u075" crc="e08f42dc"/>
+        <part name="obj3b.u078" crc="1b6a523c"/>
+        <part name="obj2.u074" crc="7aeadd8e"/>
+        <part name="obj2b.u077" crc="5d790a5d"/>
+        <part name="obj1.u073" crc="c2c50f02"/>
+        <part name="obj1b.u076" crc="5259321f"/>
+
+        <!-- YMF271 samples, 2.5 MB. pcm.u0103 is byte-for-byte the cartridge's
+             pcm.u0217; sound1.u0107 is NOT the cartridge's sound1.u0222 (MAME
+             says so on the line itself) and sits above the 2 MB, which is the
+             only reason this core has a 22-bit sample address at all. -->
+        <part name="pcm.u0103" crc="2edc30b5"/>
+        <part name="sound1.u0107" crc="20384b0e"/>
+    </rom>
+
+    <!--
+      The save file. 128 bytes, not 516: the backup part is a 93C46 (64 words of
+      16 bits) and there is no sample flash whose region stamp needs remembering.
+      The bytes are the array verbatim, little-endian per word, which is
+      byte-for-byte MAME's own `eeprom` nvram file for this set.
+    -->
+    <nvram index="2" size="128"/>
+
+    <!--
+      The names map to joystick bits 4 upwards IN ORDER and SeibuSPI.sv decodes
+      them at exactly those positions, so this list and that decode change
+      together. Pause is the eighth, bit 11, and is not a board input at all --
+      it gates the 386 while the video engines keep running, so the frozen frame
+      stays on screen. It is not on button 3 because four of the seven sets are
+      MAME's spi_3button and use that as a game button.
+
+      Savestate (SS) is the ninth, bit 12, and is also not a board input: it is
+      the modifier the savestate d-pad combinations are built on -- SS+Left/Right
+      picks the slot, SS+Down saves, SS+Up loads.  It has no entry in default=
+      because Main only accepts the eight base pad names there and the first
+      eight buttons use all of them, so it must be bound by hand.
+    -->
+    <buttons names="Shot,Bomb,Button 3,Start,Coin,Service Coin,Test,Pause,Savestate (SS)"
+             default="A,B,X,Start,Select,R,L,Y" count="3"/>
+
+    <switches default="00" base="0">
+        <dip name="Flip Screen"  bits="0" ids="Off,On"/>
+        <dip name="Service Mode" bits="1" ids="Off,On"/>
+    </switches>
+</misterromdescription>

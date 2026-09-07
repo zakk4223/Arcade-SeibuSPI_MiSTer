@@ -435,10 +435,23 @@ pll pll
 // piece and stays internally coherent.
 wire clk_cpu;
 
+// SXX2G is the one board that wants the raw 28.636364: it shipped an
+// AM386DX-40 clocked there, which is this PLL output exactly. Every other
+// board is 50 MHz / 2 and takes the gate.
+//
+// Off the raw clk_sys-domain mod byte rather than set_id_r, because this has to
+// be settled before the CPU leaves reset and it is a static value from the
+// MRA's index-1 download, long before then.
+//
+// Declared here and ASSIGNED further down, past `include "spi_defs.vh"`: the
+// clocks come before that include and the predicate is a macro from it.
+wire cpu_full_speed;
+
 spi_clk_throttle #(.NUM(55), .DEN(63)) cpu_throttle
 (
-	.clk_in (clk_cpu_src),
-	.clk_out(clk_cpu)
+	.clk_in     (clk_cpu_src),
+	.full_speed (cpu_full_speed),
+	.clk_out    (clk_cpu)
 );
 
 // Only the ROM download (index 0) holds the board in reset. The DIP transfer
@@ -611,8 +624,16 @@ wire       set_sxx2c   = mod_byte[0];
 // One decode, applied to two different copies of the mod byte -- see the
 // clk_ram pair below. Written as a function so the two can never drift apart.
 // Bit 0 is SXX2C, bits 3:1 are the cartridge variant.
-function automatic [2:0] set_id_of(input [7:0] mb);
-	if (!mb[0])            set_id_of = SET_RDFTS;
+function automatic [3:0] set_id_of(input [7:0] mb);
+	// Bit 0 is the BOARD -- SXX2C or a single board -- and bits 3:1 pick the set
+	// within it. rdft2us is SXX2F, which is SXX2E's board with a 93C46 where the
+	// DS2404 was, so it decodes on the bit-0-clear side.
+	if (!mb[0]) case (mb[3:1])
+		3'd1:              set_id_of = SET_RDFT2US;
+		3'd2:              set_id_of = SET_RFJETS;
+		3'd3:              set_id_of = SET_RFJETSA;
+		default:           set_id_of = SET_RDFTS;
+	endcase
 	else case (mb[3:1])
 		3'd1:              set_id_of = SET_RDFT2;
 		3'd2:              set_id_of = SET_RFJET;
@@ -623,7 +644,10 @@ function automatic [2:0] set_id_of(input [7:0] mb);
 	endcase
 endfunction
 
-wire [2:0] set_id = set_id_of(mod_byte);
+wire [3:0] set_id = set_id_of(mod_byte);
+
+// The clk_cpu gate's bypass, declared up in the CLOCKS section.
+assign cpu_full_speed = `IS_SXX2G(set_id);
 
 // Bit 4: the authentic-flash variant of whichever cartridge set bits 3:1 named
 // -- a blank flash plus the cartridge's own sound ROMs, with the game running
@@ -651,7 +675,7 @@ wire set_upd = mod_byte[0] & mod_byte[4];
 // set_sxx2c is NOT duplicated here: its consumers are spi_sound's mono/stereo
 // mux and hps_io's menumask, both clk_sys, and sourcing that one from clk_ram
 // is exactly what the note above records as closing at -2.906 with TNS -409.
-reg  [2:0] set_id_r  = SET_RDFTS;
+reg  [3:0] set_id_r  = SET_RDFTS;
 reg        set_upd_r = 1'b0;
 always @(posedge clk_ram) begin
 	set_id_r  <= set_id_of(mod_byte_r);
@@ -832,8 +856,17 @@ ddr_rom_reader ddr_rom_reader
 	.ddr_busy       (DDRAM_BUSY)
 );
 
+// The factory 93C46 image, written into the chip as the MRA's st93c46.bin part
+// streams past. It is not in SDRAM at all -- see M_EEDEF in rom_loader.sv.
+wire [6:0] ee_ld_addr;
+wire [7:0] ee_ld_din;
+wire       ee_ld_we;
+
 rom_loader rom_loader
 (
+	.ee_addr (ee_ld_addr),
+	.ee_din  (ee_ld_din),
+	.ee_we   (ee_ld_we),
 	.clk            (clk_ram),
 	.reset          (RESET | ~pll_locked),
 
@@ -1165,6 +1198,8 @@ spi_nvram nvram
 	// 512-byte tail. On SXX2E the samples are a real ROM and the file is the tail
 	// alone.
 	.has_flash  (mod_byte_r[0] & mod_byte_r[4]),
+	// A 93C46 set: bit 0 clear (a single board) with a set field that names one.
+	.small_nv   ((set_id_r == SET_RDFT2US) || `IS_SXX2G(set_id_r)),
 	// ...and the STORED stamp is the one to use. Only in Cart copy: Pre-built
 	// writes the real one from the program image a moment later, so restoring a
 	// copy could only be the same bytes or a stale set.
@@ -1302,6 +1337,9 @@ wire [15:0] audio_l, audio_r;
 
 spi_top spi_top
 (
+	.ee_ld_addr (ee_ld_addr),
+	.ee_ld_din  (ee_ld_din),
+	.ee_ld_we   (ee_ld_we),
 	.clk_sys      (clk_sys),
 	.clk_cpu      (clk_cpu),
 	.clk_ram      (clk_ram),

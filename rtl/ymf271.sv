@@ -50,6 +50,8 @@ module ymf271
 	ssbus_if.slave    ssbus_st,
 	ssbus_if.slave    ssbus_fb,
 	input             stereo,      // cartridge board: out 0 left, out 1 right
+	input             pcm_25mb,    // 2.5 MB sample region -- see ymf271_synth.sv
+	input             ymf_16384,   // SXX2G's 16.384 MHz crystal: 42666.67 Hz, not 44100
 
 	// ---- Z80 bus, 0x6000-0x600F ------------------------------------------
 	input       [3:0] addr,
@@ -92,40 +94,50 @@ module ymf271
 );
 
 	// ------------------------------------------------------------------
-	// 44100 Hz sample tick.
+	// The sample tick: 44100 Hz, or 42666.67 Hz on SXX2G.
 	//
-	// The chip runs from its own 16.9344 MHz crystal and divides by 384, so
-	// the rate is exactly 44100 and unrelated to clk_sys. A fractional
-	// accumulator reproduces it exactly on average rather than approximately.
-	// Timer A and B periods are whole multiples of 384 master clocks, so they
-	// count these ticks instead of needing a clock of their own.
-	// ------------------------------------------------------------------
-	localparam [26:0] CLK_HZ = 27'd57272727;
-	localparam [26:0] RATE   = 27'd44100;
+	// The chip runs from its own crystal and divides by 384, so the rate is
+	// unrelated to clk_sys and a fractional accumulator reproduces it exactly
+	// on average rather than approximately. Timer A and B periods are whole
+	// multiples of 384 master clocks, so they count these ticks instead of
+	// needing a clock of their own.
+	//
+	// Two crystals exist across the boards: 16.9344 MHz on SXX2C/E/F, which is
+	// 44100 exactly, and 16.384 MHz on SXX2G (seibuspi.cpp:1917, "16.384MHz(!)"),
+	// which is 128000/3 = 42666.666... Hz. BOTH numerator and denominator are
+	// scaled by three so the second one is exact too rather than rounded to
+	// 42667 -- the accumulator is 29 bits either way, and a rate that is right
+	// on average is the whole point of doing it this way.
+	localparam [28:0] CLK_HZ_X3  = 29'd171818181;   // 57272727 * 3
+	localparam [28:0] RATE_44100 = 29'd132300;      // 44100 * 3
+	localparam [28:0] RATE_42667 = 29'd128000;      // (128000/3) * 3
 
-	reg [26:0] tick_acc;
+	wire [28:0] CLK_HZ = CLK_HZ_X3;
+	wire [28:0] RATE   = ymf_16384 ? RATE_42667 : RATE_44100;
+
+	reg [28:0] tick_acc;
 	reg        sample_tick;
-	wire [27:0] tick_next = {1'b0, tick_acc} + {1'b0, RATE};
+	wire [29:0] tick_next = {1'b0, tick_acc} + {1'b0, RATE};
 
 	always @(posedge clk) begin
 		if (reset) begin
-			tick_acc    <= 27'd0;
+			tick_acc    <= 29'd0;
 			sample_tick <= 1'b0;
 		end
 		else if (pause) begin
 			sample_tick <= 1'b0;
 		end
 		else if (tick_next >= {1'b0, CLK_HZ}) begin
-			tick_acc    <= tick_next[26:0] - CLK_HZ;
+			tick_acc    <= tick_next[28:0] - CLK_HZ;
 			sample_tick <= 1'b1;
 		end
 		else begin
-			tick_acc    <= tick_next[26:0];
+			tick_acc    <= tick_next[28:0];
 			sample_tick <= 1'b0;
 		end
 		// The sample tick's phase is part of the state, and it is the one item
 		// of this section that is not driven by the register block below.
-		if (ss_rg_wr && (ss_rg_i == 32'd8)) tick_acc <= ss_rg_d[26:0];
+		if (ss_rg_wr && (ss_rg_i == 32'd8)) tick_acc <= ss_rg_d[28:0];
 	end
 
 	// ------------------------------------------------------------------
@@ -631,7 +643,7 @@ module ymf271
 			32'd5: ymf_ss_rd = {2'd0, irqstate, status, enable, timerB, timerA};
 			32'd6: ymf_ss_rd = {14'd0, timB_run, timA_run, end_status};
 			32'd7: ymf_ss_rd = {8'd0, timB_cnt, timA_cnt};
-			32'd8: ymf_ss_rd = {5'd0, tick_acc};
+			32'd8: ymf_ss_rd = {3'd0, tick_acc};
 			32'd9: ymf_ss_rd = {6'd0, ext_pend, ext_req, ext_rw, ext_addr};
 			32'd10: ymf_ss_rd = {24'd0, ext_latch};
 			default: begin
@@ -662,6 +674,7 @@ module ymf271
 		.ssbus_st    (ssbus_st),
 		.ssbus_fb    (ssbus_fb),
 		.stereo      (stereo),
+		.pcm_25mb    (pcm_25mb),
 		.grp_sync_flat (grp_sync_flat),
 		.par_we      (par_we),
 		.par_addr    (par_addr),

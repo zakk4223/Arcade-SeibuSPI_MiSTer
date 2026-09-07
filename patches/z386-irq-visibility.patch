@@ -1,0 +1,36 @@
+# Three read-only taps that say WHY an interrupt is or is not being taken, on
+# top of the vendored core as it already stands (see the other two patches for
+# the other local changes). No logic altered.
+#
+#   dbg_IF             EFLAGS[9]
+#   dbg_intr_pending   the latched INTR request
+#   dbg_intr_inhibit   the STI shadow
+#
+# Why they were needed. rfjets booted to a black screen with spi_cpu's own
+# irq_pending stuck at 1 -- an interrupt asserted and never acknowledged. From
+# outside, three completely different faults look exactly like that: the game
+# never ran STI, the request never reached the core, or the one-instruction STI
+# shadow is stuck on. `intr_pending && EFLAGS[9] && !inhibit_interrupts` is the
+# core's own `interrupt_deliverable` term for INTR (z386.sv:312), so exposing
+# those three separates them in one run.
+#
+# It immediately overturned the diagnosis it was added to confirm: interrupts
+# ARE enabled on rfjets, at the same point in boot as on the set that works.
+# What actually happens is a `popf` restoring IF=0 and the game then waiting on
+# a counter only the ISR writes.
+#
+# diff -u rtl/z386/z386.sv.orig rtl/z386/z386.sv
+--- rtl/z386/z386.sv.orig
++++ rtl/z386/z386.sv
+@@ -62,6 +62,15 @@
+     output     [31:0]  dbg_CS_base,
++    // -- SeibuSPI: why an interrupt is or is not being taken. Read-only taps;
++    //    no logic altered.
++    output             dbg_IF,
++    output             dbg_intr_pending,
++    output             dbg_intr_inhibit,
+@@ -169,3 +178,6 @@
+ assign dbg_EIP = EIP;
++assign dbg_IF           = EFLAGS[9];
++assign dbg_intr_pending = intr_pending;
++assign dbg_intr_inhibit = inhibit_interrupts;
