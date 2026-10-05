@@ -974,6 +974,25 @@ module spi_cpu
 	assign io_wr    = io_cyc_wr;
 	assign io_rd    = io_cyc_rd;
 
+	// Wait states on an I/O register READ. The SXX2C games bring the Z80 up
+	// with a software timeout: release it, then poll 0x684 for its first reply
+	// with `bt [684h],1 / jae / loop` and ECX = 1,000,000 (viprp1 0x2623CD).
+	// On expiry the game restarts and downloads the Z80 again. A 386 needs 32
+	// clocks for that loop at zero wait states (BT m,imm 6, JAE taken 7+m = 9,
+	// LOOP 11+m = 17), so on the board the budget is at least 1.28 s. z386
+	// takes 24, and MAME charges 24 too, which makes it 0.96 s at 25 MHz.
+	// viprp1's Z80 checksums its 128 KB of banks before it answers, 0.938 s in
+	// MAME, and the core's Z80 loses a little more to SDRAM line fills -- so
+	// with 2% to spare the race is easily lost, and the board sits black,
+	// re-downloading the Z80, until an attempt happens to win it.
+	//
+	// Two wait states make that loop 26 clocks: 1.04 s, still faster than any
+	// real 386 runs it, so nothing can see the board slower than the hardware.
+	// Writes are untouched. The strobe is issued at the END of the wait, so a
+	// read with a side effect (0x680 pops the FIFO) samples as it pops.
+	localparam [1:0] IO_RD_WAIT = 2'd2;
+	reg [1:0] io_ws;
+
 	// ------------------------------------------------------------------
 	// Transaction engine
 	// ------------------------------------------------------------------
@@ -1217,7 +1236,8 @@ module spi_cpu
 				else if (sel_io) begin
 					io_addr_r <= byte_addr[10:2];
 					io_be_r   <= cpu_be;
-					io_cyc_rd <= 1'b1;
+					io_cyc_rd <= (IO_RD_WAIT == 2'd0);
+					io_ws     <= IO_RD_WAIT;
 					state     <= S_IO_RD;
 				end
 				else if (sel_rom || sel_s01 || sel_pcm) begin
@@ -1242,8 +1262,12 @@ module spi_cpu
 				if (burst_left == 8'd1) state <= S_IDLE;
 			end
 
-			// I/O registers read combinationally.
-			S_IO_RD: begin
+			// I/O registers read combinationally, once the wait states are up.
+			S_IO_RD: if (io_ws != 2'd0) begin
+				io_ws     <= io_ws - 2'd1;
+				io_cyc_rd <= (io_ws == 2'd1);
+			end
+			else begin
 				mem_din        <= io_rdata;
 				mem_resp_valid <= 1'b1;
 				state          <= S_IDLE;

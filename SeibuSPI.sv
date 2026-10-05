@@ -1344,6 +1344,9 @@ spi_top spi_top
 	.clk_cpu      (clk_cpu),
 	.clk_ram      (clk_ram),
 	.reset        (reset),
+	// Power-on and PLL lock only, so sync runs through the ROM download and the
+	// OSD's loading bar shows on a CRT. See spi_top.
+	.raster_reset (RESET | ~pll_locked),
 	.rom_ready    (rom_ready & derive_done),
 
 	.set_sxx2c      (set_sxx2c),
