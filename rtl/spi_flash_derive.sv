@@ -340,9 +340,21 @@ module spi_flash_derive
 	// step was taken. Both of the 386's fetchers do this and so does
 	// build_soundflash's bank(), which is how the two sides agree without
 	// special-casing either.
-	wire [31:0] esi_next = (esi_step >= 32'h0040_0000 &&
-	                        esi_step[20:0] == 21'd0) ? esi_step + 32'h0020_0000
-	                                                 : esi_step;
+	//
+	// REGISTERED, in two stages -- the step, then the skip. In one cycle this
+	// was `j_mode -> 32-bit add -> compare -> 32-bit add -> esi's state mux`,
+	// which became clk_ram's worst path (-0.116 ns on j_mode -> esi[27]) as
+	// soon as placement moved elsewhere. It is safe for the same reason hit_r
+	// is: the only consumer takes it on sbyte_v, which comes through
+	// esi_settled -> cache_hit -> bvalid_r, so esi has held still for at least
+	// three cycles by then, and j_mode and gen are constant for the whole job.
+	reg  [31:0] esi_step_r, esi_next;
+	always @(posedge clk) begin
+		esi_step_r <= esi_step;
+		esi_next   <= (esi_step_r >= 32'h0040_0000 &&
+		               esi_step_r[20:0] == 21'd0) ? esi_step_r + 32'h0020_0000
+		                                          : esi_step_r;
+	end
 
 	// This job's disposition, computed rather than latched so `dec_codec` is
 	// stable in the cycle `dec_start` samples it.

@@ -19,6 +19,12 @@ module spi_top
 	input             clk_cpu,
 	input             clk_ram,     // 114.545455 MHz - SDRAM
 	input             reset,
+	// The raster's own reset: power-on and PLL lock only. NOT the board reset,
+	// which is held for the whole ROM download -- a raster stopped for that
+	// long leaves an analog display with no sync, so the MiSTer OSD and its
+	// loading bar cannot be seen on a CRT. The mixer still outputs black while
+	// the board is in reset.
+	input             raster_reset,
 	input             rom_ready,
 
 	// SXX2C cartridge board. Selected by the MRA's mod byte; see rom_loader.sv.
@@ -192,10 +198,13 @@ module spi_top
 	wire sys_reset;
 	spi_reset_sync rst_sys (.clk(clk_sys), .rst_in(reset), .rst_out(sys_reset));
 
+	wire ras_reset;
+	spi_reset_sync rst_ras (.clk(clk_sys), .rst_in(raster_reset), .rst_out(ras_reset));
+
 	spi_video_timing timing
 	(
 		.clk        (clk_sys),
-		.reset      (sys_reset),
+		.reset      (ras_reset),
 		.pause      (ss_pause),
 		.vbl_next   (vbl_next),
 		.video_mode (video_mode),

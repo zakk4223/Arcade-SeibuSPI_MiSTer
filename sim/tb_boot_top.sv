@@ -275,6 +275,7 @@ module tb_boot_top
 		.clk_cpu      (clk_cpu),
 		.clk_ram      (clk_ram),
 		.reset        (reset),
+		.raster_reset (reset),
 		.rom_ready    (rom_ready),
 		.set_sxx2c    (set_sxx2c),
 		.set_id       (set_id),
